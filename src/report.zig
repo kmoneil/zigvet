@@ -1,6 +1,7 @@
 //! What zigvet reports, and the one format it prints it in:
 //! `path:line:col: <rule>: <message>`, then the fix hint on its own line.
-//! Parse errors use the same location prefix with `error` in the rule's place.
+//! An allow comment that suppresses nothing has `allow` in the rule's place,
+//! and a parse error `error`.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -26,14 +27,15 @@ pub const Sink = enum {
 };
 
 pub const Finding = struct {
-    /// The token the report points at.
-    token: Ast.TokenIndex,
+    /// The byte in the source the report points at.
+    offset: usize,
     /// One line on how to fix it.
     hint: []const u8,
     detail: Detail,
 
-    pub const Detail = union(Rule) {
+    pub const Detail = union(enum) {
         escape: Escape,
+        allow: Allow,
     };
 
     pub const Escape = struct {
@@ -44,12 +46,47 @@ pub const Finding = struct {
         sink: Sink,
     };
 
-    pub fn rule(finding: Finding) Rule {
-        return finding.detail;
+    /// An allow comment that suppresses nothing, and why.
+    pub const Allow = union(enum) {
+        /// Well formed, but nothing on the line below breaks the rule.
+        stale: Rule,
+        unknown_rule: []const u8,
+        no_rule,
+        no_reason,
+        /// At the end of a line of code, where it applies to nothing.
+        trailing,
+    };
+
+    /// The rule an allow comment would name to suppress it. None for a
+    /// report about an allow comment, which nothing can suppress.
+    pub fn rule(finding: Finding) ?Rule {
+        return switch (finding.detail) {
+            .escape => .escape,
+            .allow => null,
+        };
     }
 };
 
-/// `loc` is `finding.token`'s location, from `Ast.tokenLocation`.
+/// Where byte `offset` of `source` is, counted as `Ast.tokenLocation`
+/// counts: lines and columns from 0, a column a byte.
+pub fn location(source: []const u8, offset: usize) Ast.Location {
+    const line_start = if (std.mem.findScalarLast(u8, source[0..offset], '\n')) |i| i + 1 else 0;
+    return .{
+        .line = std.mem.count(u8, source[0..line_start], "\n"),
+        .column = offset - line_start,
+        .line_start = line_start,
+        .line_end = std.mem.findScalarPos(u8, source, offset, '\n') orelse source.len,
+    };
+}
+
+/// Every rule's name, for a message that lists them.
+const rule_names = names: {
+    var names: []const u8 = "";
+    for (std.enums.values(Rule)) |r| names = names ++ (if (names.len > 0) ", " else "") ++ @tagName(r);
+    break :names names;
+};
+
+/// `loc` is where `finding.offset` is, from `location`.
 pub fn write(w: *Writer, path: []const u8, loc: Ast.Location, finding: Finding) Writer.Error!void {
     try w.print("{s}:{d}:{d}: {t}: ", .{ path, loc.line + 1, loc.column + 1, finding.detail });
     try writeMessage(w, finding);
@@ -62,6 +99,13 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .escape => |e| try w.print("{s} made here leaves {s} through {s}", .{
             e.what, e.function, e.sink.text(),
         }),
+        .allow => |a| switch (a) {
+            .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
+            .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
+            .no_rule => try w.writeAll("names no rule, so it suppresses nothing"),
+            .no_reason => try w.writeAll("gives no reason, so it suppresses nothing"),
+            .trailing => try w.writeAll("applies to the line below it, not its own line"),
+        },
     }
 }
 
@@ -82,7 +126,7 @@ test "write: escape finding" {
     var out: Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try write(&out.writer, "src/a.zig", tree.tokenLocation(0, amp), .{
-        .token = amp,
+        .offset = tree.tokenStart(amp),
         .hint = "make the element comptime or move the array to a container-level const",
         .detail = .{ .escape = .{ .what = "anonymous array", .function = "f", .sink = .@"return" } },
     });
@@ -91,6 +135,16 @@ test "write: escape finding" {
         \\    hint: make the element comptime or move the array to a container-level const
         \\
     , out.written());
+}
+
+test "location: counted as Ast.tokenLocation counts" {
+    const source = "fn f() []const u8 {\n\treturn &.{g()};\n}\n";
+    var tree = try Ast.parse(std.testing.allocator, source, .{});
+    defer tree.deinit(std.testing.allocator);
+    for (0..tree.tokens.len) |i| {
+        const token: Ast.TokenIndex = @intCast(i);
+        try std.testing.expectEqual(tree.tokenLocation(0, token), location(source, tree.tokenStart(token)));
+    }
 }
 
 test "Sink.text: out param reads as two words" {

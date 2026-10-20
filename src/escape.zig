@@ -137,7 +137,7 @@ const Rule = struct {
                 const gop = try r.reported.getOrPut(r.arena, .{ source.token, site.sink });
                 if (gop.found_existing) continue;
                 try r.findings.append(r.arena, .{
-                    .token = source.token,
+                    .offset = tree.tokenStart(source.token),
                     .hint = source.hint,
                     .detail = .{ .escape = .{ .what = source.what, .function = r.function_name, .sink = site.sink } },
                 });
@@ -1015,13 +1015,13 @@ fn expectEscapes(source: [:0]const u8, expected: []const u8) !void {
     try check(arena_state.allocator(), &tree, &findings);
     std.mem.sort(Finding, findings.items, {}, struct {
         fn before(_: void, a: Finding, b: Finding) bool {
-            return a.token < b.token;
+            return a.offset < b.offset;
         }
     }.before);
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     for (findings.items) |finding| {
-        const loc = tree.tokenLocation(0, finding.token);
+        const loc = report.location(tree.source, finding.offset);
         const e = finding.detail.escape;
         try out.writer.print("{d}:{d} {s} -> {s} through {s}\n", .{ loc.line + 1, loc.column + 1, e.what, e.function, e.sink.text() });
     }
@@ -1208,7 +1208,7 @@ test "the storage hint names the comptime fix in a function with a comptime para
     try check(arena_state.allocator(), &tree, &findings);
     std.mem.sort(Finding, findings.items, {}, struct {
         fn before(_: void, a: Finding, b: Finding) bool {
-            return a.token < b.token;
+            return a.offset < b.offset;
         }
     }.before);
     const expected = [_][]const u8{ hint_storage_comptime, hint_storage_comptime, hint_storage, hint_literal };

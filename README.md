@@ -150,7 +150,9 @@ path:line:col: escape: <what> made here leaves <function> through <return | fiel
     hint: <one line on how to fix it>
 ```
 
-Findings go to stdout, in path order and then source order.
+Findings go to stdout, in path order and then source order. An allow
+comment that suppresses nothing (below) is reported the same way, with
+`allow` in the rule's place.
 
 ## Allowing a report
 
@@ -163,6 +165,13 @@ return &.{Scope.monitoring.url()};
 ```
 
 The reason is required; an allow comment without one suppresses nothing.
+
+Every allow comment has to suppress something. One that does not is
+reported itself, with why: nothing on the line below breaks its rule any
+more, it names no rule zigvet has, it gives no reason, or it sits at the end
+of the line it means instead of above it. It counts toward the exit status
+like a finding, so an allow cannot outlive the code it excused and then
+excuse whatever is written there next.
 
 ## Use it in a build
 
