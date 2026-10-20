@@ -13,14 +13,14 @@ const Finding = report.Finding;
 
 pub const Error = Allocator.Error || Writer.Error;
 
-/// Writes `source`'s parse errors or, if it parses, its findings to `w`,
+/// Writes `source`'s parse errors or, if it parses, its findings to `out`,
 /// naming the file `path`. Returns how many it wrote.
-pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, w: *Writer) Error!usize {
+pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, out: *report.Out) Error!usize {
     var tree = try Ast.parse(gpa, source, .{});
     defer tree.deinit(gpa);
 
     if (tree.errors.len > 0) {
-        for (tree.errors) |parse_error| try report.writeParseError(w, path, tree, parse_error);
+        for (tree.errors) |parse_error| try out.parseError(path, tree, parse_error);
         return tree.errors.len;
     }
 
@@ -30,8 +30,15 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, w: *Wri
     defer arena_state.deinit();
 
     const kept = try findings(arena_state.allocator(), &tree);
-    for (kept) |finding| try report.write(w, path, report.location(source, finding.offset), finding);
+    for (kept) |finding| try out.finding(path, report.location(source, finding.offset), finding);
     return kept.len;
+}
+
+/// `vetSource` in the text format, for tests.
+fn vetText(path: []const u8, source: [:0]const u8, w: *Writer) Error!usize {
+    var out: report.Out = .init(std.testing.allocator, w, .text);
+    defer out.deinit();
+    return vetSource(std.testing.allocator, path, source, &out);
 }
 
 /// Runs every rule over `tree` and returns the findings no allow comment
@@ -77,7 +84,7 @@ test "a file that fails to parse reports the parse error with its path" {
     // Same location and message as `zig ast-check` on this source.
     var out: Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    const count = try vetSource(std.testing.allocator, "src/bad.zig", "const a = 1;\nfn f( {}\n", &out.writer);
+    const count = try vetText("src/bad.zig", "const a = 1;\nfn f( {}\n", &out.writer);
     try std.testing.expectEqual(1, count);
     try std.testing.expectEqualStrings(
         "src/bad.zig:2:7: error: expected type expression, found '{'\n",
@@ -88,7 +95,7 @@ test "a file that fails to parse reports the parse error with its path" {
 test "a file that parses and breaks no rule reports nothing" {
     var out: Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    const count = try vetSource(std.testing.allocator, "src/ok.zig", "fn f() void {}\n", &out.writer);
+    const count = try vetText("src/ok.zig", "fn f() void {}\n", &out.writer);
     try std.testing.expectEqual(0, count);
     try std.testing.expectEqualStrings("", out.written());
 }
@@ -107,7 +114,7 @@ test "the rules run on a file and an allow comment drops one report" {
     ;
     var out: Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try std.testing.expectEqual(1, try vetSource(gpa, "a.zig", source, &out.writer));
+    try std.testing.expectEqual(1, try vetText("a.zig", source, &out.writer));
     try std.testing.expectEqualStrings(
         \\a.zig:6:12: escape: anonymous array made here leaves f through return
         \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const
@@ -141,7 +148,7 @@ test "an allow comment that suppresses nothing is reported, with why" {
     ;
     var out: Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try std.testing.expectEqual(7, try vetSource(gpa, "a.zig", source, &out.writer));
+    try std.testing.expectEqual(7, try vetText("a.zig", source, &out.writer));
     try std.testing.expectEqualStrings(
         \\a.zig:2:5: allow: suppresses nothing: no escape finding on the line below it
         \\    hint: delete it, or move it directly above the line it excuses

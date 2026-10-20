@@ -125,7 +125,7 @@ leaves the binary in `zig-out/bin/`.
 ## Usage
 
 ```
-zigvet [--exclude <path>]... <path>...
+zigvet [--exclude <path>]... [--format <text|github|json>] <path>...
 zigvet --version
 ```
 
@@ -155,6 +155,28 @@ path:line:col: escape: <what> made here leaves <function> through <return | fiel
 Findings go to stdout, in path order and then source order. An allow
 comment that suppresses nothing (below) is reported the same way, with
 `allow` in the rule's place.
+
+For CI, `--format github` writes each report as a GitHub Actions workflow
+command instead, so it lands on the pull request's diff:
+
+```
+::error file=src/kms/fake_kms.zig,line=1297,col=54,title=zigvet escape::result of a call made here leaves rawOf through return. hint: return the value itself, have the caller pass in the memory, or allocate it
+```
+
+and `--format json` writes one JSON array, an object per report, for other
+tools:
+
+```json
+[
+{"path":"src/a.zig","line":2,"column":12,"rule":"escape","message":"anonymous array made here leaves f through return","hint":"make it comptime-known (`comptime` on the runtime elements) or a container-level const"}
+]
+```
+
+`rule` is the rule's name, `allow` for an allow comment that suppresses
+nothing, or `error` for a parse error, which has no hint (`null`). The
+reports, their order and the exit status are the same in every format;
+a message about the run itself, such as a path that could not be read,
+goes to stderr as text.
 
 ## Allowing a report
 

@@ -7,11 +7,12 @@ const Io = std.Io;
 
 const build_options = @import("build_options");
 const test_options = @import("test_options");
+const report = @import("report.zig");
 const vet = @import("vet.zig");
 const walk = @import("walk.zig");
 
 const usage =
-    \\Usage: zigvet [--exclude <path>]... <path>...
+    \\Usage: zigvet [--exclude <path>]... [--format <format>] <path>...
     \\       zigvet --version
     \\
     \\Checks each file named, and every .zig file under each directory named,
@@ -21,6 +22,8 @@ const usage =
     \\  --exclude <path>  Skip this file or directory, named as zigvet prints
     \\                    paths: relative to the current directory. May be
     \\                    given more than once.
+    \\  --format <format> How to write reports: text (the default), github
+    \\                    (GitHub Actions annotations) or json.
     \\
     \\Exit status: 0 if nothing was reported, 1 if a finding or parse error
     \\was, 2 on a usage error or a path that could not be read or holds no
@@ -83,6 +86,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     walk.sortUnique(&files);
 
+    var reports: report.Out = .init(gpa, out, run.format);
+    defer reports.deinit();
+    try reports.begin();
     var reported: usize = 0;
     for (files.items) |path| {
         const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
@@ -94,8 +100,9 @@ pub fn main(init: std.process.Init) !u8 {
             },
         };
         defer gpa.free(source);
-        reported += try vet.vetSource(gpa, path, source, out);
+        reported += try vet.vetSource(gpa, path, source, &reports);
     }
+    try reports.end();
     try out.flush();
 
     if (unreadable) return 2;
@@ -108,6 +115,7 @@ const Command = union(enum) {
         paths: []const []const u8,
         /// Cleaned, as `walk.collect` cleans the paths it lists.
         excludes: []const []const u8,
+        format: report.Format,
     },
     help,
     version,
@@ -120,24 +128,36 @@ const Command = union(enum) {
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
     var paths: std.ArrayList([]const u8) = .empty;
     var excludes: std.ArrayList([]const u8) = .empty;
+    var format: report.Format = .text;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return .help;
         if (std.mem.eql(u8, arg, "--version")) return .version;
-        const exclude = if (std.mem.eql(u8, arg, "--exclude")) exclude: {
-            i += 1;
-            break :exclude if (i < args.len) args[i] else "";
-        } else std.mem.cutPrefix(u8, arg, "--exclude=");
-        if (exclude) |path| {
+        if (optionValue(args, &i, "--exclude")) |path| {
             if (path.len == 0) return .{ .usage_error = "--exclude needs a path" };
             try excludes.append(arena, try std.fs.path.resolveAlloc(arena, &.{path}));
+        } else if (optionValue(args, &i, "--format")) |name| {
+            format = std.meta.stringToEnum(report.Format, name) orelse
+                return .{ .usage_error = try arena.print("--format takes text, github or json, not '{s}'", .{name}) };
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .usage_error = try arena.print("unknown option '{s}'", .{arg}) };
         } else try paths.append(arena, arg);
     }
     if (paths.items.len == 0) return .{ .usage_error = "" };
-    return .{ .run = .{ .paths = paths.items, .excludes = excludes.items } };
+    return .{ .run = .{ .paths = paths.items, .excludes = excludes.items, .format = format } };
+}
+
+/// The value of option `name` if `args[i.*]` is it, given as `name value`
+/// or `name=value`; "" when the value is missing. Moves `i` past a value
+/// given on its own.
+fn optionValue(args: []const []const u8, i: *usize, name: []const u8) ?[]const u8 {
+    const arg = args[i.*];
+    if (std.mem.eql(u8, arg, name)) {
+        i.* += 1;
+        return if (i.* < args.len) args[i.*] else "";
+    }
+    return std.mem.cutPrefix(u8, std.mem.cutPrefix(u8, arg, name) orelse return null, "=");
 }
 
 test "a named path that yields no file to check is an error, not a clean run" {
@@ -183,6 +203,19 @@ test "parseArgs: paths and excludes, in any order" {
     try std.testing.expectEqual(2, run.excludes.len);
     try std.testing.expectEqualStrings("_tmp", run.excludes[0]);
     try std.testing.expectEqualStrings(try std.fs.path.resolveAlloc(arena, &.{"src/vendor"}), run.excludes[1]);
+    try std.testing.expectEqual(.text, run.format);
+}
+
+test "parseArgs: --format" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqual(.github, (try parseArgs(arena, &.{ "--format", "github", "src" })).run.format);
+    try std.testing.expectEqual(.json, (try parseArgs(arena, &.{ "src", "--format=json" })).run.format);
+    try std.testing.expectEqualStrings("--format takes text, github or json, not 'xml'", (try parseArgs(arena, &.{ "--format", "xml", "src" })).usage_error);
+    try std.testing.expectEqualStrings("--format takes text, github or json, not ''", (try parseArgs(arena, &.{ "src", "--format" })).usage_error);
+    try std.testing.expectEqualStrings("unknown option '--formats'", (try parseArgs(arena, &.{ "--formats", "src" })).usage_error);
 }
 
 test "parseArgs: help, version and usage errors" {
