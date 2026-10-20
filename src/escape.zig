@@ -6,8 +6,10 @@
 //! capture it names, and collecting the sinks: `return`, a store through a
 //! parameter, and a store to a container-level variable. The second follows
 //! each sink's value back through `if`, `switch`, `orelse`, `catch`, labeled
-//! blocks and locals, and reports a value that is the address or a slice of
-//! stack memory whose contents are not comptime-known.
+//! blocks, locals and the `std` calls that return a view of an argument
+//! (`std.fmt.bufPrint`, `std.mem.sliceTo`, ...), and reports a value that is
+//! the address or a slice of stack memory whose contents are not
+//! comptime-known.
 //!
 //! Comptime-known memory is static, so `&.{"literal"}` is fine and
 //! `&.{f()}` is not: a call is evaluated at run time unless it is under
@@ -474,17 +476,18 @@ const Rule = struct {
                 if (!std.mem.eql(u8, tree.tokenSlice(field), "ptr")) return null;
                 return r.stackSource(lhs, depth);
             },
-            // A local holding one: `const x = &.{f()}; return x;`.
+            // A local holding one: `const x = &.{f()}; return x;`, or
+            // `const s = try std.fmt.bufPrint(&buf, ...); return s;`.
             .identifier => {
                 const index = r.resolved.get(node) orelse return null;
                 const binding = r.bindings.items[index];
                 if (binding.kind != .local or binding.is_comptime) return null;
                 if (binding.init.unwrap()) |init| {
-                    if (try r.stackSource(init, depth + 1)) |source| return source;
+                    if (try r.leafSource(init, depth + 1)) |source| return source;
                 }
                 for (r.stores.items) |store| {
                     if (store.binding != index) continue;
-                    if (try r.stackSource(store.value, depth + 1)) |source| return source;
+                    if (try r.leafSource(store.value, depth + 1)) |source| return source;
                 }
                 return null;
             },
@@ -492,8 +495,54 @@ const Rule = struct {
                 const operand = pointerPreservingOperand(tree, node) orelse return null;
                 return r.stackSource(operand, depth);
             },
+            .call_one, .call_one_comma, .call, .call_comma => {
+                const argument = r.viewedArgument(node) orelse return null;
+                return r.stackSource(argument, depth);
+            },
             else => null,
         };
+    }
+
+    /// The argument a call's result points into, when the callee is one of
+    /// `std_view_fns`: named through its namespace (`std.fmt.bufPrint`,
+    /// `fmt.bufPrint`), or alone (`bufPrint`) in a file that declares no
+    /// function of that name.
+    fn viewedArgument(r: *Rule, node: Node.Index) ?Node.Index {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node).?;
+        const callee = call.ast.fn_expr;
+        const view = switch (tree.nodeTag(callee)) {
+            .identifier => view: {
+                const name = tree.tokenSlice(tree.nodeMainToken(callee));
+                // Every function the file declares is a key.
+                if (r.comptime_result_fns.contains(name)) return null;
+                break :view std_view_fns.get(name) orelse return null;
+            },
+            .field_access => view: {
+                const receiver, const field = tree.nodeData(callee).node_and_token;
+                const view = std_view_fns.get(tree.tokenSlice(field)) orelse return null;
+                const namespace = switch (tree.nodeTag(receiver)) {
+                    .identifier => tree.tokenSlice(tree.nodeMainToken(receiver)),
+                    .field_access => tree.tokenSlice(tree.nodeData(receiver).node_and_token[1]),
+                    else => return null,
+                };
+                if (!std.mem.eql(u8, namespace, view.namespace)) return null;
+                break :view view;
+            },
+            else => return null,
+        };
+        if (view.argument >= call.ast.params.len) return null;
+        return call.ast.params[view.argument];
+    }
+
+    /// The first stack source among the expressions `node` can evaluate to,
+    /// as `leaves` finds them.
+    fn leafSource(r: *Rule, node: Node.Index, depth: u8) Allocator.Error!?Source {
+        var values: std.ArrayList(Node.Index) = .empty;
+        try r.leaves(node, &values);
+        for (values.items) |value| if (try r.stackSource(value, depth)) |source| return source;
+        return null;
     }
 
     /// `&operand`, with `amp` the `&` token.
@@ -757,6 +806,26 @@ const Rule = struct {
 const std_comptime_result_fns: std.StaticStringMap(void) = .initComptime(.{
     .{"comptimePrint"}, .{"maxInt"}, .{"minInt"},
 });
+
+/// `std` functions whose result points into one of their arguments: the
+/// namespace they are called through, and which argument.
+const std_view_fns: std.StaticStringMap(ViewFn) = .initComptime(.{
+    .{ "bufPrint", ViewFn{ .namespace = "fmt", .argument = 0 } },
+    .{ "bufPrintSentinel", ViewFn{ .namespace = "fmt", .argument = 0 } },
+    .{ "sliceTo", ViewFn{ .namespace = "mem", .argument = 0 } },
+    .{ "span", ViewFn{ .namespace = "mem", .argument = 0 } },
+    .{ "trim", ViewFn{ .namespace = "mem", .argument = 1 } },
+    .{ "trimStart", ViewFn{ .namespace = "mem", .argument = 1 } },
+    .{ "trimEnd", ViewFn{ .namespace = "mem", .argument = 1 } },
+    .{ "cutPrefix", ViewFn{ .namespace = "mem", .argument = 1 } },
+    .{ "cutSuffix", ViewFn{ .namespace = "mem", .argument = 1 } },
+    .{ "asBytes", ViewFn{ .namespace = "mem", .argument = 0 } },
+    .{ "sliceAsBytes", ViewFn{ .namespace = "mem", .argument = 0 } },
+    .{ "bytesAsSlice", ViewFn{ .namespace = "mem", .argument = 1 } },
+    .{ "bytesAsValue", ViewFn{ .namespace = "mem", .argument = 1 } },
+});
+
+const ViewFn = struct { namespace: []const u8, argument: usize };
 
 /// An `inline fn`, whose result is comptime-known when its arguments are
 /// and its body allows, or one returning a type only comptime has.
@@ -1145,6 +1214,31 @@ test "the storage hint names the comptime fix in a function with a comptime para
     const expected = [_][]const u8{ hint_storage_comptime, hint_storage_comptime, hint_storage, hint_literal };
     try std.testing.expectEqual(expected.len, findings.items.len);
     for (expected, findings.items) |hint, finding| try std.testing.expectEqualStrings(hint, finding.hint);
+}
+
+test "through a std call that returns a view of an argument" {
+    try expectEscapes(
+        \\const std = @import("std");
+        \\const fmt = std.fmt;
+        \\fn label(id: u32) []const u8 { var buf: [32]u8 = undefined; return std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable; }
+        \\fn aliased(id: u32) ![]const u8 { var buf: [32]u8 = undefined; return try fmt.bufPrint(&buf, "{d}", .{id}); }
+        \\fn viaLocal(id: u32) []const u8 { var buf: [32]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable; return s; }
+        \\fn stored(h: *H, id: u32) void { var buf: [32]u8 = undefined; h.s = std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable; }
+        \\fn method(t: Text, n: u8) []const u8 { var buf: [4]u8 = .{ n, n, n, n }; return t.trim(u8, &buf, " "); }
+        \\fn ofParameter(s: []const u8) []const u8 { return std.mem.trim(u8, s, " "); }
+    ,
+        \\3:85 address of local 'buf' -> label through return
+        \\4:88 address of local 'buf' -> aliased through return
+        \\5:91 address of local 'buf' -> viaLocal through return
+        \\
+    );
+}
+
+test "a file's own function is not taken for the std one of the same name" {
+    try expectEscapes(
+        \\fn sliceTo(a: *const [4]u8, end: u8) []const u8 { _ = a; _ = end; return "fixed"; }
+        \\fn own(n: u8) []const u8 { var buf: [4]u8 = .{ n, n, n, n }; return sliceTo(&buf, 0); }
+    , "");
 }
 
 test "comptime contexts and nested declarations" {

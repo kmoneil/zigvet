@@ -56,7 +56,9 @@ Made on the stack, and not comptime-known:
 Leaving the function:
 
 - returned, directly or through `if`, `switch`, `orelse`, `catch`, `try`, a
-  labeled block, a cast, a struct returned by value, or a local that holds it;
+  labeled block, a cast, a struct returned by value, a local that holds it,
+  or a `std` call that returns part of its argument
+  (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`);
 - stored through a parameter (`self.items = ...`, `out.* = ...`) or to a
   container-level variable. Stores report temporaries only: a named local
   stored outward is usually deliberate (a context pointer for the length of
@@ -67,8 +69,12 @@ Comptime-known memory is static and never reported: literals, `comptime`
 expressions, container-level declarations, `comptime` parameters, and calls
 to an `inline fn` (or one returning a comptime-only type) with comptime-known
 arguments. The check reads one function at a time and the syntax alone, so
-it knows a callee only by name: the file's own functions, and
-`std.fmt.comptimePrint`, `std.math.maxInt` and `minInt`. A function whose
+it knows a callee only by name: the file's own functions,
+`std.fmt.comptimePrint`, `std.math.maxInt` and `minInt`, and as returning
+part of an argument, `std.fmt`'s `bufPrint` and `bufPrintSentinel` and
+`std.mem`'s `sliceTo`, `span`, `trim`, `trimStart`, `trimEnd`, `cutPrefix`,
+`cutSuffix`, `asBytes`, `sliceAsBytes`, `bytesAsSlice` and `bytesAsValue`.
+A function whose
 return type only comptime has (`type`, `comptime_int`, `comptime_float`, or
 a pointer, slice, array, optional or error union of one, such as
 `[]const type`) runs only at compile time, and is not checked.
