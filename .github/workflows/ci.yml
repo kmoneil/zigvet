@@ -18,7 +18,7 @@ jobs:
         with:
           version: 0.17.0
       - name: Check formatting
-        run: zig fmt --check build.zig build.zig.zon src
+        run: zig fmt --check build.zig build.zig.zon src test
       - name: Run tests
         run: zig build test --summary all
       - name: Run zigvet over its own source

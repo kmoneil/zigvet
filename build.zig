@@ -26,6 +26,20 @@ pub fn build(b: *std.Build) void {
     lint.addArgs(&.{"src"});
     b.step("lint", "Run zigvet over src/").dependOn(&lint.step);
 
-    const tests = b.addTest(.{ .root_module = exe.root_module });
-    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+    // The tests include the case corpus under test/cases/, which runs the
+    // compiler over each case and reads the cases at run time: it needs the
+    // compiler's path, the repository root as its working directory, and to
+    // run every time rather than be cached on the test binary alone.
+    const test_options = b.addOptions();
+    test_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_module.addOptions("build_options", test_options);
+    const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
+    run_tests.setCwd(b.path("."));
+    run_tests.has_side_effects = true;
+    b.step("test", "Run unit tests and the case corpus").dependOn(&run_tests.step);
 }

@@ -28,25 +28,32 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, w: *Wri
     // written out.
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    const arena = arena_state.allocator();
 
-    var findings: std.ArrayList(Finding) = .empty;
-    try escape.check(arena, &tree, &findings);
-    return writeFindings(w, path, tree, findings.items);
+    const kept = try findings(arena_state.allocator(), &tree);
+    for (kept) |finding| try report.write(w, path, tree.tokenLocation(0, finding.token), finding);
+    return kept.len;
 }
 
-/// Writes the findings no allow comment covers, in source order. Returns
-/// how many it wrote.
-fn writeFindings(w: *Writer, path: []const u8, tree: Ast, findings: []Finding) Writer.Error!usize {
-    std.mem.sort(Finding, findings, {}, before);
-    var written: usize = 0;
-    for (findings) |finding| {
+/// Runs every rule over `tree` and returns the findings no allow comment
+/// covers, in source order. Allocated with `arena`.
+pub fn findings(arena: Allocator, tree: *const Ast) Allocator.Error![]Finding {
+    var all: std.ArrayList(Finding) = .empty;
+    try escape.check(arena, tree, &all);
+    return keep(tree.*, all.items);
+}
+
+/// Sorts `all` into source order and drops the findings an allow comment
+/// covers, in place. Returns the ones kept.
+fn keep(tree: Ast, all: []Finding) []Finding {
+    std.mem.sort(Finding, all, {}, before);
+    var kept: usize = 0;
+    for (all) |finding| {
         const loc = tree.tokenLocation(0, finding.token);
         if (allow.allows(tree.source, loc.line_start, finding.rule())) continue;
-        try report.write(w, path, loc, finding);
-        written += 1;
+        all[kept] = finding;
+        kept += 1;
     }
-    return written;
+    return all[0..kept];
 }
 
 fn before(_: void, a: Finding, b: Finding) bool {
@@ -73,7 +80,7 @@ test "a file that parses and breaks no rule reports nothing" {
     try std.testing.expectEqualStrings("", out.written());
 }
 
-test "findings are written in source order and an allow comment drops one" {
+test "the rules run on a file and an allow comment drops one report" {
     const gpa = std.testing.allocator;
     const source =
         \\fn f(n: u8) []const u8 {
@@ -85,23 +92,30 @@ test "findings are written in source order and an allow comment drops one" {
         \\}
         \\
     ;
-    var tree = try Ast.parse(gpa, source, .{});
+    var out: Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectEqual(1, try vetSource(gpa, "a.zig", source, &out.writer));
+    try std.testing.expectEqualStrings(
+        \\a.zig:6:12: escape: anonymous array made here leaves f through return
+        \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const
+        \\
+    , out.written());
+}
+
+test "keep puts findings in source order" {
+    const gpa = std.testing.allocator;
+    var tree = try Ast.parse(gpa, "fn f(n: u8) void { _ = &.{n}; _ = &.{n}; }\n", .{});
     defer tree.deinit(gpa);
     const tags = tree.tokens.items(.tag);
     const first: Ast.TokenIndex = @intCast(std.mem.findScalar(std.zig.Token.Tag, tags, .ampersand).?);
     const second: Ast.TokenIndex = @intCast(std.mem.findScalarPos(std.zig.Token.Tag, tags, first + 1, .ampersand).?);
     const detail: Finding.Detail = .{ .escape = .{ .what = "anonymous array", .function = "f", .sink = .@"return" } };
-    var findings = [_]Finding{
-        .{ .token = second, .hint = "fix it", .detail = detail },
-        .{ .token = first, .hint = "fix it", .detail = detail },
+    var all = [_]Finding{
+        .{ .token = second, .hint = "", .detail = detail },
+        .{ .token = first, .hint = "", .detail = detail },
     };
-
-    var out: Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    try std.testing.expectEqual(1, try writeFindings(&out.writer, "a.zig", tree, &findings));
-    try std.testing.expectEqualStrings(
-        \\a.zig:6:12: escape: anonymous array made here leaves f through return
-        \\    hint: fix it
-        \\
-    , out.written());
+    const kept = keep(tree, &all);
+    try std.testing.expectEqual(2, kept.len);
+    try std.testing.expectEqual(first, kept[0].token);
+    try std.testing.expectEqual(second, kept[1].token);
 }

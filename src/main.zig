@@ -83,6 +83,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 test {
     _ = @import("allow.zig");
+    _ = @import("cases.zig");
     _ = @import("children.zig");
     _ = @import("escape.zig");
     _ = @import("report.zig");

@@ -52,12 +52,17 @@ pub const Finding = struct {
 /// `loc` is `finding.token`'s location, from `Ast.tokenLocation`.
 pub fn write(w: *Writer, path: []const u8, loc: Ast.Location, finding: Finding) Writer.Error!void {
     try w.print("{s}:{d}:{d}: {t}: ", .{ path, loc.line + 1, loc.column + 1, finding.detail });
+    try writeMessage(w, finding);
+    try w.print("\n    hint: {s}\n", .{finding.hint});
+}
+
+/// The message alone: no location, rule name or hint.
+pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
     switch (finding.detail) {
-        .escape => |e| try w.print("{s} made here leaves {s} through {s}\n", .{
+        .escape => |e| try w.print("{s} made here leaves {s} through {s}", .{
             e.what, e.function, e.sink.text(),
         }),
     }
-    try w.print("    hint: {s}\n", .{finding.hint});
 }
 
 pub fn writeParseError(w: *Writer, path: []const u8, tree: Ast, parse_error: Ast.Error) Writer.Error!void {

@@ -137,3 +137,13 @@ The admission test: the code compiles clean in every build mode and is still
 wrong. If the compiler, `zig fmt` or an existing linter already catches it, it
 is not a zigvet rule. Each rule is one lowercase word for what it catches;
 `escape` is the first.
+
+## Tests
+
+`zig build test` runs the unit tests and the case corpus in `test/cases/`.
+The cases use the form of the Zig compiler's own `test/cases/`: source,
+then `// error` and the expected `// :line:col: error: ...` lines, or
+`// compile` for code that must not be reported. The run also compiles
+every case with the Zig compiler and fails if it rejects one, so each case
+is checked to be code Zig accepts. If a later Zig release starts catching a
+shape, its case fails and the rule should drop it.
