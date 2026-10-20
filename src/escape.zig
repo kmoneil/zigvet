@@ -870,7 +870,7 @@ const SinkSite = struct {
 };
 
 /// Builtins whose result is always known at compile time.
-const comptime_builtins: std.StaticStringMap(void) = .initComptime(.{
+pub const comptime_builtins: std.StaticStringMap(void) = .initComptime(.{
     .{"@alignOf"},  .{"@bitOffsetOf"}, .{"@bitSizeOf"},  .{"@compileError"}, .{"@embedFile"},
     .{"@Enum"},     .{"@EnumLiteral"}, .{"@FieldType"},  .{"@Fn"},           .{"@hasDecl"},
     .{"@hasField"}, .{"@import"},      .{"@inComptime"}, .{"@Int"},          .{"@offsetOf"},
