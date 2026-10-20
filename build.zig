@@ -33,6 +33,10 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{ .name = "zigvet", .root_module = zigvetModule(b, target, optimize, options) });
     b.installArtifact(exe);
 
+    // `zigvet.clobberStack()`, for a consuming repo's own tests. No target or
+    // optimize mode: it takes the importing module's.
+    _ = b.addModule("zigvet", .{ .root_source_file = b.path("src/clobber.zig") });
+
     // `zig build run -- <path>...`
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
