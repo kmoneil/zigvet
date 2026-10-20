@@ -12,9 +12,10 @@
 //! Comptime-known memory is static, so `&.{"literal"}` is fine and
 //! `&.{f()}` is not: a call is evaluated at run time unless it is under
 //! `comptime`, or the callee is an `inline fn` (or returns a comptime-only
-//! type) given comptime-known arguments. The one accepted false positive is
-//! a function only ever called at compile time; it can say `comptime`, or
-//! carry an allow comment.
+//! type) given comptime-known arguments. A function that itself returns a
+//! comptime-only type runs only at compile time and is not checked. The one
+//! accepted false positive is any other function only ever called at
+//! compile time; it can say `comptime`, or carry an allow comment.
 //!
 //! Returned, any stack address is reported. Stored through a parameter or
 //! to a container-level variable, only a temporary (`&.{...}`, `&f()`) is:
@@ -84,6 +85,10 @@ const Rule = struct {
         const proto_node, const body = tree.nodeData(fn_decl).node_and_node;
         var buffer: [1]Node.Index = undefined;
         const proto = tree.fullFnProto(&buffer, proto_node).?;
+
+        // Its calls are all evaluated at compile time, so nothing it makes
+        // is on a run-time stack.
+        if (proto.ast.return_type.unwrap()) |t| if (isComptimeType(tree, t)) return;
 
         r.function_name = if (proto.name_token) |t| tree.tokenSlice(t) else "function";
         r.scope.clearRetainingCapacity();
@@ -178,7 +183,7 @@ const Rule = struct {
                     .name = tree.tokenSlice(decl.ast.mut_token + 1),
                     .kind = .local,
                     .mutable = tree.tokenTag(decl.ast.mut_token) == .keyword_var,
-                    .is_comptime = decl.comptime_token != null,
+                    .is_comptime = decl.comptime_token != null or (if (decl.ast.type_node.unwrap()) |t| isComptimeType(tree, t) else false),
                     .storage = storageOfLocal(tree, decl.ast.type_node, decl.ast.init_node),
                     .init = decl.ast.init_node,
                 });
@@ -861,12 +866,23 @@ fn blockLabel(tree: *const Ast, block: Node.Index) ?[]const u8 {
     return tree.tokenSlice(lbrace - 2);
 }
 
-/// A parameter of type `type`, `comptime_int` or `comptime_float` is
-/// comptime whether or not it says so.
+/// A type only comptime has: `type`, `comptime_int`, `comptime_float`, or
+/// a pointer, slice, array, optional or error union of one. A parameter or
+/// local of one is comptime whether or not it says so, and a function
+/// returning one runs only at compile time.
 fn isComptimeType(tree: *const Ast, type_expr: Node.Index) bool {
-    if (tree.nodeTag(type_expr) != .identifier) return false;
-    const name = tree.tokenSlice(tree.nodeMainToken(type_expr));
-    return std.mem.eql(u8, name, "type") or std.mem.eql(u8, name, "comptime_int") or std.mem.eql(u8, name, "comptime_float");
+    return switch (tree.nodeTag(type_expr)) {
+        .identifier => {
+            const name = tree.tokenSlice(tree.nodeMainToken(type_expr));
+            return std.mem.eql(u8, name, "type") or std.mem.eql(u8, name, "comptime_int") or std.mem.eql(u8, name, "comptime_float");
+        },
+        .ptr_type_aligned, .ptr_type_sentinel, .ptr_type, .ptr_type_bit_range => isComptimeType(tree, tree.fullPtrType(type_expr).?.ast.child_type),
+        .array_type, .array_type_sentinel => isComptimeType(tree, tree.fullArrayType(type_expr).?.ast.elem_type),
+        .optional_type => isComptimeType(tree, tree.nodeData(type_expr).node),
+        .error_union => isComptimeType(tree, tree.nodeData(type_expr).node_and_node[1]),
+        .grouped_expression => isComptimeType(tree, tree.nodeData(type_expr).node_and_token[0]),
+        else => false,
+    };
 }
 
 fn storageOfType(tree: *const Ast, type_expr: Node.Index) Storage {
@@ -1068,6 +1084,31 @@ test "calls: a temporary result is reported, reading a slice in the same functio
         \\fn eql(a: []const u8, b: []const u8) bool { return a.len == b.len; }
     ,
         \\2:45 result of a call -> rawOf through return
+        \\
+    );
+}
+
+test "a function returning a type only comptime has runs only at compile time" {
+    try expectEscapes(
+        \\fn reversed(comptime ts: []const type) []const type { var a: [ts.len]type = ts[0..ts.len].*; const f = a; return &f; }
+        \\fn widths(ts: []const type) []const comptime_int { var a: [ts.len]comptime_int = undefined; const f = a; return &f; }
+        \\fn first(comptime n: usize) ?*const [n]type { var a: [n]type = undefined; return &a; }
+        \\fn named(comptime n: usize) anyerror![n]type { var a: [n]type = undefined; return a; }
+        \\fn sizes(comptime ts: []const type) []const usize { var a: [ts.len]usize = undefined; const f = a; return &f; }
+    ,
+        \\5:107 address of local 'f' -> sizes through return
+        \\
+    );
+}
+
+test "a parameter or local of a type only comptime has is comptime" {
+    try expectEscapes(
+        \\const other = @import("other.zig");
+        \\fn fromParam(ts: []const type) []const usize { return &.{ts.len}; }
+        \\fn fromLocal() []const usize { const ts: [2]type = other.pair(); return &.{ts.len}; }
+        \\fn fromRuntime() []const usize { const n: usize = other.count(); return &.{n}; }
+    ,
+        \\4:73 anonymous array -> fromRuntime through return
         \\
     );
 }
