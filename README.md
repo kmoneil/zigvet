@@ -7,11 +7,12 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: two rules. Escape, run over the 0.17.0 standard library and compiler
-sources (650,000 lines) and four application repos, found two real defects
-and three of its one accepted kind of false positive (below). Alias, run
-over the same standard library and seven application repos, found one real
-defect and no false positive.
+Status: three rules. Escape, run over the 0.17.0 standard library and
+compiler sources (650,000 lines) and four application repos, found two real
+defects and three of its one accepted kind of false positive (below). Alias,
+run over the same standard library and seven application repos, found one
+real defect and no false positive. Cancel, over the same code, found one
+real defect and one harmless case, a test's task that nothing cancels.
 
 ## Rule one: escape
 
@@ -123,6 +124,53 @@ memory of the place: its address (`&p.step`), the pointer it is reached
 through (`.owner = b` in `b.* = .{...}`), anything shorter than it, which
 may be such a pointer, a `return`, and compile-time builtins such as
 `@sizeOf`. Two names for the same memory are out of reach.
+
+## Rule three: cancel
+
+In a task's loop, an `Io` call whose error is dropped with `catch {}` or
+`catch continue`.
+
+```zig
+fn worker(io: Io) void {
+    while (true) {
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+}
+```
+
+`std.Io` delivers a cancelation request once: the next cancelation point
+returns `error.Canceled`, and later ones succeed. `catch {}` takes that one
+error and drops it, so the loop runs on, and whoever called `cancel` on the
+task waits for good. It compiles clean in every build mode, and nothing at
+run time says why the cancel never returns.
+
+The fix, if the call's error set holds `error.Canceled`, is to return it:
+
+```zig
+line.writeStreamingAll(io, bytes) catch |err| switch (err) {
+    error.Canceled => |e| return e,
+    else => {},
+};
+```
+
+or to call `io.recancel()` after handling it.
+
+### What cancel reports
+
+The same `catch {}` in code nothing cancels is harmless, and most of it is
+in search, cleanup and test loops. What the syntax can see is where a task
+starts, so cancel looks only in a function handed to `async` or
+`concurrent` (`io.concurrent(worker, ...)`, `group.async(io, handle, ...)`),
+or one such a function calls directly, in the same file, and only in its
+loops. Reported there: `catch {}`, `catch |_| {}` or `catch continue` on a
+call passed `io` or a field named `io`, or called on one.
+
+Not reported: `cancel` and `await`, which drop the task's own result, not a
+cancelation sent to it; anything in a `defer` or `errdefer`; handlers that
+use the error or leave (`catch return`, `catch null`); and a task started
+from another file, which the syntax of this one cannot see. Whether the
+call's error set holds `error.Canceled` is beyond the syntax too; the hint
+says how to tell.
 
 ## Install
 
@@ -292,7 +340,7 @@ function, so the two are worth having together.
 The admission test: the code compiles clean in every build mode and is still
 wrong. If the compiler, `zig fmt` or an existing linter already catches it, it
 is not a zigvet rule. Each rule is one lowercase word for what it catches:
-`escape` and `alias` so far.
+`escape`, `alias` and `cancel` so far.
 
 ## Tests
 

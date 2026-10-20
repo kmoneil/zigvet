@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias };
+pub const Rule = enum { escape, alias, cancel };
 
 /// Where a value made on the stack leaves the function that made it.
 pub const Sink = enum {
@@ -38,6 +38,7 @@ pub const Finding = struct {
     pub const Detail = union(enum) {
         escape: Escape,
         alias: Alias,
+        cancel: Cancel,
         allow: Allow,
     };
 
@@ -58,6 +59,13 @@ pub const Finding = struct {
         stored: []const u8,
     };
 
+    pub const Cancel = struct {
+        /// The Io call, as written: `io.sleep`.
+        callee: []const u8,
+        /// What drops its error, as written: `catch {}`.
+        handler: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -75,6 +83,7 @@ pub const Finding = struct {
         return switch (finding.detail) {
             .escape => .escape,
             .alias => .alias,
+            .cancel => .cancel,
             .allow => null,
         };
     }
@@ -114,6 +123,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .alias => |a| try w.print("{s} read here, but the initializer is written straight into {s} and has already stored {s}", .{
             a.read, a.target, a.stored,
+        }),
+        .cancel => |c| try w.print("`{s}` drops what {s} returns, error.Canceled included, which is delivered once", .{
+            c.handler, c.callee,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
