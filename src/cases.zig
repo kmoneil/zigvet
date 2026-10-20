@@ -19,7 +19,7 @@ const Ast = std.zig.Ast;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const build_options = @import("build_options");
+const test_options = @import("test_options");
 const report = @import("report.zig");
 const vet = @import("vet.zig");
 
@@ -105,7 +105,7 @@ fn expectations(arena: Allocator, source: []const u8) error{ OutOfMemory, NoHead
 fn compilerAccepts(arena: Allocator, io: Io, path: []const u8) !bool {
     const full_path = try std.fs.path.join(arena, &.{ cases_dir, path });
     const result = try std.process.run(arena, io, .{
-        .argv = &.{ build_options.zig_exe, "build-obj", "-fno-emit-bin", full_path },
+        .argv = &.{ test_options.zig_exe, "build-obj", "-fno-emit-bin", full_path },
     });
     if (result.term.success()) return true;
     std.debug.print("{s}: the Zig compiler rejects it, so it is not a case zigvet needs:\n{s}\n", .{ full_path, result.stderr });

@@ -1,25 +1,84 @@
-name: CI
+name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
+# The workflow only reads the repository.
+permissions:
+  contents: read
+
+# A newer push to a pull request supersedes its older runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job name here is a required status check in the `main` ruleset;
+# renaming one means updating the ruleset in the same change.
 jobs:
+  check:
+    name: format, lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: zig fmt
+        run: zig fmt --check build.zig build.zig.zon src test
+      # zigvet over its own source, the way a consuming repo runs it. The
+      # build also refuses any dependency in build.zig.zon.
+      - name: zigvet over src/
+        run: zig build lint
+
   test:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
-      - name: Check formatting
-        run: zig fmt --check build.zig build.zig.zon src test
-      - name: Run tests
+      # Unit tests and the case corpus, which also compiles every case.
+      - name: zig build test
         run: zig build test --summary all
-      - name: Run zigvet over its own source
-        run: zig build lint
+
+  # The released binaries are ReleaseSafe; ReleaseFast is how a consuming
+  # repo may build it from source.
+  release-modes:
+    name: release (${{ matrix.optimize }})
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [ReleaseSafe, ReleaseFast]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: zig build test
+        run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+
+  # Every binary a release carries, built on every change, so a tag never
+  # finds a target that does not build.
+  targets:
+    name: release targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: zig build release
+        run: zig build release && ls -l zig-out/release
