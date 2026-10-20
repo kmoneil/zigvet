@@ -76,7 +76,8 @@ a pointer, slice, array, optional or error union of one, such as
 The one accepted false positive is any other function only ever run at
 compile time, where the address is comptime memory and legal. Say so with a
 `comptime` block in the function, as upstream asks for its own check, or
-with an allow comment.
+with an allow comment. A function with a `comptime` parameter, which such a
+function always has, gets that fix in its hint too.
 
 ## Install
 

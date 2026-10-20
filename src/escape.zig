@@ -53,6 +53,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
 
 const hint_literal = "make it comptime-known (`comptime` on the runtime elements) or a container-level const";
 const hint_storage = "return the value itself, have the caller pass in the memory, or allocate it";
+const hint_storage_comptime = hint_storage ++ "; if it only runs at compile time, say so with `return comptime blk: { ... }`";
 
 const Rule = struct {
     arena: Allocator,
@@ -79,6 +80,9 @@ const Rule = struct {
     deferred_resets: std.StringHashMapUnmanaged(void) = .empty,
     reported: std.AutoHashMapUnmanaged(struct { Ast.TokenIndex, Sink }, void) = .empty,
     comptime_depth: u32 = 0,
+    /// Whether the function has a comptime parameter, as one only ever run
+    /// at compile time always does: its storage hint names that fix too.
+    comptime_params: bool = false,
 
     fn function(r: *Rule, fn_decl: Node.Index) Allocator.Error!void {
         const tree = r.tree;
@@ -96,16 +100,19 @@ const Rule = struct {
         r.deferred_resets.clearRetainingCapacity();
         r.reported.clearRetainingCapacity();
         r.comptime_depth = 0;
+        r.comptime_params = false;
 
         var params = proto.iterate(tree);
         while (params.next()) |param| {
             const name_token = param.name_token orelse continue;
             const declared_comptime = if (param.comptime_noalias) |t| tree.tokenTag(t) == .keyword_comptime else false;
+            const is_comptime = declared_comptime or (if (param.type_expr) |t| isComptimeType(tree, t) else false);
+            r.comptime_params = r.comptime_params or is_comptime;
             try r.declare(.{
                 .name = tree.tokenSlice(name_token),
                 .kind = .parameter,
                 .mutable = false,
-                .is_comptime = declared_comptime or (if (param.type_expr) |t| isComptimeType(tree, t) else false),
+                .is_comptime = is_comptime,
                 .storage = if (param.type_expr) |t| storageOfType(tree, t) else .unknown,
                 .init = .none,
             });
@@ -496,7 +503,7 @@ const Rule = struct {
             .grouped_expression => return r.addressSource(tree.nodeData(operand).node_and_token[0], amp),
             .call_one, .call_one_comma, .call, .call_comma => {
                 if (r.isComptime(operand)) return null;
-                return .{ .token = amp, .what = "result of a call", .hint = hint_storage, .temporary = true };
+                return .{ .token = amp, .what = "result of a call", .hint = r.storageHint(), .temporary = true };
             },
             .identifier => {
                 const index = r.resolved.get(operand) orelse return null;
@@ -554,9 +561,13 @@ const Rule = struct {
         return .{
             .token = token,
             .what = try r.arena.print("{s} {s} '{s}'", .{ access, kind, binding.name }),
-            .hint = hint_storage,
+            .hint = r.storageHint(),
             .temporary = false,
         };
+    }
+
+    fn storageHint(r: *const Rule) []const u8 {
+        return if (r.comptime_params) hint_storage_comptime else hint_storage;
     }
 
     fn isComptimeBinding(r: *Rule, index: u32) bool {
@@ -1111,6 +1122,29 @@ test "a parameter or local of a type only comptime has is comptime" {
         \\4:73 anonymous array -> fromRuntime through return
         \\
     );
+}
+
+test "the storage hint names the comptime fix in a function with a comptime parameter" {
+    const gpa = std.testing.allocator;
+    var tree = try Ast.parse(gpa,
+        \\fn table(comptime T: type) []const usize { var a: [1]usize = undefined; a[0] = @sizeOf(T); const f = a; return &f; }
+        \\fn typed(T: type, n: u8) []const u8 { _ = T; var a: [1]u8 = undefined; a[0] = n; const f = a; return &f; }
+        \\fn runtime(n: usize) []const usize { var a: [1]usize = undefined; a[0] = n; const f = a; return &f; }
+        \\fn literal(comptime n: u8, m: u8) []const u8 { return &.{ n, m }; }
+    , .{});
+    defer tree.deinit(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    var findings: std.ArrayList(Finding) = .empty;
+    try check(arena_state.allocator(), &tree, &findings);
+    std.mem.sort(Finding, findings.items, {}, struct {
+        fn before(_: void, a: Finding, b: Finding) bool {
+            return a.token < b.token;
+        }
+    }.before);
+    const expected = [_][]const u8{ hint_storage_comptime, hint_storage_comptime, hint_storage, hint_literal };
+    try std.testing.expectEqual(expected.len, findings.items.len);
+    for (expected, findings.items) |hint, finding| try std.testing.expectEqualStrings(hint, finding.hint);
 }
 
 test "comptime contexts and nested declarations" {
