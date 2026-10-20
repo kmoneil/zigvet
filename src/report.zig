@@ -1,10 +1,12 @@
-//! What zigvet reports, and the one format it prints it in:
+//! What zigvet reports, and how it writes it. The text form is
 //! `path:line:col: <rule>: <message>`, then the fix hint on its own line.
 //! An allow comment that suppresses nothing has `allow` in the rule's place,
-//! and a parse error `error`.
+//! and a parse error `error`. For CI the same reports can be written as
+//! GitHub Actions workflow commands or as JSON.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
+const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
@@ -109,6 +111,104 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
     }
 }
 
+/// How a run writes its reports: text, GitHub Actions workflow commands,
+/// which annotate a pull request's diff, or one JSON array.
+pub const Format = enum { text, github, json };
+
+/// Writes every report of a run in one format. Call `begin` before the
+/// first and `end` after the last: JSON needs its brackets.
+pub const Out = struct {
+    w: *Writer,
+    format: Format,
+    /// A message rendered whole, for the formats that escape it.
+    message: Writer.Allocating,
+    count: usize = 0,
+
+    pub fn init(gpa: Allocator, w: *Writer, format: Format) Out {
+        return .{ .w = w, .format = format, .message = .init(gpa) };
+    }
+
+    pub fn deinit(out: *Out) void {
+        out.message.deinit();
+    }
+
+    pub fn begin(out: *Out) Writer.Error!void {
+        if (out.format == .json) try out.w.writeByte('[');
+    }
+
+    pub fn end(out: *Out) Writer.Error!void {
+        if (out.format == .json) try out.w.writeAll(if (out.count > 0) "\n]\n" else "]\n");
+    }
+
+    /// `loc` is where `finding.offset` is, from `location`.
+    pub fn finding(out: *Out, path: []const u8, loc: Ast.Location, f: Finding) Writer.Error!void {
+        if (out.format == .text) {
+            out.count += 1;
+            return write(out.w, path, loc, f);
+        }
+        out.message.clearRetainingCapacity();
+        try writeMessage(&out.message.writer, f);
+        try out.entry(path, loc.line + 1, loc.column + 1, @tagName(f.detail), out.message.written(), f.hint);
+    }
+
+    pub fn parseError(out: *Out, path: []const u8, tree: Ast, parse_error: Ast.Error) Writer.Error!void {
+        if (out.format == .text) {
+            out.count += 1;
+            return writeParseError(out.w, path, tree, parse_error);
+        }
+        const loc = tree.tokenLocation(0, parse_error.token);
+        out.message.clearRetainingCapacity();
+        try tree.renderError(parse_error, &out.message.writer);
+        try out.entry(path, loc.line + 1, loc.column + tree.errorOffset(parse_error) + 1, "error", out.message.written(), null);
+    }
+
+    /// One report in the GitHub or JSON form; `line` and `column` from 1.
+    fn entry(out: *Out, path: []const u8, line: usize, column: usize, kind: []const u8, message: []const u8, hint: ?[]const u8) Writer.Error!void {
+        defer out.count += 1;
+        const w = out.w;
+        switch (out.format) {
+            .text => unreachable,
+            .github => {
+                try w.writeAll("::error file=");
+                try writeGithub(w, path, .path);
+                try w.print(",line={d},col={d},title=zigvet {s}::", .{ line, column, kind });
+                try writeGithub(w, message, .message);
+                if (hint) |h| {
+                    try w.writeAll(". hint: ");
+                    try writeGithub(w, h, .message);
+                }
+                try w.writeByte('\n');
+            },
+            .json => {
+                try w.writeAll(if (out.count == 0) "\n" else ",\n");
+                try std.json.Stringify.value(.{
+                    .path = path,
+                    .line = line,
+                    .column = column,
+                    .rule = kind,
+                    .message = message,
+                    .hint = hint,
+                }, .{}, w);
+            },
+        }
+    }
+};
+
+/// GitHub's escaping for a workflow command: `%`, CR and LF anywhere, and
+/// `:` and `,` in a property, where they would end it. A path is written
+/// with `/`, as GitHub names files.
+fn writeGithub(w: *Writer, text: []const u8, part: enum { path, message }) Writer.Error!void {
+    for (text) |c| switch (c) {
+        '%' => try w.writeAll("%25"),
+        '\r' => try w.writeAll("%0D"),
+        '\n' => try w.writeAll("%0A"),
+        ':' => try w.writeAll(if (part == .path) "%3A" else ":"),
+        ',' => try w.writeAll(if (part == .path) "%2C" else ","),
+        '\\' => try w.writeByte(if (part == .path) '/' else '\\'),
+        else => try w.writeByte(c),
+    };
+}
+
 pub fn writeParseError(w: *Writer, path: []const u8, tree: Ast, parse_error: Ast.Error) Writer.Error!void {
     const loc = tree.tokenLocation(0, parse_error.token);
     const column = loc.column + tree.errorOffset(parse_error);
@@ -135,6 +235,79 @@ test "write: escape finding" {
         \\    hint: make the element comptime or move the array to a container-level const
         \\
     , out.written());
+}
+
+/// The reports for `source` in `format`, as one run of one file writes them.
+fn expectFormat(format: Format, path: []const u8, source: [:0]const u8, expected: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var buffer: Writer.Allocating = .init(gpa);
+    defer buffer.deinit();
+    var out: Out = .init(gpa, &buffer.writer, format);
+    defer out.deinit();
+    try out.begin();
+    for (tree.errors) |parse_error| try out.parseError(path, tree, parse_error);
+    if (tree.errors.len == 0) {
+        const amp = std.mem.findScalar(u8, source, '&').?;
+        try out.finding(path, location(source, amp), .{
+            .offset = amp,
+            .hint = "make it 100% `comptime`",
+            .detail = .{ .escape = .{ .what = "anonymous array", .function = "f", .sink = .@"return" } },
+        });
+        try out.finding(path, location(source, 0), .{ .offset = 0, .hint = "write it, then", .detail = .{ .allow = .no_rule } });
+    }
+    try out.end();
+    try std.testing.expectEqualStrings(expected, buffer.written());
+}
+
+test "Out: text is what write and writeParseError give" {
+    try expectFormat(.text, "src/a.zig", "fn f() []const u8 {\n    return &.{g()};\n}\n",
+        \\src/a.zig:2:12: escape: anonymous array made here leaves f through return
+        \\    hint: make it 100% `comptime`
+        \\src/a.zig:1:1: allow: names no rule, so it suppresses nothing
+        \\    hint: write it, then
+        \\
+    );
+    try expectFormat(.text, "src/bad.zig", "fn f( {}\n",
+        \\src/bad.zig:1:7: error: expected type expression, found '{'
+        \\
+    );
+}
+
+test "Out: github workflow commands, escaped" {
+    try expectFormat(.github, "src\\a,b:c.zig", "fn f() []const u8 {\n    return &.{g()};\n}\n",
+        \\::error file=src/a%2Cb%3Ac.zig,line=2,col=12,title=zigvet escape::anonymous array made here leaves f through return. hint: make it 100%25 `comptime`
+        \\::error file=src/a%2Cb%3Ac.zig,line=1,col=1,title=zigvet allow::names no rule, so it suppresses nothing. hint: write it, then
+        \\
+    );
+    try expectFormat(.github, "src/bad.zig", "fn f( {}\n",
+        \\::error file=src/bad.zig,line=1,col=7,title=zigvet error::expected type expression, found '{'
+        \\
+    );
+}
+
+test "Out: one JSON array, an object per report" {
+    try expectFormat(.json, "src/a.zig", "fn f() []const u8 {\n    return &.{g()};\n}\n",
+        \\[
+        \\{"path":"src/a.zig","line":2,"column":12,"rule":"escape","message":"anonymous array made here leaves f through return","hint":"make it 100% `comptime`"},
+        \\{"path":"src/a.zig","line":1,"column":1,"rule":"allow","message":"names no rule, so it suppresses nothing","hint":"write it, then"}
+        \\]
+        \\
+    );
+    try expectFormat(.json, "src/bad.zig", "fn f( {}\n",
+        \\[
+        \\{"path":"src/bad.zig","line":1,"column":7,"rule":"error","message":"expected type expression, found '{'","hint":null}
+        \\]
+        \\
+    );
+    var buffer: Writer.Allocating = .init(std.testing.allocator);
+    defer buffer.deinit();
+    var out: Out = .init(std.testing.allocator, &buffer.writer, .json);
+    defer out.deinit();
+    try out.begin();
+    try out.end();
+    try std.testing.expectEqualStrings("[]\n", buffer.written());
 }
 
 test "location: counted as Ast.tokenLocation counts" {
