@@ -4,11 +4,13 @@
 const std = @import("std");
 const Io = std.Io;
 
+const build_options = @import("build_options");
 const vet = @import("vet.zig");
 const walk = @import("walk.zig");
 
 const usage =
     \\Usage: zigvet <path>...
+    \\       zigvet --version
     \\
     \\Checks each file named, and every .zig file under each directory named,
     \\for code the Zig compiler accepts that is almost certainly wrong.
@@ -39,6 +41,11 @@ pub fn main(init: std.process.Init) !u8 {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try out.writeAll(usage);
+            try out.flush();
+            return 0;
+        }
+        if (std.mem.eql(u8, arg, "--version")) {
+            try out.print("zigvet {s}\n", .{build_options.version});
             try out.flush();
             return 0;
         }

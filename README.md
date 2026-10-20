@@ -75,10 +75,33 @@ time, where the address is comptime memory and legal. Say so with a
 `comptime` block in the function, as upstream asks for its own check, or
 with an allow comment.
 
+## Install
+
+Each [release](https://github.com/kmoneil/zigvet/releases) carries a binary
+for Linux, macOS and Windows on x86-64 and arm64, named
+`zigvet-<linux|darwin|windows>-<amd64|arm64>` (`.exe` on Windows), with
+`SHA256SUMS` and a build-provenance attestation for every file. On an
+Apple-silicon Mac, for example:
+
+```sh
+curl -fLO https://github.com/kmoneil/zigvet/releases/latest/download/zigvet-darwin-arm64
+curl -fLO https://github.com/kmoneil/zigvet/releases/latest/download/SHA256SUMS
+shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify zigvet-darwin-arm64 --repo kmoneil/zigvet
+chmod +x zigvet-darwin-arm64 && mv zigvet-darwin-arm64 /usr/local/bin/zigvet
+```
+
+A binary downloaded with a browser on macOS is quarantined; clear it with
+`xattr -d com.apple.quarantine zigvet`. `curl` does not set the flag.
+
+From source, with Zig 0.17.0: `zig build -Doptimize=ReleaseSafe`, which
+leaves the binary in `zig-out/bin/`.
+
 ## Usage
 
 ```
 zigvet <path>...
+zigvet --version
 ```
 
 A file is checked whatever its extension. A directory is walked for `.zig`
@@ -113,9 +136,9 @@ The reason is required; an allow comment without one suppresses nothing.
 
 ## Use it in a build
 
-Add zigvet to `build.zig.zon` with `zig fetch --save
-git+https://github.com/kmoneil/zigvet`, then give `build.zig` a lint step,
-the way `zig fmt --check` is used:
+Add zigvet to `build.zig.zon`, pinned to a release tag, with `zig fetch
+--save git+https://github.com/kmoneil/zigvet#v0.1.0`, then give `build.zig`
+a lint step, the way `zig fmt --check` is used:
 
 ```zig
 const zigvet = b.dependency("zigvet", .{
@@ -147,3 +170,7 @@ then `// error` and the expected `// :line:col: error: ...` lines, or
 every case with the Zig compiler and fails if it rejects one, so each case
 is checked to be code Zig accepts. If a later Zig release starts catching a
 shape, its case fails and the rule should drop it.
+
+## License
+
+Apache-2.0; see [LICENSE](LICENSE).

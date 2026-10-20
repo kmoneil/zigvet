@@ -1,0 +1,146 @@
+# A tag is the release. What is published is whatever the tag points at, so
+# this re-runs the full gate on the tagged commit rather than trusting that it
+# was green on main, and refuses a tag that disagrees with the version in
+# build.zig.zon, which is what `zigvet --version` prints.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # A dry run: the gate, the binaries and their checksums, kept as this run's
+  # artifact. Nothing is attested or published on a dispatch: `attest` and
+  # `publish` are guarded on the event being a tag push rather than on the
+  # ref, because a dispatch can name a tag as its ref.
+  workflow_dispatch:
+
+# Read at the workflow level, write only on the jobs that need it. Every job
+# inherits a workflow-level permission, so a token is scoped where it is used
+# or it is scoped everywhere.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: the full gate, on the tagged commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No cache, here or in the build: a release builds from nothing it did
+      # not make.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: the tag is build.zig.zon's version
+        if: github.event_name == 'push'
+        run: |
+          zig build
+          want="zigvet ${GITHUB_REF_NAME#v}"
+          got="$(./zig-out/bin/zigvet --version)"
+          if [ "$got" != "$want" ]; then
+            echo "The tag is ${GITHUB_REF_NAME} but the binary says '${got}'." >&2
+            echo "Set .version in build.zig.zon to ${GITHUB_REF_NAME#v} on main and tag that commit." >&2
+            exit 1
+          fi
+      - name: zig fmt
+        run: zig fmt --check build.zig build.zig.zon src test
+      - name: zigvet over src/
+        run: zig build lint
+      - name: tests and the case corpus, in every mode a user builds
+        run: |
+          zig build test --summary all
+          zig build test -Doptimize=ReleaseSafe --summary all
+          zig build test -Doptimize=ReleaseFast --summary all
+
+  build:
+    name: build the binaries
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      # The six targets and their names are build.zig's release_targets, the
+      # same list ci.yml builds on every change.
+      - name: zig build release
+        run: zig build release
+      # The runner can execute one of them; it must start, name its version,
+      # and find nothing in zigvet's own source.
+      - name: the Linux binary runs
+        run: |
+          ./zig-out/release/zigvet-linux-amd64 --version
+          ./zig-out/release/zigvet-linux-amd64 src
+      - name: checksums
+        run: cd zig-out/release && sha256sum zigvet-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries
+          path: zig-out/release/
+          retention-days: 7
+          if-no-files-found: error
+
+  attest:
+    name: attest the assets
+    needs: build
+    # An attestation is a signed statement in this repository's public store,
+    # so writing one is publishing: on a dispatch the job never starts and the
+    # OIDC token that would sign is never minted.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: binaries
+          path: dist
+      # Every file publish uploads: a signed statement that each was built by
+      # this workflow, from this tag, on a runner GitHub hosts. Checked with
+      #   gh attestation verify zigvet-linux-amd64 --repo kmoneil/zigvet
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+  publish:
+    name: publish
+    # Nothing is published that was not attested first.
+    needs: [build, attest]
+    # Guarded on the job, not a step, so on a dispatch the write token is
+    # never minted.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: binaries
+          path: dist
+      # A draft first, so releases/latest never names a release whose assets
+      # are still uploading, then made public in the same job. A hyphen is
+      # what separates a semver prerelease from a release, so v0.2.0-rc.1 is
+      # marked a prerelease and not made the latest.
+      - name: create the GitHub release, a draft until its assets are up
+        id: release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          draft: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/zigvet-*
+            dist/SHA256SUMS
+      - name: publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: |
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false > /dev/null
+          echo "release ${RELEASE_ID} is published"
