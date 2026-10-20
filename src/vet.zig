@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
 const allow = @import("allow.zig");
+const escape = @import("escape.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 
@@ -23,9 +24,14 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, w: *Wri
         return tree.errors.len;
     }
 
+    // The rules' working memory and their findings live until the file is
+    // written out.
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
     var findings: std.ArrayList(Finding) = .empty;
-    defer findings.deinit(gpa);
-    // The rules run here. None is written yet; escape is the first.
+    try escape.check(arena, &tree, &findings);
     return writeFindings(w, path, tree, findings.items);
 }
 

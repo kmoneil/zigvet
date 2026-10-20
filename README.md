@@ -7,8 +7,10 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: the command runs, walks paths and reports parse errors. No rule is
-implemented yet; escape, below, is the first.
+Status: rule one, escape, is implemented. Run over the 0.17.0 standard
+library and compiler sources (650,000 lines) and four application repos, it
+found two real defects and three of its one accepted kind of false positive
+(below).
 
 ## Rule one: escape
 
@@ -40,6 +42,38 @@ or a container-level constant, which is evaluated at compile time and static:
 ```zig
 const monitoring_read = [_][]const u8{Scope.monitoring.url()};
 ```
+
+### What escape reports
+
+Made on the stack, and not comptime-known:
+
+- the address of an array or struct initializer, `&.{...}`, `&[_]T{...}`,
+  `&T{...}`, or a slice of one;
+- the address of a call's result, `&f()`;
+- the address of a local, parameter or capture, a slice of a local array, or
+  the address of one field or element of a local held by value.
+
+Leaving the function:
+
+- returned, directly or through `if`, `switch`, `orelse`, `catch`, `try`, a
+  labeled block, a cast, a struct returned by value, or a local that holds it;
+- stored through a parameter (`self.items = ...`, `out.* = ...`) or to a
+  container-level variable. Stores report temporaries only: a named local
+  stored outward is usually deliberate (a context pointer for the length of
+  a call, a thread's `current`), and a store a `defer` undoes is not
+  reported at all.
+
+Comptime-known memory is static and never reported: literals, `comptime`
+expressions, container-level declarations, `comptime` parameters, and calls
+to an `inline fn` (or one returning a comptime-only type) with comptime-known
+arguments. The check reads one function at a time and the syntax alone, so
+it knows a callee only by name: the file's own functions, and
+`std.fmt.comptimePrint`, `std.math.maxInt` and `minInt`.
+
+The one accepted false positive is a function only ever run at compile
+time, where the address is comptime memory and legal. Say so with a
+`comptime` block in the function, as upstream asks for its own check, or
+with an allow comment.
 
 ## Usage
 
