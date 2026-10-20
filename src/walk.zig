@@ -8,7 +8,12 @@ const Allocator = std.mem.Allocator;
 /// it is a file, whatever its extension, or every `.zig` file under it if it
 /// is a directory, as `arg` joined with the path inside it. Directories that
 /// are hidden or hold build output or fetched packages are not walked into.
-/// The appended paths are allocated with `arena`.
+///
+/// Each path is cleaned the way `std.fs.path.resolveAlloc` does it, on the
+/// text alone: `.`, `..` and repeated separators collapse, and on Windows
+/// every separator becomes `\`. So one file reached two ways, `zigvet .
+/// src/a.zig`, is one string, and is checked and reported once. The
+/// appended paths are allocated with `arena`.
 pub fn collect(
     arena: Allocator,
     io: Io,
@@ -18,7 +23,7 @@ pub fn collect(
 ) !void {
     const stat = try base.statFile(io, arg, .{});
     if (stat.kind != .directory) {
-        try files.append(arena, arg);
+        try files.append(arena, try std.fs.path.resolveAlloc(arena, &.{arg}));
         return;
     }
     var dir = try base.openDir(io, arg, .{ .iterate = true });
@@ -28,7 +33,7 @@ pub fn collect(
     while (try walker.next(io)) |entry| switch (entry.kind) {
         .directory => if (!skipDir(entry.basename)) try walker.enter(io, entry),
         .file => if (std.mem.endsWith(u8, entry.basename, ".zig")) {
-            try files.append(arena, try std.fs.path.join(arena, &.{ arg, entry.path }));
+            try files.append(arena, try std.fs.path.resolveAlloc(arena, &.{ arg, entry.path }));
         },
         else => {},
     };
@@ -83,19 +88,12 @@ test "collect: .zig files under a directory, skipping build output and hidden di
     var files: std.ArrayList([]const u8) = .empty;
     try collect(arena, io, tmp.dir, "proj", &files);
     try collect(arena, io, tmp.dir, "proj/notes.txt", &files);
-    try collect(arena, io, tmp.dir, "proj/a.zig", &files);
     sortUnique(&files);
 
-    const expected = [_][]const u8{
-        try std.fs.path.join(arena, &.{ "proj", "a.zig" }),
-        "proj/notes.txt",
-        try std.fs.path.join(arena, &.{ "proj", "sub", "b.zig" }),
-    };
-    try std.testing.expectEqual(expected.len, files.items.len);
-    for (expected, files.items) |want, got| try std.testing.expectEqualStrings(want, got);
+    try expectPaths(arena, &.{ "proj/a.zig", "proj/notes.txt", "proj/sub/b.zig" }, files.items);
 }
 
-test "collect: a trailing separator on the argument is not doubled" {
+test "collect: one file reached several ways is listed once" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -103,13 +101,27 @@ test "collect: a trailing separator on the argument is not doubled" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    try tmp.dir.createDirPath(io, "src");
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "" });
+    try tmp.dir.createDirPath(io, "proj/sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/a.zig", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/sub/b.zig", .data = "" });
 
     var files: std.ArrayList([]const u8) = .empty;
-    try collect(arena, io, tmp.dir, "src" ++ std.fs.path.sep_str, &files);
-    try std.testing.expectEqual(1, files.items.len);
-    try std.testing.expectEqualStrings("src" ++ std.fs.path.sep_str ++ "main.zig", files.items[0]);
+    // A leading `./`, a trailing separator, `/` where Windows uses `\`, and
+    // a file both walked to and named.
+    try collect(arena, io, tmp.dir, "./proj/", &files);
+    try collect(arena, io, tmp.dir, "proj/a.zig", &files);
+    try collect(arena, io, tmp.dir, "proj", &files);
+    sortUnique(&files);
+
+    try expectPaths(arena, &.{ "proj/a.zig", "proj/sub/b.zig" }, files.items);
+}
+
+/// `expected` is written with `/`; each is compared in the native form.
+fn expectPaths(arena: Allocator, expected: []const []const u8, actual: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |want, got| {
+        try std.testing.expectEqualStrings(try std.fs.path.resolveAlloc(arena, &.{want}), got);
+    }
 }
 
 test "collect: a missing path is an error" {

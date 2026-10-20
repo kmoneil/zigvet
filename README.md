@@ -48,8 +48,10 @@ zigvet <path>...
 ```
 
 A file is checked whatever its extension. A directory is walked for `.zig`
-files, skipping hidden directories, `zig-out` and `zig-pkg`. A file that
-does not parse is reported with the error `zig ast-check` gives for it.
+files, skipping hidden directories, `zig-out` and `zig-pkg`. Paths print
+cleaned (`./src/a.zig` as `src/a.zig`), and a file reached more than one
+way is checked once. A file that does not parse is reported with the error
+`zig ast-check` gives for it.
 
 Exit status: 0 if nothing was reported, 1 if a finding or parse error was,
 2 on a usage error or a path that could not be read.
