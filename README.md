@@ -152,7 +152,7 @@ The reason is required; an allow comment without one suppresses nothing.
 ## Use it in a build
 
 Add zigvet to `build.zig.zon`, pinned to a release tag, with `zig fetch
---save git+https://github.com/kmoneil/zigvet#v0.1.0`, then give `build.zig`
+--save git+https://github.com/kmoneil/zigvet#v0.1.1`, then give `build.zig`
 a lint step, the way `zig fmt --check` is used:
 
 ```zig
