@@ -2,9 +2,11 @@
 //! build mode that is almost certainly wrong.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const build_options = @import("build_options");
+const test_options = @import("test_options");
 const vet = @import("vet.zig");
 const walk = @import("walk.zig");
 
@@ -29,8 +31,10 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const io = init.io;
 
+    // Streaming: a positional writer writes a file stdout is redirected to
+    // from byte 0, over what it held and under what is written after (#7).
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    var stdout_writer: Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);
     const out = &stdout_writer.interface;
 
     const args = (try init.minimal.args.toSlice(arena))[1..];
@@ -86,6 +90,44 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (unreadable) return 2;
     return @intFromBool(reported > 0);
+}
+
+test "findings land where stdout's file is, not over its start" {
+    // On Windows, `std.process.spawn` opens the file again for the child
+    // rather than passing on the handle, so the child's position starts at
+    // 0 whatever the writer does, and the shared file cannot be set up.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "fn f(x: u32) []const u32 {\n    return &.{x + 1};\n}\n" });
+
+    // As `{ echo before; zigvet a.zig; echo after; } > out.txt` leaves it:
+    // stdout is a regular file, already written to, that the shell writes
+    // again after zigvet exits.
+    const out = try tmp.dir.createFile(io, "out.txt", .{});
+    defer out.close(io);
+    try out.writeStreamingAll(io, "before\n");
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ exe, "a.zig" },
+        .cwd = .{ .dir = tmp.dir },
+        .stdout = .{ .file = out },
+    });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
+    try out.writeStreamingAll(io, "after\n");
+
+    const got = try tmp.dir.readFileAlloc(io, "out.txt", gpa, .limited(4096));
+    defer gpa.free(got);
+    try std.testing.expectEqualStrings(
+        \\before
+        \\a.zig:2:12: escape: anonymous array made here leaves f through return
+        \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const
+        \\after
+        \\
+    , got);
 }
 
 test {
