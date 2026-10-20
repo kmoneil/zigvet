@@ -256,6 +256,37 @@ b.step("lint", "Report code that compiles but is wrong").dependOn(&vet.step);
 `zig build lint` then fails when zigvet reports anything. zigvet's own
 `zig build lint` is the same step run over its `src/`.
 
+## Clobber the stack in tests
+
+A function that returns a slice of its own frame passes a test that reads
+the slice straight away, because nothing has written over that memory yet.
+That is how the bug above passed its test for two days. `clobberStack()`
+writes over the stack the returned frame used, so the same test fails at
+once:
+
+```zig
+const zigvet = @import("zigvet");
+
+test "scopesFor asks for read-only Monitoring" {
+    const got = Auth.scopesFor(.monitoring, &asked);
+    zigvet.clobberStack();
+    try std.testing.expectEqualStrings(monitoring_read_url, got[0]);
+}
+```
+
+Give the test module the import in `build.zig`, from the same dependency as
+the lint step:
+
+```zig
+tests.root_module.addImport("zigvet", zigvet.module("zigvet"));
+```
+
+Since v0.2.0. It finds the bug only in
+a function a test calls, and is dependable only in a Debug build (the
+default for `zig build test`): an optimized build may turn a read of a dead
+frame into anything. The escape rule finds the shapes it knows in any
+function, so the two are worth having together.
+
 ## What a rule has to be
 
 The admission test: the code compiles clean in every build mode and is still
