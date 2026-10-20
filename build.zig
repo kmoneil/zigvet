@@ -74,6 +74,10 @@ pub fn build(b: *std.Build) void {
             .name = "zigvet",
             .root_module = zigvetModule(b, b.resolveTargetQuery(release_target.query), .ReleaseSafe, options),
         });
+        // Stripped, so the same tag gives the same bytes on any machine:
+        // the debug info holds the absolute paths of the checkout and the
+        // caches, and LLD's PE timestamp and PDB id are hashed from it.
+        release_exe.root_module.strip = true;
         const install = b.addInstallArtifact(release_exe, .{
             .dest_dir = .{ .override = .{ .custom = "release" } },
             .dest_sub_path = release_target.name,
