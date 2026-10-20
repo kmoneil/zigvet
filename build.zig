@@ -48,9 +48,11 @@ pub fn build(b: *std.Build) void {
     // The tests include the case corpus under test/cases/, which runs the
     // compiler over each case and reads the cases at run time: it needs the
     // compiler's path, the repository root as its working directory, and to
-    // run every time rather than be cached on the test binary alone.
+    // run every time rather than be cached on the test binary alone. One
+    // test runs zigvet itself, to see where its output lands.
     const test_options = b.addOptions();
     test_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
+    test_options.addOptionPath("zigvet_exe", exe.getEmittedBin());
     const test_module = zigvetModule(b, target, optimize, options);
     test_module.addOptions("test_options", test_options);
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
