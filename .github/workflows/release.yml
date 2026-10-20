@@ -1,7 +1,9 @@
 # A tag is the release. What is published is whatever the tag points at, so
 # this re-runs the full gate on the tagged commit rather than trusting that it
 # was green on main, and refuses a tag that disagrees with the version in
-# build.zig.zon, which is what `zigvet --version` prints.
+# build.zig.zon, which is what `zigvet --version` prints. Once it is public,
+# kmoneil/homebrew-tap and kmoneil/scoop-bucket are told, and each moves its
+# zigvet to the release after checking and installing it.
 name: release
 
 on:
@@ -144,3 +146,81 @@ jobs:
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
             -F draft=false > /dev/null
           echo "release ${RELEASE_ID} is published"
+
+  # The Homebrew formula in kmoneil/homebrew-tap names the four macOS and
+  # Linux binaries, each with its digest, and moving them to a new release is
+  # the tap's job: its bump-zigvet workflow rewrites the formula, checks every
+  # file's provenance against this workflow, installs and tests it on macOS,
+  # and only then lands it. This tells it there is a release to move to.
+  #
+  # Its own job, so a red here says what it means: by the time it runs the
+  # release is out and cannot be withdrawn, so it is never "the release is
+  # bad", only "the release is out and brew still installs the previous one".
+  #
+  # Not for a prerelease, which publish does not make the latest either; the
+  # tap refuses a tag that is not vX.Y.Z. Guarded on the push event itself and
+  # not only through `needs: publish`, so adding always() somewhere later
+  # cannot make a dispatch tell the tap anything.
+  bump-the-tap:
+    name: tell the tap
+    needs: publish
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    # Nothing here uses this repository's token. The one credential is the
+    # tap's, below.
+    permissions: {}
+    steps:
+      - name: dispatch to kmoneil/homebrew-tap
+        env:
+          # Not github.token: that is scoped to this repository and cannot
+          # dispatch to another. A fine-grained token limited to the tap and the
+          # bucket, with Contents: read and write, is the smallest thing that
+          # can.
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "TAP_DISPATCH_TOKEN is not set, so the formula was not bumped." >&2
+            echo "brew install kmoneil/tap/zigvet still fetches the previous release." >&2
+            echo >&2
+            echo "To fix it for good: add a fine-grained token limited to" >&2
+            echo "kmoneil/homebrew-tap and kmoneil/scoop-bucket, with Contents: read" >&2
+            echo "and write, as the TAP_DISPATCH_TOKEN secret on this repository." >&2
+            echo >&2
+            echo "To fix it for ${TAG} now:" >&2
+            echo "  gh workflow run bump-zigvet.yml --repo kmoneil/homebrew-tap -f tag=${TAG}" >&2
+            exit 1
+          fi
+          gh api repos/kmoneil/homebrew-tap/dispatches \
+            -f event_type=zigvet-released \
+            -f "client_payload[tag]=${TAG}"
+          echo "asked the tap to bump to ${TAG}"
+
+  # The same for the Scoop bucket: kmoneil/scoop-bucket's bump-zigvet workflow
+  # rewrites bucket/zigvet.json, checks provenance, installs it with Scoop on
+  # Windows, and only then lands it. Its own job, so a red says which of the
+  # two was not told.
+  bump-the-bucket:
+    name: tell the bucket
+    needs: publish
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: dispatch to kmoneil/scoop-bucket
+        env:
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "TAP_DISPATCH_TOKEN is not set, so the Scoop manifest was not bumped." >&2
+            echo "scoop install kmoneil/zigvet still fetches the previous release." >&2
+            echo >&2
+            echo "To fix it for ${TAG} now:" >&2
+            echo "  gh workflow run bump-zigvet.yml --repo kmoneil/scoop-bucket -f tag=${TAG}" >&2
+            exit 1
+          fi
+          gh api repos/kmoneil/scoop-bucket/dispatches \
+            -f event_type=zigvet-released \
+            -f "client_payload[tag]=${TAG}"
+          echo "asked the bucket to bump to ${TAG}"

@@ -77,7 +77,22 @@ with an allow comment.
 
 ## Install
 
-Each [release](https://github.com/kmoneil/zigvet/releases) carries a binary
+With Homebrew, on macOS or Linux:
+
+```sh
+brew install kmoneil/tap/zigvet
+```
+
+With Scoop, on Windows:
+
+```powershell
+scoop bucket add kmoneil https://github.com/kmoneil/scoop-bucket
+scoop install kmoneil/zigvet
+```
+
+Both move to each release by themselves, after checking every file's build
+provenance and installing it. Or download a binary yourself: each
+[release](https://github.com/kmoneil/zigvet/releases) carries a binary
 for Linux, macOS and Windows on x86-64 and arm64, named
 `zigvet-<linux|darwin|windows>-<amd64|arm64>` (`.exe` on Windows), with
 `SHA256SUMS` and a build-provenance attestation for every file. On an
