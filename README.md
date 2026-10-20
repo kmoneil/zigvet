@@ -68,10 +68,13 @@ expressions, container-level declarations, `comptime` parameters, and calls
 to an `inline fn` (or one returning a comptime-only type) with comptime-known
 arguments. The check reads one function at a time and the syntax alone, so
 it knows a callee only by name: the file's own functions, and
-`std.fmt.comptimePrint`, `std.math.maxInt` and `minInt`.
+`std.fmt.comptimePrint`, `std.math.maxInt` and `minInt`. A function whose
+return type only comptime has (`type`, `comptime_int`, `comptime_float`, or
+a pointer, slice, array, optional or error union of one, such as
+`[]const type`) runs only at compile time, and is not checked.
 
-The one accepted false positive is a function only ever run at compile
-time, where the address is comptime memory and legal. Say so with a
+The one accepted false positive is any other function only ever run at
+compile time, where the address is comptime memory and legal. Say so with a
 `comptime` block in the function, as upstream asks for its own check, or
 with an allow comment.
 
