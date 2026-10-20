@@ -23,7 +23,8 @@ const usage =
     \\                    given more than once.
     \\
     \\Exit status: 0 if nothing was reported, 1 if a finding or parse error
-    \\was, 2 on a usage error or a path that could not be read.
+    \\was, 2 on a usage error or a path that could not be read or holds no
+    \\.zig file to check.
     \\
 ;
 
@@ -65,13 +66,20 @@ pub fn main(init: std.process.Init) !u8 {
     var unreadable = false;
     var files: std.ArrayList([]const u8) = .empty;
     for (run.paths) |arg| {
+        const before = files.items.len;
         walk.collect(arena, io, cwd, arg, run.excludes, &files) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
                 std.debug.print("zigvet: {s}: {t}\n", .{ arg, err });
                 unreadable = true;
+                continue;
             },
         };
+        // Checking nothing would read exactly like a clean run (#13).
+        if (files.items.len == before) {
+            std.debug.print("zigvet: {s}: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)\n", .{arg});
+            unreadable = true;
+        }
     }
     walk.sortUnique(&files);
 
@@ -130,6 +138,37 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     }
     if (paths.items.len == 0) return .{ .usage_error = "" };
     return .{ .run = .{ .paths = paths.items, .excludes = excludes.items } };
+}
+
+test "a named path that yields no file to check is an error, not a clean run" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "empty");
+    for ([_][]const u8{ "only-hidden/.cache/a.zig", "gen/a.zig", "notes.txt" }) |sub_path| {
+        try tmp.dir.createDirPath(io, std.fs.path.dirname(sub_path) orelse ".");
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "" });
+    }
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+
+    // A file named outright is checked whatever its extension, and a hidden
+    // directory named outright is walked.
+    const result = try std.process.run(gpa, io, .{
+        .argv = &.{ exe, "empty", "only-hidden", "only-hidden/.cache", "notes.txt", "gen", "--exclude", "gen/a.zig" },
+        .cwd = .{ .dir = tmp.dir },
+    });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, result.term);
+    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expectEqualStrings(
+        \\zigvet: empty: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)
+        \\zigvet: only-hidden: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)
+        \\zigvet: gen: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)
+        \\
+    , result.stderr);
 }
 
 test "parseArgs: paths and excludes, in any order" {
