@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape };
+pub const Rule = enum { escape, alias };
 
 /// Where a value made on the stack leaves the function that made it.
 pub const Sink = enum {
@@ -37,6 +37,7 @@ pub const Finding = struct {
 
     pub const Detail = union(enum) {
         escape: Escape,
+        alias: Alias,
         allow: Allow,
     };
 
@@ -46,6 +47,15 @@ pub const Finding = struct {
         /// The name of the function it leaves.
         function: []const u8,
         sink: Sink,
+    };
+
+    pub const Alias = struct {
+        /// What the element reads, as written.
+        read: []const u8,
+        /// Where the initializer is stored, as written.
+        target: []const u8,
+        /// What an earlier element stored that the read overlaps.
+        stored: []const u8,
     };
 
     /// An allow comment that suppresses nothing, and why.
@@ -64,6 +74,7 @@ pub const Finding = struct {
     pub fn rule(finding: Finding) ?Rule {
         return switch (finding.detail) {
             .escape => .escape,
+            .alias => .alias,
             .allow => null,
         };
     }
@@ -100,6 +111,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
     switch (finding.detail) {
         .escape => |e| try w.print("{s} made here leaves {s} through {s}", .{
             e.what, e.function, e.sink.text(),
+        }),
+        .alias => |a| try w.print("{s} read here, but the initializer is written straight into {s} and has already stored {s}", .{
+            a.read, a.target, a.stored,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
