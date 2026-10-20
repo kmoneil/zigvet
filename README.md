@@ -118,7 +118,7 @@ leaves the binary in `zig-out/bin/`.
 ## Usage
 
 ```
-zigvet <path>...
+zigvet [--exclude <path>]... <path>...
 zigvet --version
 ```
 
@@ -127,6 +127,11 @@ files, skipping hidden directories, `zig-out` and `zig-pkg`. Paths print
 cleaned (`./src/a.zig` as `src/a.zig`), and a file reached more than one
 way is checked once. A file that does not parse is reported with the error
 `zig ast-check` gives for it.
+
+`--exclude <path>` skips a file or directory, and may be given more than
+once. It is matched against paths as zigvet prints them, so name it
+relative to the current directory: `zigvet . --exclude _tmp` leaves out a
+scratch directory, or a second worktree checked out inside it.
 
 Exit status: 0 if nothing was reported, 1 if a finding or parse error was,
 2 on a usage error or a path that could not be read.

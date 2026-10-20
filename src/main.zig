@@ -11,12 +11,16 @@ const vet = @import("vet.zig");
 const walk = @import("walk.zig");
 
 const usage =
-    \\Usage: zigvet <path>...
+    \\Usage: zigvet [--exclude <path>]... <path>...
     \\       zigvet --version
     \\
     \\Checks each file named, and every .zig file under each directory named,
     \\for code the Zig compiler accepts that is almost certainly wrong.
     \\Directories that are hidden, zig-out or zig-pkg are skipped.
+    \\
+    \\  --exclude <path>  Skip this file or directory, named as zigvet prints
+    \\                    paths: relative to the current directory. May be
+    \\                    given more than once.
     \\
     \\Exit status: 0 if nothing was reported, 1 if a finding or parse error
     \\was, 2 on a usage error or a path that could not be read.
@@ -38,32 +42,30 @@ pub fn main(init: std.process.Init) !u8 {
     const out = &stdout_writer.interface;
 
     const args = (try init.minimal.args.toSlice(arena))[1..];
-    if (args.len == 0) {
-        std.debug.print("{s}", .{usage});
-        return 2;
-    }
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+    const run = switch (try parseArgs(arena, args)) {
+        .run => |run| run,
+        .help => {
             try out.writeAll(usage);
             try out.flush();
             return 0;
-        }
-        if (std.mem.eql(u8, arg, "--version")) {
+        },
+        .version => {
             try out.print("zigvet {s}\n", .{build_options.version});
             try out.flush();
             return 0;
-        }
-        if (arg.len > 1 and arg[0] == '-') {
-            std.debug.print("zigvet: unknown option '{s}'\n\n{s}", .{ arg, usage });
+        },
+        .usage_error => |message| {
+            if (message.len > 0) std.debug.print("zigvet: {s}\n\n", .{message});
+            std.debug.print("{s}", .{usage});
             return 2;
-        }
-    }
+        },
+    };
 
     const cwd = Io.Dir.cwd();
     var unreadable = false;
     var files: std.ArrayList([]const u8) = .empty;
-    for (args) |arg| {
-        walk.collect(arena, io, cwd, arg, &files) catch |err| switch (err) {
+    for (run.paths) |arg| {
+        walk.collect(arena, io, cwd, arg, run.excludes, &files) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
                 std.debug.print("zigvet: {s}: {t}\n", .{ arg, err });
@@ -90,6 +92,73 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (unreadable) return 2;
     return @intFromBool(reported > 0);
+}
+
+/// What the command line asks for.
+const Command = union(enum) {
+    run: struct {
+        paths: []const []const u8,
+        /// Cleaned, as `walk.collect` cleans the paths it lists.
+        excludes: []const []const u8,
+    },
+    help,
+    version,
+    /// Why the command line cannot be run; empty when the usage alone says.
+    usage_error: []const u8,
+};
+
+/// `-h` and `--help`, `--version`, and an unknown option take effect where
+/// they stand; anything after them is not read.
+fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
+    var paths: std.ArrayList([]const u8) = .empty;
+    var excludes: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return .help;
+        if (std.mem.eql(u8, arg, "--version")) return .version;
+        const exclude = if (std.mem.eql(u8, arg, "--exclude")) exclude: {
+            i += 1;
+            break :exclude if (i < args.len) args[i] else "";
+        } else std.mem.cutPrefix(u8, arg, "--exclude=");
+        if (exclude) |path| {
+            if (path.len == 0) return .{ .usage_error = "--exclude needs a path" };
+            try excludes.append(arena, try std.fs.path.resolveAlloc(arena, &.{path}));
+        } else if (arg.len > 1 and arg[0] == '-') {
+            return .{ .usage_error = try arena.print("unknown option '{s}'", .{arg}) };
+        } else try paths.append(arena, arg);
+    }
+    if (paths.items.len == 0) return .{ .usage_error = "" };
+    return .{ .run = .{ .paths = paths.items, .excludes = excludes.items } };
+}
+
+test "parseArgs: paths and excludes, in any order" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const run = (try parseArgs(arena, &.{ "src", "--exclude", "./_tmp/", "--exclude=src/vendor", "build.zig" })).run;
+    try std.testing.expectEqual(2, run.paths.len);
+    try std.testing.expectEqualStrings("src", run.paths[0]);
+    try std.testing.expectEqualStrings("build.zig", run.paths[1]);
+    try std.testing.expectEqual(2, run.excludes.len);
+    try std.testing.expectEqualStrings("_tmp", run.excludes[0]);
+    try std.testing.expectEqualStrings(try std.fs.path.resolveAlloc(arena, &.{"src/vendor"}), run.excludes[1]);
+}
+
+test "parseArgs: help, version and usage errors" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expect(try parseArgs(arena, &.{ "src", "--help" }) == .help);
+    try std.testing.expect(try parseArgs(arena, &.{ "-h", "-x" }) == .help);
+    try std.testing.expect(try parseArgs(arena, &.{ "--version", "src" }) == .version);
+    try std.testing.expectEqualStrings("--exclude needs a path", (try parseArgs(arena, &.{ "src", "--exclude" })).usage_error);
+    try std.testing.expectEqualStrings("--exclude needs a path", (try parseArgs(arena, &.{ "src", "--exclude=" })).usage_error);
+    try std.testing.expectEqualStrings("unknown option '-x'", (try parseArgs(arena, &.{ "-x", "--help" })).usage_error);
+    try std.testing.expectEqualStrings("", (try parseArgs(arena, &.{})).usage_error);
+    try std.testing.expectEqualStrings("", (try parseArgs(arena, &.{ "--exclude", "src" })).usage_error);
 }
 
 test "findings land where stdout's file is, not over its start" {
