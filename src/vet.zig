@@ -30,34 +30,47 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, w: *Wri
     defer arena_state.deinit();
 
     const kept = try findings(arena_state.allocator(), &tree);
-    for (kept) |finding| try report.write(w, path, tree.tokenLocation(0, finding.token), finding);
+    for (kept) |finding| try report.write(w, path, report.location(source, finding.offset), finding);
     return kept.len;
 }
 
 /// Runs every rule over `tree` and returns the findings no allow comment
-/// covers, in source order. Allocated with `arena`.
+/// covers, and a report for each allow comment that covers none, in source
+/// order. Allocated with `arena`.
 pub fn findings(arena: Allocator, tree: *const Ast) Allocator.Error![]Finding {
     var all: std.ArrayList(Finding) = .empty;
     try escape.check(arena, tree, &all);
-    return keep(tree.*, all.items);
+    return keep(arena, tree.source, all.items);
 }
 
-/// Sorts `all` into source order and drops the findings an allow comment
-/// covers, in place. Returns the ones kept.
-fn keep(tree: Ast, all: []Finding) []Finding {
-    std.mem.sort(Finding, all, {}, before);
-    var kept: usize = 0;
+/// Drops the findings an allow comment covers, adds a report for each allow
+/// comment that covers none, and sorts the lot into source order.
+fn keep(arena: Allocator, source: []const u8, all: []const Finding) Allocator.Error![]Finding {
+    const comments = try allow.scan(arena, source);
+    const used = try arena.alloc(bool, comments.len);
+    @memset(used, false);
+    var kept: std.ArrayList(Finding) = .empty;
     for (all) |finding| {
-        const loc = tree.tokenLocation(0, finding.token);
-        if (allow.allows(tree.source, loc.line_start, finding.rule())) continue;
-        all[kept] = finding;
-        kept += 1;
+        if (finding.rule()) |rule| {
+            const line_start = report.location(source, finding.offset).line_start;
+            if (allow.covering(source, line_start, rule)) |start| {
+                for (comments, used) |comment, *u| {
+                    if (comment.start == start) u.* = true;
+                }
+                continue;
+            }
+        }
+        try kept.append(arena, finding);
     }
-    return all[0..kept];
+    for (comments, used) |comment, u| {
+        if (!u) try kept.append(arena, allow.unused(comment));
+    }
+    std.mem.sort(Finding, kept.items, {}, before);
+    return kept.items;
 }
 
 fn before(_: void, a: Finding, b: Finding) bool {
-    return a.token < b.token;
+    return a.offset < b.offset;
 }
 
 test "a file that fails to parse reports the parse error with its path" {
@@ -102,20 +115,65 @@ test "the rules run on a file and an allow comment drops one report" {
     , out.written());
 }
 
-test "keep puts findings in source order" {
+test "an allow comment that suppresses nothing is reported, with why" {
     const gpa = std.testing.allocator;
-    var tree = try Ast.parse(gpa, "fn f(n: u8) void { _ = &.{n}; _ = &.{n}; }\n", .{});
-    defer tree.deinit(gpa);
-    const tags = tree.tokens.items(.tag);
-    const first: Ast.TokenIndex = @intCast(std.mem.findScalar(std.zig.Token.Tag, tags, .ampersand).?);
-    const second: Ast.TokenIndex = @intCast(std.mem.findScalarPos(std.zig.Token.Tag, tags, first + 1, .ampersand).?);
+    const source =
+        \\fn stale(x: u32) u32 {
+        \\    // zigvet: allow escape returned by value since the refactor
+        \\    return x + 1;
+        \\}
+        \\fn typo(x: u32) []const u32 {
+        \\    // zigvet: allow escpae only run at comptime
+        \\    return &.{x + 1};
+        \\}
+        \\fn noReason(x: u32) []const u32 {
+        \\    // zigvet: allow escape
+        \\    return &.{x + 1};
+        \\}
+        \\fn trailing(x: u32) []const u32 {
+        \\    return &.{x + 1}; // zigvet: allow escape only run at comptime
+        \\}
+        \\fn used(x: u32) []const u32 {
+        \\    // zigvet: allow escape only run at comptime
+        \\    return &.{x + 1};
+        \\}
+        \\
+    ;
+    var out: Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectEqual(7, try vetSource(gpa, "a.zig", source, &out.writer));
+    try std.testing.expectEqualStrings(
+        \\a.zig:2:5: allow: suppresses nothing: no escape finding on the line below it
+        \\    hint: delete it, or move it directly above the line it excuses
+        \\a.zig:6:5: allow: no rule named 'escpae' (rules: escape)
+        \\    hint: write it as `// zigvet: allow <rule> <reason>`
+        \\a.zig:7:12: escape: anonymous array made here leaves typo through return
+        \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const
+        \\a.zig:10:5: allow: gives no reason, so it suppresses nothing
+        \\    hint: after the rule's name, say why the report is wrong
+        \\a.zig:11:12: escape: anonymous array made here leaves noReason through return
+        \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const
+        \\a.zig:14:12: escape: anonymous array made here leaves trailing through return
+        \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const
+        \\a.zig:14:23: allow: applies to the line below it, not its own line
+        \\    hint: move it onto its own line, directly above the line it excuses
+        \\
+    , out.written());
+}
+
+test "keep puts findings in source order" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const source = "fn f(n: u8) void { _ = &.{n}; _ = &.{n}; }\n";
+    const first = std.mem.findScalar(u8, source, '&').?;
+    const second = std.mem.findScalarPos(u8, source, first + 1, '&').?;
     const detail: Finding.Detail = .{ .escape = .{ .what = "anonymous array", .function = "f", .sink = .@"return" } };
-    var all = [_]Finding{
-        .{ .token = second, .hint = "", .detail = detail },
-        .{ .token = first, .hint = "", .detail = detail },
+    const all = [_]Finding{
+        .{ .offset = second, .hint = "", .detail = detail },
+        .{ .offset = first, .hint = "", .detail = detail },
     };
-    const kept = keep(tree, &all);
+    const kept = try keep(arena_state.allocator(), source, &all);
     try std.testing.expectEqual(2, kept.len);
-    try std.testing.expectEqual(first, kept[0].token);
-    try std.testing.expectEqual(second, kept[1].token);
+    try std.testing.expectEqual(first, kept[0].offset);
+    try std.testing.expectEqual(second, kept[1].offset);
 }
