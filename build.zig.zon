@@ -1,0 +1,15 @@
+.{
+    .name = .zigvet,
+    .version = "0.0.0",
+    .fingerprint = 0x36366ba73c32fbe2, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    // No dependencies, by design: std.zig.Ast, the compiler's own parser, is
+    // the only parser.
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

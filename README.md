@@ -7,7 +7,8 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: design stage. Nothing is implemented yet.
+Status: the command runs, walks paths and reports parse errors. No rule is
+implemented yet; escape, below, is the first.
 
 ## Rule one: escape
 
@@ -40,17 +41,59 @@ or a container-level constant, which is evaluated at compile time and static:
 const monitoring_read = [_][]const u8{Scope.monitoring.url()};
 ```
 
+## Usage
+
+```
+zigvet <path>...
+```
+
+A file is checked whatever its extension. A directory is walked for `.zig`
+files, skipping hidden directories, `zig-out` and `zig-pkg`. A file that
+does not parse is reported with the error `zig ast-check` gives for it.
+
+Exit status: 0 if nothing was reported, 1 if a finding or parse error was,
+2 on a usage error or a path that could not be read.
+
 ## Output
 
 ```
 path:line:col: escape: <what> made here leaves <function> through <return | field | global | out param>
+    hint: <one line on how to fix it>
 ```
 
-followed by a one-line fix hint. Exit 1 when anything is reported. Suppress a
-report it gets wrong with `// zigvet: allow escape <reason>` on the line
-before.
+Findings go to stdout, in path order and then source order.
 
-Intended use: a `zig build lint` step, the way `zig fmt --check` is used.
+## Allowing a report
+
+For a report zigvet gets wrong, say so in the comment lines directly above
+the reported line, naming the rule and giving a reason:
+
+```zig
+// zigvet: allow escape only called at comptime, from the build script
+return &.{Scope.monitoring.url()};
+```
+
+The reason is required; an allow comment without one suppresses nothing.
+
+## Use it in a build
+
+Add zigvet to `build.zig.zon` with `zig fetch --save
+git+https://github.com/kmoneil/zigvet`, then give `build.zig` a lint step,
+the way `zig fmt --check` is used:
+
+```zig
+const zigvet = b.dependency("zigvet", .{
+    .target = b.graph.host,
+    .optimize = .ReleaseSafe,
+});
+const vet = b.addRunArtifact(zigvet.artifact("zigvet"));
+vet.setCwd(b.path("."));
+vet.addArgs(&.{"src"});
+b.step("lint", "Report code that compiles but is wrong").dependOn(&vet.step);
+```
+
+`zig build lint` then fails when zigvet reports anything. zigvet's own
+`zig build lint` is the same step run over its `src/`.
 
 ## What a rule has to be
 

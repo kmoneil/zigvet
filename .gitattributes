@@ -1,0 +1,4 @@
+# Tests compare multiline string literals byte for byte; keep LF on every
+# platform.
+*.zig text eol=lf
+*.zon text eol=lf
