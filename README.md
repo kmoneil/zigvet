@@ -141,7 +141,9 @@ relative to the current directory: `zigvet . --exclude _tmp` leaves out a
 scratch directory, or a second worktree checked out inside it.
 
 Exit status: 0 if nothing was reported, 1 if a finding or parse error was,
-2 on a usage error or a path that could not be read.
+2 on a usage error or a path that could not be read or holds no `.zig` file
+to check. So a lint step aimed at a directory whose Zig has moved fails
+rather than passing with nothing checked.
 
 ## Output
 
