@@ -206,6 +206,24 @@ chmod +x zigvet-darwin-arm64 && mv zigvet-darwin-arm64 /usr/local/bin/zigvet
 A binary downloaded with a browser on macOS is quarantined; clear it with
 `xattr -d com.apple.quarantine zigvet`. `curl` does not set the flag.
 
+Releases after v0.2.0 are also reproducible: a tag built with Zig 0.17.0
+from ziglang.org gives the same bytes wherever it is built, so a release
+can be checked without trusting the workflow that made it. CI builds every
+change on Linux and on macOS and compares them. To check one yourself:
+
+```sh
+git clone --depth 1 --branch <tag> https://github.com/kmoneil/zigvet && cd zigvet
+zig build release && cd zig-out/release
+curl -fLO https://github.com/kmoneil/zigvet/releases/download/<tag>/SHA256SUMS
+shasum -a 256 --check SHA256SUMS
+```
+
+It takes Zig as ziglang.org ships it: a Zig built against another LLVM,
+such as Homebrew's, writes its linker's name into the Linux binaries, so
+those two differ while the macOS and Windows ones still match. The release
+binaries carry no debug info, since it holds the paths of the machine that
+built them, so a panic prints its message but not a symbolized stack trace.
+
 From source, with Zig 0.17.0: `zig build -Doptimize=ReleaseSafe`, which
 leaves the binary in `zig-out/bin/`.
 
