@@ -52,15 +52,19 @@ Made on the stack, and not comptime-known:
 - the address of an array or struct initializer, `&.{...}`, `&[_]T{...}`,
   `&T{...}`, or a slice of one;
 - the address of a call's result, `&f()`;
-- the address of a local, parameter or capture, a slice of a local array, or
-  the address of one field or element of a local held by value.
+- the address of a local, parameter or capture, a slice of a local array,
+  the address of one field or element of a local held by value, or a slice
+  of an array field of a local or parameter held by value
+  (`id.bytes[0..id.len]` with `id: Id`) when the file declares the struct.
 
 Leaving the function:
 
 - returned, directly or through `if`, `switch`, `orelse`, `catch`, `try`, a
   labeled block, a cast, a struct returned by value, a local that holds it,
-  or a `std` call that returns part of its argument
-  (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`);
+  a `std` call that returns part of its argument
+  (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`), or one of
+  the file's own that does, such as `return id.slice();` with `id` held by
+  value and `fn slice(self: *const Id) []const u8 { return self.bytes[0..self.len]; }`;
 - stored through a parameter (`self.items = ...`, `out.* = ...`) or to a
   container-level variable. Stores report temporaries only: a named local
   stored outward is usually deliberate (a context pointer for the length of
@@ -70,13 +74,18 @@ Leaving the function:
 Comptime-known memory is static and never reported: literals, `comptime`
 expressions, container-level declarations, `comptime` parameters, and calls
 to an `inline fn` (or one returning a comptime-only type) with comptime-known
-arguments. The check reads one function at a time and the syntax alone, so
+arguments. The check reads the syntax alone, so
 it knows a callee only by name: the file's own functions,
 `std.fmt.comptimePrint`, `std.math.maxInt` and `minInt`, and as returning
 part of an argument, `std.fmt`'s `bufPrint` and `bufPrintSentinel` and
 `std.mem`'s `sliceTo`, `span`, `trim`, `trimStart`, `trimEnd`, `cutPrefix`,
 `cutSuffix`, `asBytes`, `sliceAsBytes`, `bytesAsSlice` and `bytesAsValue`.
-A function whose
+One of the file's own functions returns part of an argument when it
+returns, directly, a slice of an array that a pointer parameter points at
+or the address of one of its fields. A type is known only when the file
+declares it, by name or as `@This()`, and a method only through its
+receiver's written type: `const p = &id; return p.slice();` is not
+followed, `const p: *const Id = &id;` is. A function whose
 return type only comptime has (`type`, `comptime_int`, `comptime_float`, or
 a pointer, slice, array, optional or error union of one, such as
 `[]const type`) runs only at compile time, and is not checked.

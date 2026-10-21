@@ -6,10 +6,17 @@
 //! capture it names, and collecting the sinks: `return`, a store through a
 //! parameter, and a store to a container-level variable. The second follows
 //! each sink's value back through `if`, `switch`, `orelse`, `catch`, labeled
-//! blocks, locals and the `std` calls that return a view of an argument
-//! (`std.fmt.bufPrint`, `std.mem.sliceTo`, ...), and reports a value that is
-//! the address or a slice of stack memory whose contents are not
-//! comptime-known.
+//! blocks, locals, the `std` calls that return a view of an argument
+//! (`std.fmt.bufPrint`, `std.mem.sliceTo`, ...) and the file's own functions
+//! that return part of what a pointer parameter points at, and reports a
+//! value that is the address or a slice of stack memory whose contents are
+//! not comptime-known.
+//!
+//! A struct's field is known to be an array when the file declares the
+//! struct: a type is resolved by name through the containers around where it
+//! is written (`Id`, `Self`, `@This()`), never across files. So
+//! `id.bytes[0..n]` of an `id: Id` held by value is reported when `bytes` is
+//! `[8]u8`, and not when it is a slice, which points elsewhere.
 //!
 //! Comptime-known memory is static, so `&.{"literal"}` is fine and
 //! `&.{f()}` is not: a call is evaluated at run time unless it is under
@@ -38,6 +45,15 @@ const Sink = report.Sink;
 /// included, is allocated with `arena`, which must outlive the findings.
 pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
     var rule: Rule = .{ .arena = arena, .tree = tree, .findings = findings };
+    rule.parents = try arena.alloc(Node.OptionalIndex, tree.nodes.len);
+    @memset(rule.parents, .none);
+    var nodes: std.ArrayList(Node.Index) = .empty;
+    for (0..tree.nodes.len) |i| {
+        const node: Node.Index = @fromBackingInt(@intCast(i));
+        nodes.clearRetainingCapacity();
+        try children.append(arena, tree, node, &nodes);
+        for (nodes.items) |child| rule.parents[@backingInt(child)] = node.toOptional();
+    }
     for (0..tree.nodes.len) |i| {
         const node: Node.Index = @fromBackingInt(@intCast(i));
         if (tree.nodeTag(node) != .fn_decl) continue;
@@ -73,6 +89,11 @@ const Rule = struct {
     /// Function name to whether every function of that name in the file
     /// gives a comptime-known result for comptime-known arguments.
     comptime_result_fns: std.StringHashMapUnmanaged(bool) = .empty,
+    /// Every node's parent, for the containers around a type's name.
+    parents: []Node.OptionalIndex = &.{},
+    /// The file's functions looked at so far, to which parameter their
+    /// result points into (`viewOf`).
+    views: std.AutoHashMapUnmanaged(Node.Index, ?u32) = .empty,
 
     /// The function being checked.
     function_name: []const u8 = "",
@@ -116,6 +137,7 @@ const Rule = struct {
                 .mutable = false,
                 .is_comptime = is_comptime,
                 .storage = if (param.type_expr) |t| storageOfType(tree, t) else .unknown,
+                .type_expr = .fromOptional(param.type_expr),
                 .init = .none,
             });
         }
@@ -194,6 +216,7 @@ const Rule = struct {
                     .mutable = tree.tokenTag(decl.ast.mut_token) == .keyword_var,
                     .is_comptime = decl.comptime_token != null or (if (decl.ast.type_node.unwrap()) |t| isComptimeType(tree, t) else false),
                     .storage = storageOfLocal(tree, decl.ast.type_node, decl.ast.init_node),
+                    .type_expr = typeOfLocal(tree, decl.ast.type_node, decl.ast.init_node),
                     .init = decl.ast.init_node,
                 });
             },
@@ -332,6 +355,7 @@ const Rule = struct {
                 .mutable = false,
                 .is_comptime = is_comptime,
                 .storage = if (by_pointer) .pointer else .unknown,
+                .type_expr = .none,
                 .init = .none,
             });
             token += 1;
@@ -496,11 +520,173 @@ const Rule = struct {
                 return r.stackSource(operand, depth);
             },
             .call_one, .call_one_comma, .call, .call_comma => {
-                const argument = r.viewedArgument(node) orelse return null;
-                return r.stackSource(argument, depth);
+                if (r.viewedArgument(node)) |argument| return r.stackSource(argument, depth);
+                return r.ownViewSource(node, depth);
             },
             else => null,
         };
+    }
+
+    /// A call to one of the file's own functions whose result points into
+    /// what a pointer parameter points at (`viewOf`): where that pointer
+    /// comes from. A method called on a binding is given the binding's
+    /// address when it takes a pointer, so `id.slice()` points into `id`
+    /// when `id` is held by value, and wherever `id` points when it is a
+    /// pointer.
+    fn ownViewSource(r: *Rule, node: Node.Index, depth: u8) Allocator.Error!?Source {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node).?;
+        const callee = call.ast.fn_expr;
+        const arguments = call.ast.params;
+        switch (tree.nodeTag(callee)) {
+            .identifier => {
+                if (r.resolved.contains(callee)) return null;
+                const fn_decl = r.declaredFn(callee, tree.tokenSlice(tree.nodeMainToken(callee))) orelse return null;
+                const view = try r.viewOf(fn_decl) orelse return null;
+                return if (view < arguments.len) r.stackSource(arguments[view], depth) else null;
+            },
+            .field_access => {
+                const receiver, const name_token = tree.nodeData(callee).node_and_token;
+                const name = tree.tokenSlice(name_token);
+                const index = if (tree.nodeTag(receiver) == .identifier) r.resolved.get(receiver) else null;
+                // `Id.slice(&id)`, through the type's namespace.
+                if (index == null) {
+                    const container = r.containerOf(receiver, 0) orelse return null;
+                    const fn_decl = memberFn(tree, container, name) orelse return null;
+                    const view = try r.viewOf(fn_decl) orelse return null;
+                    return if (view < arguments.len) r.stackSource(arguments[view], depth) else null;
+                }
+                // A method: the receiver is its first argument.
+                const binding = r.bindings.items[index.?];
+                const type_expr = binding.type_expr.unwrap() orelse return null;
+                const value_type = switch (binding.storage) {
+                    .value => type_expr,
+                    .pointer => pointee(tree, type_expr) orelse return null,
+                    .array, .unknown => return null,
+                };
+                const container = r.containerOf(value_type, 0) orelse return null;
+                const fn_decl = memberFn(tree, container, name) orelse return null;
+                const view = try r.viewOf(fn_decl) orelse return null;
+                if (view > 0) return if (view - 1 < arguments.len) r.stackSource(arguments[view - 1], depth) else null;
+                if (binding.storage == .pointer) return r.stackSource(receiver, depth);
+                if (r.isComptimeBinding(index.?)) return null;
+                return try r.storageSource(tree.nodeMainToken(receiver), "address of", index.?);
+            },
+            else => return null,
+        }
+    }
+
+    /// Which parameter of `fn_decl`, one of the file's own, its result
+    /// points into, if any: one that points at one value (`p: *const T`)
+    /// and is returned sliced or with a field's address taken, as
+    /// `return p.bytes[0..p.len];` with `bytes` an array of the file's `T`,
+    /// `return &p.field;`, or `return p[0..n];` with `p: *const [N]u8`.
+    /// Only what it returns directly is looked at, through `if`, `switch`
+    /// and the like, not through its locals or its own calls.
+    fn viewOf(r: *Rule, fn_decl: Node.Index) Allocator.Error!?u32 {
+        if (r.views.get(fn_decl)) |known| return known;
+        const tree = r.tree;
+        const proto_node, const body = tree.nodeData(fn_decl).node_and_node;
+        var buffer: [1]Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, proto_node).?;
+        var returned: std.ArrayList(Node.Index) = .empty;
+        try returnValues(r.arena, tree, body, &returned);
+        var values: std.ArrayList(Node.Index) = .empty;
+        for (returned.items) |value| try r.leaves(value, &values);
+        const view = for (values.items) |value| {
+            if (r.viewedParam(proto, value)) |param| break param;
+        } else null;
+        try r.views.put(r.arena, fn_decl, view);
+        return view;
+    }
+
+    /// The parameter of `proto` that `value` points into, as `viewOf`
+    /// describes.
+    fn viewedParam(r: *Rule, proto: Ast.full.FnProto, value: Node.Index) ?u32 {
+        const tree = r.tree;
+        switch (tree.nodeTag(value)) {
+            .slice_open, .slice, .slice_sentinel => {
+                var sliced = tree.fullSlice(value).?.ast.sliced;
+                while (tree.nodeTag(sliced) == .grouped_expression) sliced = tree.nodeData(sliced).node_and_token[0];
+                switch (tree.nodeTag(sliced)) {
+                    // `p[a..b]` and `p.*[a..b]`, with `p: *const [N]T`.
+                    .identifier, .deref => {
+                        const name = if (tree.nodeTag(sliced) == .deref) tree.nodeData(sliced).node else sliced;
+                        const param, const pointed = pointerParam(tree, proto, name) orelse return null;
+                        return switch (tree.nodeTag(pointed)) {
+                            .array_type, .array_type_sentinel => param,
+                            else => null,
+                        };
+                    },
+                    // `p.field[a..b]`, with `field` an array.
+                    .field_access => {
+                        const lhs, const field = tree.nodeData(sliced).node_and_token;
+                        const param, const pointed = pointerParam(tree, proto, lhs) orelse return null;
+                        const container = r.containerOf(pointed, 0) orelse return null;
+                        return if (fieldIsArray(tree, container, tree.tokenSlice(field))) param else null;
+                    },
+                    else => return null,
+                }
+            },
+            // `&p.field`, whatever the field.
+            .address_of => {
+                const operand = tree.nodeData(value).node;
+                if (tree.nodeTag(operand) != .field_access) return null;
+                const param, _ = pointerParam(tree, proto, tree.nodeData(operand).node_and_token[0]) orelse return null;
+                return param;
+            },
+            else => return null,
+        }
+    }
+
+    /// The struct or union that `type_expr` names, when the file declares
+    /// it: a name declared in a container around where it is written
+    /// (`Id`, `Self`), possibly through another name, or `@This()`. Null for
+    /// anything else, such as a type from another file.
+    fn containerOf(r: *Rule, type_expr: Node.Index, depth: u8) ?Node.Index {
+        const tree = r.tree;
+        if (depth > 4) return null;
+        switch (tree.nodeTag(type_expr)) {
+            .grouped_expression => return r.containerOf(tree.nodeData(type_expr).node_and_token[0], depth),
+            .builtin_call_two, .builtin_call_two_comma => {
+                if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(type_expr)), "@This")) return null;
+                return r.enclosingContainer(type_expr);
+            },
+            .identifier => {
+                const name = tree.tokenSlice(tree.nodeMainToken(type_expr));
+                var around = r.enclosingContainer(type_expr);
+                while (around) |container| : (around = r.enclosingContainer(container)) {
+                    const decl = memberDecl(tree, container, name) orelse continue;
+                    const init = tree.fullVarDecl(decl).?.ast.init_node.unwrap() orelse return null;
+                    var buffer: [2]Node.Index = undefined;
+                    if (tree.fullContainerDecl(&buffer, init) != null) return init;
+                    return r.containerOf(init, depth + 1);
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    /// The innermost container around `node`: a struct, union, enum or
+    /// opaque, or the file.
+    fn enclosingContainer(r: *Rule, node: Node.Index) ?Node.Index {
+        var up = r.parents[@backingInt(node)].unwrap();
+        while (up) |parent| : (up = r.parents[@backingInt(parent)].unwrap()) {
+            var buffer: [2]Node.Index = undefined;
+            if (r.tree.fullContainerDecl(&buffer, parent) != null) return parent;
+        }
+        return null;
+    }
+
+    /// The function `name` declared in a container around `node`.
+    fn declaredFn(r: *Rule, node: Node.Index, name: []const u8) ?Node.Index {
+        var around = r.enclosingContainer(node);
+        while (around) |container| : (around = r.enclosingContainer(container)) {
+            if (memberFn(r.tree, container, name)) |fn_decl| return fn_decl;
+        }
+        return null;
     }
 
     /// The argument a call's result points into, when the callee is one of
@@ -588,6 +774,20 @@ const Rule = struct {
                 if (binding.storage == .array and !r.isComptimeBinding(index)) {
                     return try r.storageSource(tree.nodeMainToken(sliced), "slice of", index);
                 }
+            },
+            // `x.field[a..b]` of an `x` held by value, with `field` an array.
+            .field_access => {
+                const lhs, const field = tree.nodeData(sliced).node_and_token;
+                if (tree.nodeTag(lhs) == .identifier) if (r.resolved.get(lhs)) |index| {
+                    const binding = r.bindings.items[index];
+                    if (binding.storage == .value and !r.isComptimeBinding(index)) {
+                        if (binding.type_expr.unwrap()) |type_expr| if (r.containerOf(type_expr, 0)) |container| {
+                            if (fieldIsArray(tree, container, tree.tokenSlice(field))) {
+                                return try r.storageSource(tree.nodeMainToken(lhs), "slice of a field of", index);
+                            }
+                        };
+                    }
+                };
             },
             else => if (isInit(tree.nodeTag(sliced)) and !r.isComptime(sliced)) return .{
                 .token = tree.firstToken(sliced),
@@ -847,6 +1047,9 @@ const Binding = struct {
     /// anything declared under `comptime`.
     is_comptime: bool,
     storage: Storage,
+    /// Its type as written: a parameter's, a local's annotation, or `T` of
+    /// a local's `T{...}`.
+    type_expr: Node.OptionalIndex,
     /// A local's initializer.
     init: Node.OptionalIndex,
 
@@ -977,6 +1180,90 @@ fn storageOfType(tree: *const Ast, type_expr: Node.Index) Storage {
         .builtin_call_two, .builtin_call_two_comma => .value,
         else => .unknown,
     };
+}
+
+fn typeOfLocal(tree: *const Ast, type_node: Node.OptionalIndex, init_node: Node.OptionalIndex) Node.OptionalIndex {
+    if (type_node != .none) return type_node;
+    const init = init_node.unwrap() orelse return .none;
+    var buffer: [2]Node.Index = undefined;
+    const struct_init = tree.fullStructInit(&buffer, init) orelse return .none;
+    return struct_init.ast.type_expr;
+}
+
+/// What a pointer to one value, `*T` or `*const T`, points at.
+fn pointee(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
+    const ptr = tree.fullPtrType(type_expr) orelse return null;
+    if (ptr.size != .one) return null;
+    return ptr.ast.child_type;
+}
+
+/// The index of the parameter of `proto` that `node` names, when it points
+/// at one value, and what it points at.
+fn pointerParam(tree: *const Ast, proto: Ast.full.FnProto, node: Node.Index) ?struct { u32, Node.Index } {
+    if (tree.nodeTag(node) != .identifier) return null;
+    const name = tree.tokenSlice(tree.nodeMainToken(node));
+    var params = proto.iterate(tree);
+    var index: u32 = 0;
+    while (params.next()) |param| : (index += 1) {
+        const name_token = param.name_token orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(name_token), name)) continue;
+        const pointed = pointee(tree, param.type_expr orelse return null) orelse return null;
+        return .{ index, pointed };
+    }
+    return null;
+}
+
+/// The declaration `name` among `container`'s members.
+fn memberDecl(tree: *const Ast, container: Node.Index, name: []const u8) ?Node.Index {
+    var buffer: [2]Node.Index = undefined;
+    for (tree.fullContainerDecl(&buffer, container).?.ast.members) |member| {
+        const decl = tree.fullVarDecl(member) orelse continue;
+        if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) return member;
+    }
+    return null;
+}
+
+/// The function `name` among `container`'s members.
+fn memberFn(tree: *const Ast, container: Node.Index, name: []const u8) ?Node.Index {
+    var buffer: [2]Node.Index = undefined;
+    for (tree.fullContainerDecl(&buffer, container).?.ast.members) |member| {
+        if (tree.nodeTag(member) != .fn_decl) continue;
+        var proto_buffer: [1]Node.Index = undefined;
+        const proto = tree.fullFnProto(&proto_buffer, tree.nodeData(member).node_and_node[0]).?;
+        const name_token = proto.name_token orelse continue;
+        if (std.mem.eql(u8, tree.tokenSlice(name_token), name)) return member;
+    }
+    return null;
+}
+
+/// Whether `container` has a field `name` declared as an array.
+fn fieldIsArray(tree: *const Ast, container: Node.Index, name: []const u8) bool {
+    var buffer: [2]Node.Index = undefined;
+    for (tree.fullContainerDecl(&buffer, container).?.ast.members) |member| {
+        const field = tree.fullContainerField(member) orelse continue;
+        if (field.ast.tuple_like or !std.mem.eql(u8, tree.tokenSlice(field.ast.main_token), name)) continue;
+        const type_expr = field.ast.type_expr.unwrap() orelse return false;
+        return switch (tree.nodeTag(type_expr)) {
+            .array_type, .array_type_sentinel => true,
+            else => false,
+        };
+    }
+    return false;
+}
+
+/// Appends the value of every `return` in `node`, a function's body, but
+/// not of the functions and types declared in it.
+fn returnValues(gpa: Allocator, tree: *const Ast, node: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
+    var nodes: std.ArrayList(Node.Index) = .empty;
+    try children.append(gpa, tree, node, &nodes);
+    for (nodes.items) |child| {
+        var buffer: [2]Node.Index = undefined;
+        if (tree.nodeTag(child) == .fn_decl or tree.fullContainerDecl(&buffer, child) != null) continue;
+        if (tree.nodeTag(child) == .@"return") {
+            if (tree.nodeData(child).opt_node.unwrap()) |value| try out.append(gpa, value);
+        }
+        try returnValues(gpa, tree, child, out);
+    }
 }
 
 fn storageOfLocal(tree: *const Ast, type_node: Node.OptionalIndex, init_node: Node.OptionalIndex) Storage {
@@ -1239,6 +1526,47 @@ test "a file's own function is not taken for the std one of the same name" {
         \\fn sliceTo(a: *const [4]u8, end: u8) []const u8 { _ = a; _ = end; return "fixed"; }
         \\fn own(n: u8) []const u8 { var buf: [4]u8 = .{ n, n, n, n }; return sliceTo(&buf, 0); }
     , "");
+}
+
+test "an array field of a struct held by value, sliced or through the file's own view of it (#28)" {
+    try expectEscapes(
+        \\const Id = struct {
+        \\    bytes: [8]u8 = undefined,
+        \\    name: []const u8 = "",
+        \\    len: u8 = 0,
+        \\    const Self = @This();
+        \\    fn slice(self: *const Id) []const u8 { return self.bytes[0..self.len]; }
+        \\    fn whole(self: *const Self) []const u8 { return &self.bytes; }
+        \\    fn label(self: *const Id) []const u8 { return self.name; }
+        \\    fn copied(self: Id) []const u8 { return self.bytes[0..self.len]; }
+        \\};
+        \\const Other = struct { b: [2]u8, fn slice(self: *const Other) []const u8 { _ = self; return "x"; } };
+        \\fn name(id: Id) []const u8 { return id.slice(); }
+        \\fn direct(id: Id) []const u8 { return id.bytes[0..id.len]; }
+        \\fn borrowed(id: *const Id) []const u8 { return id.slice(); }
+        \\fn viaSelf(id: Id) []const u8 { return id.whole(); }
+        \\fn local() []const u8 { var id: Id = .{}; return id.slice(); }
+        \\fn typed(n: u8) []const u8 { const id = Id{ .len = n }; return id.bytes[0..]; }
+        \\fn namespaced(id: Id) []const u8 { return Id.slice(&id); }
+        \\fn throughPointer() []const u8 { var id: Id = .{}; const p: *const Id = &id; return p.slice(); }
+        \\fn free(buf: *const [4]u8, n: usize) []const u8 { return buf[0..n]; }
+        \\fn freeCall(n: u8) []const u8 { var buf: [4]u8 = .{ n, n, n, n }; return free(&buf, 2); }
+        \\fn sliceField(id: Id) []const u8 { return id.name[0..]; }
+        \\fn labelled(id: Id) []const u8 { return id.label(); }
+        \\fn sameName(o: Other) []const u8 { return o.slice(); }
+        \\fn elsewhere(o: @import("o.zig").Id) []const u8 { return o.bytes[0..]; }
+    ,
+        \\9:45 slice of a field of parameter 'self' -> copied through return
+        \\12:37 address of parameter 'id' -> name through return
+        \\13:39 slice of a field of parameter 'id' -> direct through return
+        \\15:40 address of parameter 'id' -> viaSelf through return
+        \\16:50 address of local 'id' -> local through return
+        \\17:64 slice of a field of local 'id' -> typed through return
+        \\18:52 address of parameter 'id' -> namespaced through return
+        \\19:73 address of local 'id' -> throughPointer through return
+        \\21:79 address of local 'buf' -> freeCall through return
+        \\
+    );
 }
 
 test "comptime contexts and nested declarations" {
