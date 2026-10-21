@@ -366,8 +366,11 @@ function, so the two are worth having together.
 
 The admission test: the code compiles clean in every build mode and is still
 wrong. If the compiler, `zig fmt` or an existing linter already catches it, it
-is not a zigvet rule. Each rule is one lowercase word for what it catches:
-`escape`, `alias` and `cancel` so far.
+is not a zigvet rule. Code that is right but larger or slower than it could
+be is out of scope as well: what it costs depends on the build mode and on
+how many times it is instantiated, which the syntax does not show and a
+profiler of the built program does (#30). Each rule is one lowercase word
+for what it catches: `escape`, `alias` and `cancel` so far.
 
 ## Tests
 
