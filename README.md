@@ -382,6 +382,14 @@ every case with the Zig compiler and fails if it rejects one, so each case
 is checked to be code Zig accepts. If a later Zig release starts catching a
 shape, its case fails and the rule should drop it.
 
+`scripts/corpus-diff.sh` runs two builds of zigvet over the same
+directories, by default the latest tag and the working tree, and prints
+only the reports that differ, with each build's time. Run it before a rule
+change lands: over code that holds no new bug, the change should add
+nothing but the reports it was written for. List the directories in
+`corpus.txt` at the repository root (gitignored, one per line) or give them
+as arguments; `--base` and `--head` each take a git ref or a zigvet binary.
+
 ## License
 
 Apache-2.0; see [LICENSE](LICENSE).
