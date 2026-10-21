@@ -206,7 +206,7 @@ chmod +x zigvet-darwin-arm64 && mv zigvet-darwin-arm64 /usr/local/bin/zigvet
 A binary downloaded with a browser on macOS is quarantined; clear it with
 `xattr -d com.apple.quarantine zigvet`. `curl` does not set the flag.
 
-Releases after v0.2.0 are also reproducible: a tag built with Zig 0.17.0
+From v0.2.1 on, releases are also reproducible: a tag built with Zig 0.17.0
 from ziglang.org gives the same bytes wherever it is built, so a release
 can be checked without trusting the workflow that made it. CI builds every
 change on Linux and on macOS and compares them. To check one yourself:
@@ -305,7 +305,7 @@ excuse whatever is written there next.
 ## Use it in a build
 
 Add zigvet to `build.zig.zon`, pinned to a release tag, with `zig fetch
---save git+https://github.com/kmoneil/zigvet#v0.2.0`, then give `build.zig`
+--save git+https://github.com/kmoneil/zigvet#v0.2.1`, then give `build.zig`
 a lint step, the way `zig fmt --check` is used:
 
 ```zig
