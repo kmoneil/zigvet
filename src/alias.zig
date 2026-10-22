@@ -18,6 +18,16 @@
 //! pointer it is reached through (`.owner = b` in `b.* = .{...}`), anything
 //! shorter than it, which may be such a pointer, and a `return`, whose value
 //! is not stored. Two names for the same memory are out of reach.
+//!
+//! Two shapes read what was stored on purpose, and are not reported
+//! either. A slot stored with what it holds already (`.superblock =
+//! self.superblock`) reads the same afterwards. And a whole struct given its
+//! fields by name, none of them read from what it held, is being made
+//! afresh: `self.* = .{ .arena = .init(gpa), .allocator =
+//! self.arena.allocator() }` reads back a field it has just set because
+//! that is the field it means. Over fourteen public Zig projects these
+//! were all 22 of alias's reports. A swap or a shift reads what the place
+//! held, by position or into part of a struct, and is still reported.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -33,7 +43,7 @@ const Finding = report.Finding;
 /// Appends a finding for every element that reads what its initializer has
 /// already stored. Everything is allocated with `arena`.
 pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
-    var rule: Rule = .{ .arena = arena, .tree = tree, .findings = findings };
+    var rule: Rule = .{ .arena = arena, .tree = tree };
     for (0..tree.nodes.len) |i| {
         const node: Node.Index = @fromBackingInt(@intCast(i));
         if (tree.nodeTag(node) != .assign) continue;
@@ -42,8 +52,16 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
         const target = try rule.path(lhs) orelse continue;
         rule.target = target;
         rule.target_text = tree.getNodeSource(lhs);
+        rule.reads_old = false;
+        rule.found.clearRetainingCapacity();
         var stored: std.ArrayList(Path) = .empty;
         try rule.initializer(target, rhs, &stored);
+        // A whole struct given its fields by name, none of them read from
+        // what it held, is being made afresh, and reading back a field it
+        // has just set (`.allocator = self.arena.allocator()`) is how that
+        // is written on purpose.
+        const fresh = target.parts.len == 0 and isStructInit(tree.nodeTag(rhs)) and !rule.reads_old;
+        if (!fresh) try findings.appendSlice(arena, rule.found.items);
     }
 }
 
@@ -69,6 +87,21 @@ const Path = struct {
             };
         }
     };
+
+    fn eql(a: Path, b: Path) bool {
+        if (!std.mem.eql(u8, a.root, b.root) or a.parts.len != b.parts.len or a.deref != b.deref) return false;
+        for (a.parts, b.parts) |x, y| if (!x.eql(y)) return false;
+        return true;
+    }
+
+    /// Whether reading `read` reads memory of `place`: a part of it, or
+    /// all of it, not the pointer it is reached through.
+    fn inside(read: Path, place: Path) bool {
+        if (!std.mem.eql(u8, read.root, place.root) or read.parts.len < place.parts.len) return false;
+        for (place.parts, read.parts[0..place.parts.len]) |x, y| if (!x.eql(y)) return false;
+        if (read.parts.len > place.parts.len) return true;
+        return read.deref or !place.deref;
+    }
 
     fn with(p: Path, arena: Allocator, part: Part) Allocator.Error!Path {
         const parts = try arena.alloc(Part, p.parts.len + 1);
@@ -101,10 +134,14 @@ const Path = struct {
 const Rule = struct {
     arena: Allocator,
     tree: *const Ast,
-    findings: *std.ArrayList(Finding),
     /// The assignment's left side, as a path and as written.
     target: Path = .{ .root = "", .parts = &.{} },
     target_text: []const u8 = "",
+    /// What the assignment's initializer reads that it has already stored.
+    found: std.ArrayList(Finding) = .empty,
+    /// Whether the initializer reads any of what the place held before it
+    /// stored to it.
+    reads_old: bool = false,
 
     /// Checks each element of `init`, an anonymous initializer stored into
     /// `target`, against what the elements before it stored, adding what
@@ -126,6 +163,9 @@ const Rule = struct {
     }
 
     fn element(r: *Rule, slot: Path, value: Node.Index, stored: *std.ArrayList(Path)) Allocator.Error!void {
+        // `.x = p.x` stores what the slot holds already, so a later read of
+        // it reads the same.
+        if (try r.path(value)) |same| if (same.eql(slot)) return;
         // A nested anonymous initializer is written in place too, a field at
         // a time; anything else is evaluated whole, then stored.
         if (isAnonymousInit(r.tree.nodeTag(value))) {
@@ -136,9 +176,9 @@ const Rule = struct {
         try stored.append(r.arena, slot);
     }
 
-    /// Reports each read in `node` of a place that overlaps one of `stored`.
+    /// Reports each read in `node` of a place that overlaps one of `stored`,
+    /// and notes a read of what the place held before it was stored to.
     fn reads(r: *Rule, node: Node.Index, stored: []const Path) Allocator.Error!void {
-        if (stored.len == 0) return;
         const tree = r.tree;
         switch (tree.nodeTag(node)) {
             // Evaluated at compile time: reads no memory.
@@ -155,8 +195,11 @@ const Rule = struct {
             else => {},
         }
         if (try r.path(node)) |read| {
-            for (stored) |s| if (read.hits(s, r.target)) {
-                try r.findings.append(r.arena, .{
+            const hit = for (stored) |s| {
+                if (read.hits(s, r.target)) break s;
+            } else null;
+            if (hit) |s| {
+                try r.found.append(r.arena, .{
                     .offset = tree.tokenStart(tree.firstToken(node)),
                     .hint = hint,
                     .detail = .{ .alias = .{
@@ -165,8 +208,9 @@ const Rule = struct {
                         .stored = try r.arena.print("{f}", .{s}),
                     } },
                 });
-                break;
-            };
+            } else if (read.inside(r.target)) {
+                r.reads_old = true;
+            }
             return r.indexReads(node, stored);
         }
         var nodes: std.ArrayList(Node.Index) = .empty;
@@ -223,6 +267,13 @@ const Rule = struct {
     }
 };
 
+fn isStructInit(tag: Node.Tag) bool {
+    return switch (tag) {
+        .struct_init_dot_two, .struct_init_dot_two_comma, .struct_init_dot, .struct_init_dot_comma => true,
+        else => false,
+    };
+}
+
 fn isAnonymousInit(tag: Node.Tag) bool {
     return switch (tag) {
         .array_init_dot_two,
@@ -265,9 +316,9 @@ test "the measured shapes that read what the initializer already stored" {
         \\fn swap(p: *P) void { p.* = .{ .x = p.y, .y = p.x }; }
         \\fn rotate(a: *[3]u8) void { a.* = .{ a[2], a[0], a[1] }; }
         \\fn order(u: *P) void { u.* = .{ .y = u.x, .x = u.y }; }
-        \\fn whole(s: *P) void { s.* = .{ .x = 5, .y = id(s.*).x }; }
+        \\fn shiftNamed(h: *H, cur: u32) void { h.hist = .{ .prev = cur, .prev2 = h.hist.prev }; }
         \\fn nested(n: *N) void { n.* = .{ .a = .{ .x = n.a.y, .y = n.a.x }, .b = n.b }; }
-        \\fn typedInner(m: *N) void { m.* = .{ .b = 7, .a = P{ .x = m.b, .y = 0 } }; }
+        \\fn swapBesideSame(p: *Q) void { p.* = .{ .z = p.z, .x = p.y, .y = p.x }; }
         \\fn rows(arr: *[2]P) void { arr.* = .{ .{ .x = 9, .y = 9 }, .{ .x = arr[0].x, .y = 2 } }; }
         \\fn sameIndex(a: [][2]u8, i: usize) void { a[i] = .{ 5, a[i][0] }; }
         \\fn local() void { var a: [2]u8 = .{ 1, 2 }; a = .{ 5, f(a) }; }
@@ -278,9 +329,9 @@ test "the measured shapes that read what the initializer already stored" {
         \\3:44 a[0] -> a.*, a[0]
         \\3:50 a[1] -> a.*, a[1]
         \\4:48 u.y -> u.*, u.y
-        \\5:49 s.* -> s.*, s.x
+        \\5:73 h.hist.prev -> h.hist, h.hist.prev
         \\6:59 n.a.x -> n.*, n.a.x
-        \\7:59 m.b -> m.*, m.b
+        \\7:67 p.x -> p.*, p.x
         \\8:68 arr[0].x -> arr.*, arr[0].x
         \\9:56 a[i][0] -> a[i], a[i][0]
         \\10:57 a -> a, a[0]
@@ -306,5 +357,16 @@ test "not reported: own slot, typed initializers, unknown indexes, compile-time 
         \\fn address(c: *C) void { c.* = .{ .step = .{}, .generated = add(&c.step) }; }
         \\fn returned(t: *T) !void { t.* = .{ .w = w0, .c = init() catch return t.w.err.? }; }
         \\fn shorter(d: *D, new: u32) void { d.rate = .{ new, g(d) }; }
+    , "");
+}
+
+test "not reported: a slot stored with what it holds, and a whole struct made afresh" {
+    try expectAliases(
+        \\fn sameValue(t: *T) void { t.loc = .{ .start = t.loc.start, .end = t.loc.start + 1 }; }
+        \\fn keepField(r: *R, o: O) void { r.* = .{ .superblock = r.superblock, .view = r.superblock.view, .opts = o }; }
+        \\fn chain(self: *B, a: Allocator) void { self.* = .{ .arena = .init(a), .allocator = self.arena.allocator() }; }
+        \\fn fresh(s: *P) void { s.* = .{ .x = 5, .y = id(s.*).x }; }
+        \\fn freshTyped(m: *N) void { m.* = .{ .b = 7, .a = P{ .x = m.b, .y = 0 } }; }
+        \\fn freshLocal(a: Allocator) B { var b: B = undefined; b = .{ .arena = .init(a), .allocator = b.arena.allocator() }; return b; }
     , "");
 }

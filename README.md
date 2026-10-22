@@ -167,6 +167,15 @@ through (`.owner = b` in `b.* = .{...}`), anything shorter than it, which
 may be such a pointer, a `return`, and compile-time builtins such as
 `@sizeOf`. Two names for the same memory are out of reach.
 
+Nor are two shapes that read what was stored on purpose: a slot stored with
+what it holds already (`.superblock = self.superblock`), which reads the
+same afterwards; and a whole struct given its fields by name, none of them
+read from what it held, which is being made afresh, so that
+`self.* = .{ .arena = .init(gpa), .allocator = self.arena.allocator() }`
+reads back the field it has just set because that is the one it means. A
+swap or shift reads what the place held, by position, by name, or into
+part of a struct, and is still reported.
+
 ## Rule three: cancel
 
 In a task's loop, an `Io` call whose error is dropped with `catch {}` or
