@@ -413,7 +413,7 @@ leaves the binary in `zig-out/bin/`.
 ## Usage
 
 ```
-zigvet [--exclude <path>]... [--format <text|github|json>] <path>...
+zigvet [--exclude <path>]... [--format <text|github|json>] [--summary] <path>...
 zigvet --version
 ```
 
@@ -427,6 +427,19 @@ way is checked once. A file that does not parse is reported with the error
 once. It is matched against paths as zigvet prints them, so name it
 relative to the current directory: `zigvet . --exclude _tmp` leaves out a
 scratch directory, or a second worktree checked out inside it.
+
+`--summary` ends the run with one line on stderr, in every format, saying
+how many files were checked and what each rule reported:
+
+```
+zigvet: checked 354 files, no findings
+zigvet: checked 41 files, 3 findings (escape 1, refill 2)
+```
+
+It is off by default, so a clean run prints nothing, as `zig fmt --check`
+does, and a lint step in a build stays quiet. Turn it on where a zero has
+to be trusted, such as CI after an upgrade: it tells a run over 354 files
+from a run over 3.
 
 Exit status: 0 if nothing was reported, 1 if a finding or parse error was,
 2 on a usage error or a path that could not be read or holds no `.zig` file

@@ -199,6 +199,33 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
 /// which annotate a pull request's diff, or one JSON array.
 pub const Format = enum { text, github, json };
 
+/// How many reports of each kind a run wrote, for `--summary`.
+pub const Tally = struct {
+    /// Each rule's findings, and the allow comments that suppress nothing.
+    findings: std.EnumArray(Kind, usize) = .initFill(0),
+    parse_errors: usize = 0,
+
+    const Kind = std.meta.Tag(Finding.Detail);
+
+    /// `no findings`, or `3 findings (escape 1, refill 2)`, in the order
+    /// the rules are listed, then `allow`, then parse errors as `error`.
+    pub fn format(t: Tally, w: *Writer) Writer.Error!void {
+        var total = t.parse_errors;
+        for (std.enums.values(Kind)) |kind| total += t.findings.get(kind);
+        if (total == 0) return w.writeAll("no findings");
+        try w.print("{d} finding{s} (", .{ total, if (total == 1) "" else "s" });
+        var separator: []const u8 = "";
+        for (std.enums.values(Kind)) |kind| {
+            const n = t.findings.get(kind);
+            if (n == 0) continue;
+            try w.print("{s}{t} {d}", .{ separator, kind, n });
+            separator = ", ";
+        }
+        if (t.parse_errors > 0) try w.print("{s}error {d}", .{ separator, t.parse_errors });
+        try w.writeByte(')');
+    }
+};
+
 /// Writes every report of a run in one format. Call `begin` before the
 /// first and `end` after the last: JSON needs its brackets.
 pub const Out = struct {
@@ -207,6 +234,7 @@ pub const Out = struct {
     /// A message rendered whole, for the formats that escape it.
     message: Writer.Allocating,
     count: usize = 0,
+    tally: Tally = .{},
 
     pub fn init(gpa: Allocator, w: *Writer, format: Format) Out {
         return .{ .w = w, .format = format, .message = .init(gpa) };
@@ -226,6 +254,7 @@ pub const Out = struct {
 
     /// `loc` is where `finding.offset` is, from `location`.
     pub fn finding(out: *Out, path: []const u8, loc: Ast.Location, f: Finding) Writer.Error!void {
+        out.tally.findings.getPtr(std.meta.activeTag(f.detail)).* += 1;
         if (out.format == .text) {
             out.count += 1;
             return write(out.w, path, loc, f);
@@ -236,6 +265,7 @@ pub const Out = struct {
     }
 
     pub fn parseError(out: *Out, path: []const u8, tree: Ast, parse_error: Ast.Error) Writer.Error!void {
+        out.tally.parse_errors += 1;
         if (out.format == .text) {
             out.count += 1;
             return writeParseError(out.w, path, tree, parse_error);
@@ -402,6 +432,17 @@ test "location: counted as Ast.tokenLocation counts" {
         const token: Ast.TokenIndex = @intCast(i);
         try std.testing.expectEqual(tree.tokenLocation(0, token), location(source, tree.tokenStart(token)));
     }
+}
+
+test "Tally: nothing, one, and several kinds in the rules' order" {
+    var t: Tally = .{};
+    try std.testing.expectFmt("no findings", "{f}", .{t});
+    t.findings.set(.refill, 1);
+    try std.testing.expectFmt("1 finding (refill 1)", "{f}", .{t});
+    t.findings.set(.escape, 2);
+    t.findings.set(.allow, 1);
+    t.parse_errors = 1;
+    try std.testing.expectFmt("5 findings (escape 2, refill 1, allow 1, error 1)", "{f}", .{t});
 }
 
 test "Sink.text: out param reads as two words" {
