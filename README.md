@@ -54,8 +54,12 @@ Made on the stack, and not comptime-known:
 - the address of a call's result, `&f()`;
 - the address of a local, parameter or capture, a slice of a local array,
   the address of one field or element of a local held by value, or a slice
-  of an array field of a local or parameter held by value
-  (`id.bytes[0..id.len]` with `id: Id`) when the file declares the struct.
+  of an array field of a local, parameter or capture held by value
+  (`id.bytes[0..id.len]` with `id: Id`) when the file declares the struct,
+  through as many fields held by value as its types show
+  (`t.name.bytes[0..]` with `t: Topic` and `name: Name`). A `for` loop's
+  capture held by value has the type of an element of its input when the
+  function writes the input's type (`topics: []const Topic`).
 
 Leaving the function:
 
@@ -65,11 +69,30 @@ Leaving the function:
   (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`), or one of
   the file's own that does, such as `return id.slice();` with `id` held by
   value and `fn slice(self: *const Id) []const u8 { return self.bytes[0..self.len]; }`;
-- stored through a parameter (`self.items = ...`, `out.* = ...`) or to a
-  container-level variable. Stores report temporaries only: a named local
-  stored outward is usually deliberate (a context pointer for the length of
-  a call, a thread's `current`), and a store a `defer` undoes is not
-  reported at all.
+- stored through a parameter (`self.items = ...`, `out.* = ...`), through a
+  pointer capture of what one points at (`for (into) |*out| out.* = ...`),
+  or to a container-level variable. Stores report temporaries and loop
+  captures only (below): a named local stored outward is usually
+  deliberate (a context pointer for the length of a call, a thread's
+  `current`), and a store a `defer` undoes is not reported at all.
+
+A capture held by value in a loop, `for (topics) |topic|`, is a copy made
+for one turn, which the next turn writes over. What points into it is
+reported stored anywhere that outlives the turn: through a parameter or to
+a container-level variable, as a temporary is, and also to a local declared
+outside the loop, or through a pointer capture of one:
+
+```zig
+var last: []const u8 = "";
+for (topics) |topic| last = topic.name.slice();
+```
+
+Capturing by pointer, `|*topic|`, points into what the loop walks instead.
+Not reported: the same passed to a call, such as
+`try map.put(gpa, topic.name.slice(), at)`, which is wrong or right by what
+the callee keeps (a `StringHashMap` keeps the key, a `BufMap` copies it);
+and a capture whose type is declared in another file or made by a type
+function (`name: Small(249)`), whose fields the file cannot show.
 
 Comptime-known memory is static and never reported: literals, `comptime`
 expressions, container-level declarations, `comptime` parameters, and calls
@@ -265,6 +288,9 @@ rather than passing with nothing checked.
 path:line:col: escape: <what> made here leaves <function> through <return | field | global | out param>
     hint: <one line on how to fix it>
 ```
+
+or, for a loop's capture stored to a local declared outside the loop,
+`<what> made here leaves its turn of the loop through local '<name>'`.
 
 Findings go to stdout, in path order and then source order. An allow
 comment that suppresses nothing (below) is reported the same way, with

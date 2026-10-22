@@ -13,16 +13,20 @@ const Writer = std.Io.Writer;
 /// allow comments.
 pub const Rule = enum { escape, alias, cancel };
 
-/// Where a value made on the stack leaves the function that made it.
+/// Where a value made on the stack leaves the function that made it, or,
+/// for `outer_local`, the turn of the loop that made it.
 pub const Sink = enum {
     @"return",
     field,
     global,
     out_param,
+    /// A local declared outside the loop whose capture it points into.
+    outer_local,
 
     pub fn text(sink: Sink) []const u8 {
         return switch (sink) {
             .out_param => "out param",
+            .outer_local => "outer local",
             else => @tagName(sink),
         };
     }
@@ -48,6 +52,8 @@ pub const Finding = struct {
         /// The name of the function it leaves.
         function: []const u8,
         sink: Sink,
+        /// The local it is stored to, for `Sink.outer_local`.
+        local: []const u8 = "",
     };
 
     pub const Alias = struct {
@@ -118,9 +124,14 @@ pub fn write(w: *Writer, path: []const u8, loc: Ast.Location, finding: Finding) 
 /// The message alone: no location, rule name or hint.
 pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
     switch (finding.detail) {
-        .escape => |e| try w.print("{s} made here leaves {s} through {s}", .{
-            e.what, e.function, e.sink.text(),
-        }),
+        .escape => |e| switch (e.sink) {
+            .outer_local => try w.print("{s} made here leaves its turn of the loop through local '{s}'", .{
+                e.what, e.local,
+            }),
+            else => try w.print("{s} made here leaves {s} through {s}", .{
+                e.what, e.function, e.sink.text(),
+            }),
+        },
         .alias => |a| try w.print("{s} read here, but the initializer is written straight into {s} and has already stored {s}", .{
             a.read, a.target, a.stored,
         }),
