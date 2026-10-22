@@ -101,8 +101,10 @@ arguments. The check reads the syntax alone, so
 it knows a callee only by name: the file's own functions,
 `std.fmt.comptimePrint`, `std.math.maxInt` and `minInt`, and as returning
 part of an argument, `std.fmt`'s `bufPrint` and `bufPrintSentinel` and
-`std.mem`'s `sliceTo`, `span`, `trim`, `trimStart`, `trimEnd`, `cutPrefix`,
-`cutSuffix`, `asBytes`, `sliceAsBytes`, `bytesAsSlice` and `bytesAsValue`.
+`std.mem`'s `print`, `printSentinel`, `sliceTo`, `span`, `trim`,
+`trimStart`, `trimEnd`, `cutPrefix`, `cutSuffix`, `asBytes`,
+`sliceAsBytes`, `bytesAsSlice` and `bytesAsValue` (`print` and
+`printSentinel` only through their namespace, `mem.print`).
 One of the file's own functions returns part of an argument when it
 returns, directly, a slice of an array that a pointer parameter points at
 or the address of one of its fields. A type is known only when the file

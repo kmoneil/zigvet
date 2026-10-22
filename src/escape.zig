@@ -826,8 +826,8 @@ const Rule = struct {
 
     /// The argument a call's result points into, when the callee is one of
     /// `std_view_fns`: named through its namespace (`std.fmt.bufPrint`,
-    /// `fmt.bufPrint`), or alone (`bufPrint`) in a file that declares no
-    /// function of that name.
+    /// `fmt.bufPrint`), or, for most, alone (`bufPrint`) in a file that
+    /// declares no function of that name.
     fn viewedArgument(r: *Rule, node: Node.Index) ?Node.Index {
         const tree = r.tree;
         var buffer: [1]Node.Index = undefined;
@@ -838,7 +838,9 @@ const Rule = struct {
                 const name = tree.tokenSlice(tree.nodeMainToken(callee));
                 // Every function the file declares is a key.
                 if (r.comptime_result_fns.contains(name)) return null;
-                break :view std_view_fns.get(name) orelse return null;
+                const view = std_view_fns.get(name) orelse return null;
+                if (!view.alone) return null;
+                break :view view;
             },
             .field_access => view: {
                 const receiver, const field = tree.nodeData(callee).node_and_token;
@@ -1174,6 +1176,9 @@ const std_comptime_result_fns: std.StaticStringMap(void) = .initComptime(.{
 const std_view_fns: std.StaticStringMap(ViewFn) = .initComptime(.{
     .{ "bufPrint", ViewFn{ .namespace = "fmt", .argument = 0 } },
     .{ "bufPrintSentinel", ViewFn{ .namespace = "fmt", .argument = 0 } },
+    // What 0.17.0 deprecates bufPrint in favor of.
+    .{ "print", ViewFn{ .namespace = "mem", .argument = 0, .alone = false } },
+    .{ "printSentinel", ViewFn{ .namespace = "mem", .argument = 0, .alone = false } },
     .{ "sliceTo", ViewFn{ .namespace = "mem", .argument = 0 } },
     .{ "span", ViewFn{ .namespace = "mem", .argument = 0 } },
     .{ "trim", ViewFn{ .namespace = "mem", .argument = 1 } },
@@ -1187,7 +1192,14 @@ const std_view_fns: std.StaticStringMap(ViewFn) = .initComptime(.{
     .{ "bytesAsValue", ViewFn{ .namespace = "mem", .argument = 1 } },
 });
 
-const ViewFn = struct { namespace: []const u8, argument: usize };
+const ViewFn = struct {
+    namespace: []const u8,
+    argument: usize,
+    /// Known by its name alone, `bufPrint(...)`, in a file that declares no
+    /// function of that name. A `print` alone is more often something
+    /// else, such as `std.debug.print` under another name.
+    alone: bool = true,
+};
 
 /// An `inline fn`, whose result is comptime-known when its arguments are
 /// and its body allows, or one returning a type only comptime has.
@@ -1730,10 +1742,15 @@ test "through a std call that returns a view of an argument" {
         \\fn stored(h: *H, id: u32) void { var buf: [32]u8 = undefined; h.s = std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable; }
         \\fn method(t: Text, n: u8) []const u8 { var buf: [4]u8 = .{ n, n, n, n }; return t.trim(u8, &buf, " "); }
         \\fn ofParameter(s: []const u8) []const u8 { return std.mem.trim(u8, s, " "); }
+        \\fn memPrint(id: u32) []const u8 { var buf: [32]u8 = undefined; return std.mem.print(&buf, "{d}", .{id}) catch unreachable; }
+        \\fn memSentinel(id: u32) [:0]const u8 { var buf: [32]u8 = undefined; return mem.printSentinel(&buf, "{d}", .{id}, 0) catch unreachable; }
+        \\fn bare(id: u32) []const u8 { var buf: [32]u8 = undefined; return print(&buf, id); }
     ,
         \\3:85 address of local 'buf' -> label through return
         \\4:88 address of local 'buf' -> aliased through return
         \\5:91 address of local 'buf' -> viaLocal through return
+        \\9:85 address of local 'buf' -> memPrint through return
+        \\10:94 address of local 'buf' -> memSentinel through return
         \\
     );
 }
