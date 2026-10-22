@@ -47,20 +47,17 @@ const children = @import("children.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 const Sink = report.Sink;
+const types = @import("types.zig");
+const Types = types.Types;
+const elementOf = types.elementOf;
+const fieldType = types.fieldType;
+const memberFn = types.memberFn;
+const pointee = types.pointee;
 
 /// Appends a finding for every escape in `tree`. Everything, findings
 /// included, is allocated with `arena`, which must outlive the findings.
 pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
-    var rule: Rule = .{ .arena = arena, .tree = tree, .findings = findings };
-    rule.parents = try arena.alloc(Node.OptionalIndex, tree.nodes.len);
-    @memset(rule.parents, .none);
-    var nodes: std.ArrayList(Node.Index) = .empty;
-    for (0..tree.nodes.len) |i| {
-        const node: Node.Index = @fromBackingInt(@intCast(i));
-        nodes.clearRetainingCapacity();
-        try children.append(arena, tree, node, &nodes);
-        for (nodes.items) |child| rule.parents[@backingInt(child)] = node.toOptional();
-    }
+    var rule: Rule = .{ .arena = arena, .tree = tree, .findings = findings, .types = try .init(arena, tree) };
     for (0..tree.nodes.len) |i| {
         const node: Node.Index = @fromBackingInt(@intCast(i));
         if (tree.nodeTag(node) != .fn_decl) continue;
@@ -97,8 +94,8 @@ const Rule = struct {
     /// Function name to whether every function of that name in the file
     /// gives a comptime-known result for comptime-known arguments.
     comptime_result_fns: std.StringHashMapUnmanaged(bool) = .empty,
-    /// Every node's parent, for the containers around a type's name.
-    parents: []Node.OptionalIndex = &.{},
+    /// The structs and unions the file declares, by where a type is named.
+    types: Types,
     /// The file's functions looked at so far, to which parameter their
     /// result points into (`viewOf`).
     views: std.AutoHashMapUnmanaged(Node.Index, ?u32) = .empty,
@@ -484,7 +481,7 @@ const Rule = struct {
             .field_access => {
                 const lhs, const field = tree.nodeData(node).node_and_token;
                 const outer = r.typeOf(lhs, depth + 1) orelse return null;
-                const container = r.containerOf(pointee(tree, outer) orelse outer, 0) orelse return null;
+                const container = r.types.containerOf(pointee(tree, outer) orelse outer, 0) orelse return null;
                 return fieldType(tree, container, tree.tokenSlice(field));
             },
             else => return null,
@@ -520,7 +517,7 @@ const Rule = struct {
                 const lhs, const field = tree.nodeData(node).node_and_token;
                 const outer = r.place(lhs, depth + 1) orelse return null;
                 if (outer.storage != .value) return null;
-                const container = r.containerOf(outer.type_expr.unwrap() orelse return null, 0) orelse return null;
+                const container = r.types.containerOf(outer.type_expr.unwrap() orelse return null, 0) orelse return null;
                 const field_type = fieldType(tree, container, tree.tokenSlice(field)) orelse return null;
                 return .{
                     .binding = outer.binding,
@@ -677,7 +674,7 @@ const Rule = struct {
         switch (tree.nodeTag(callee)) {
             .identifier => {
                 if (r.resolved.contains(callee)) return null;
-                const fn_decl = r.declaredFn(callee, tree.tokenSlice(tree.nodeMainToken(callee))) orelse return null;
+                const fn_decl = r.types.declaredFn(callee, tree.tokenSlice(tree.nodeMainToken(callee))) orelse return null;
                 const view = try r.viewOf(fn_decl) orelse return null;
                 return if (view < arguments.len) r.stackSource(arguments[view], depth) else null;
             },
@@ -688,7 +685,7 @@ const Rule = struct {
                 // by value (`t.name.slice()`), is its first argument.
                 const p = r.place(receiver, 0) orelse {
                     // `Id.slice(&id)`, through the type's namespace.
-                    const container = r.containerOf(receiver, 0) orelse return null;
+                    const container = r.types.containerOf(receiver, 0) orelse return null;
                     const fn_decl = memberFn(tree, container, name) orelse return null;
                     const view = try r.viewOf(fn_decl) orelse return null;
                     return if (view < arguments.len) r.stackSource(arguments[view], depth) else null;
@@ -699,7 +696,7 @@ const Rule = struct {
                     .pointer => pointee(tree, type_expr) orelse return null,
                     .array, .unknown => return null,
                 };
-                const container = r.containerOf(value_type, 0) orelse return null;
+                const container = r.types.containerOf(value_type, 0) orelse return null;
                 const fn_decl = memberFn(tree, container, name) orelse return null;
                 const view = try r.viewOf(fn_decl) orelse return null;
                 if (view > 0) return if (view - 1 < arguments.len) r.stackSource(arguments[view - 1], depth) else null;
@@ -758,7 +755,7 @@ const Rule = struct {
                     .field_access => {
                         const lhs, const field = tree.nodeData(sliced).node_and_token;
                         const param, const pointed = pointerParam(tree, proto, lhs) orelse return null;
-                        const container = r.containerOf(pointed, 0) orelse return null;
+                        const container = r.types.containerOf(pointed, 0) orelse return null;
                         return if (fieldIsArray(tree, container, tree.tokenSlice(field))) param else null;
                     },
                     else => return null,
@@ -773,55 +770,6 @@ const Rule = struct {
             },
             else => return null,
         }
-    }
-
-    /// The struct or union that `type_expr` names, when the file declares
-    /// it: a name declared in a container around where it is written
-    /// (`Id`, `Self`), possibly through another name, or `@This()`. Null for
-    /// anything else, such as a type from another file.
-    fn containerOf(r: *Rule, type_expr: Node.Index, depth: u8) ?Node.Index {
-        const tree = r.tree;
-        if (depth > 4) return null;
-        switch (tree.nodeTag(type_expr)) {
-            .grouped_expression => return r.containerOf(tree.nodeData(type_expr).node_and_token[0], depth),
-            .builtin_call_two, .builtin_call_two_comma => {
-                if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(type_expr)), "@This")) return null;
-                return r.enclosingContainer(type_expr);
-            },
-            .identifier => {
-                const name = tree.tokenSlice(tree.nodeMainToken(type_expr));
-                var around = r.enclosingContainer(type_expr);
-                while (around) |container| : (around = r.enclosingContainer(container)) {
-                    const decl = memberDecl(tree, container, name) orelse continue;
-                    const init = tree.fullVarDecl(decl).?.ast.init_node.unwrap() orelse return null;
-                    var buffer: [2]Node.Index = undefined;
-                    if (tree.fullContainerDecl(&buffer, init) != null) return init;
-                    return r.containerOf(init, depth + 1);
-                }
-                return null;
-            },
-            else => return null,
-        }
-    }
-
-    /// The innermost container around `node`: a struct, union, enum or
-    /// opaque, or the file.
-    fn enclosingContainer(r: *Rule, node: Node.Index) ?Node.Index {
-        var up = r.parents[@backingInt(node)].unwrap();
-        while (up) |parent| : (up = r.parents[@backingInt(parent)].unwrap()) {
-            var buffer: [2]Node.Index = undefined;
-            if (r.tree.fullContainerDecl(&buffer, parent) != null) return parent;
-        }
-        return null;
-    }
-
-    /// The function `name` declared in a container around `node`.
-    fn declaredFn(r: *Rule, node: Node.Index, name: []const u8) ?Node.Index {
-        var around = r.enclosingContainer(node);
-        while (around) |container| : (around = r.enclosingContainer(container)) {
-            if (memberFn(r.tree, container, name)) |fn_decl| return fn_decl;
-        }
-        return null;
     }
 
     /// The argument a call's result points into, when the callee is one of
@@ -1374,13 +1322,6 @@ fn typeOfLocal(tree: *const Ast, type_node: Node.OptionalIndex, init_node: Node.
     return .none;
 }
 
-/// What a pointer to one value, `*T` or `*const T`, points at.
-fn pointee(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
-    const ptr = tree.fullPtrType(type_expr) orelse return null;
-    if (ptr.size != .one) return null;
-    return ptr.ast.child_type;
-}
-
 /// The index of the parameter of `proto` that `node` names, when it points
 /// at one value, and what it points at.
 fn pointerParam(tree: *const Ast, proto: Ast.full.FnProto, node: Node.Index) ?struct { u32, Node.Index } {
@@ -1397,40 +1338,6 @@ fn pointerParam(tree: *const Ast, proto: Ast.full.FnProto, node: Node.Index) ?st
     return null;
 }
 
-/// The declaration `name` among `container`'s members.
-fn memberDecl(tree: *const Ast, container: Node.Index, name: []const u8) ?Node.Index {
-    var buffer: [2]Node.Index = undefined;
-    for (tree.fullContainerDecl(&buffer, container).?.ast.members) |member| {
-        const decl = tree.fullVarDecl(member) orelse continue;
-        if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) return member;
-    }
-    return null;
-}
-
-/// The function `name` among `container`'s members.
-fn memberFn(tree: *const Ast, container: Node.Index, name: []const u8) ?Node.Index {
-    var buffer: [2]Node.Index = undefined;
-    for (tree.fullContainerDecl(&buffer, container).?.ast.members) |member| {
-        if (tree.nodeTag(member) != .fn_decl) continue;
-        var proto_buffer: [1]Node.Index = undefined;
-        const proto = tree.fullFnProto(&proto_buffer, tree.nodeData(member).node_and_node[0]).?;
-        const name_token = proto.name_token orelse continue;
-        if (std.mem.eql(u8, tree.tokenSlice(name_token), name)) return member;
-    }
-    return null;
-}
-
-/// The type `container`'s field `name` is declared with.
-fn fieldType(tree: *const Ast, container: Node.Index, name: []const u8) ?Node.Index {
-    var buffer: [2]Node.Index = undefined;
-    for (tree.fullContainerDecl(&buffer, container).?.ast.members) |member| {
-        const field = tree.fullContainerField(member) orelse continue;
-        if (field.ast.tuple_like or !std.mem.eql(u8, tree.tokenSlice(field.ast.main_token), name)) continue;
-        return field.ast.type_expr.unwrap();
-    }
-    return null;
-}
-
 /// Whether `container` has a field `name` declared as an array.
 fn fieldIsArray(tree: *const Ast, container: Node.Index, name: []const u8) bool {
     const type_expr = fieldType(tree, container, name) orelse return false;
@@ -1438,23 +1345,6 @@ fn fieldIsArray(tree: *const Ast, container: Node.Index, name: []const u8) bool 
         .array_type, .array_type_sentinel => true,
         else => false,
     };
-}
-
-/// What an array, a slice or a pointer to an array holds: `T` of `[N]T`,
-/// `[]const T`, `[*]T` or `*const [N]T`.
-fn elementOf(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
-    switch (tree.nodeTag(type_expr)) {
-        .grouped_expression => return elementOf(tree, tree.nodeData(type_expr).node_and_token[0]),
-        .array_type, .array_type_sentinel => return tree.fullArrayType(type_expr).?.ast.elem_type,
-        else => {
-            const ptr = tree.fullPtrType(type_expr) orelse return null;
-            if (ptr.size != .one) return ptr.ast.child_type;
-            return switch (tree.nodeTag(ptr.ast.child_type)) {
-                .array_type, .array_type_sentinel => tree.fullArrayType(ptr.ast.child_type).?.ast.elem_type,
-                else => null,
-            };
-        },
-    }
 }
 
 /// The name at the root of a place, `self` of `self.items[i].*`, or of a
