@@ -7,12 +7,16 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: three rules. Escape, run over the 0.17.0 standard library and
+Status: four rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive (below). Alias,
 run over the same standard library and seven application repos, found one
 real defect and no false positive. Cancel, over the same code, found one
 real defect and one harmless case, a test's task that nothing cancels.
+Fit, over the same standard library and nine application repos, reports
+nothing; over zig-charts as it was before an audit fixed three of these,
+it finds two, the third printing a field of a type declared in another
+file.
 
 ## Rule one: escape
 
@@ -206,6 +210,54 @@ from another file, which the syntax of this one cannot see. Whether the
 call's error set holds `error.Canceled` is beyond the syntax too; the hint
 says how to tell.
 
+## Rule four: fit
+
+A float printed in full into a buffer too small for it, with the error
+asserted away.
+
+```zig
+fn printNumber(gpa: Allocator, out: *std.ArrayList(u8), v: f64) !void {
+    var buf: [48]u8 = undefined;
+    try out.appendSlice(gpa, std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable);
+}
+```
+
+`{d}` on a float never switches to scientific notation: 1e40 prints as 41
+digits, the largest f64 as 309, and its smallest subnormal, negative, as
+327 bytes. So for `v = 1e60` bufPrint returns error.NoSpaceLeft, and
+`catch unreachable`, which says it cannot, turns that into a panic in
+Debug and ReleaseSafe and undefined behavior in ReleaseFast and
+ReleaseSmall, with no diagnostic in any mode. 48 bytes reads as a fair
+size because it is one for an integer, which is at most 20 digits. A chart
+library shipped this, reachable from any number in its data.
+
+The fix is one of: print with `{e}`, which needs at most 24 bytes for an
+f64; size the buffer for the worst case; or handle the error, with `try`
+or a fallback such as `catch "?"` into a `[]const u8`.
+
+### What fit reports
+
+`std.mem.print` or `printSentinel`, or `std.fmt.bufPrint` or
+`bufPrintSentinel`, which 0.17.0 keeps for them, under `catch unreachable`,
+printing an f16, f32 or f64 with `{d}`, `{}` or `{any}` (fill, width,
+precision and `{?d}` included) into a buffer smaller than the most that
+can print: 11, 48 and 327 bytes, or with a precision of n digits, 6, 40
+and 310 bytes and then a point and n. The buffer's length has to be in the
+syntax: `&buf` or `buf[0..]` with `buf: [N]u8`, or `buf` with
+`buf: *[N]u8`, where N is a literal, a container-level constant, or
+`std.fmt.float.min_buffer_size` (53, which is too small). So does the
+value's type: a parameter, local, capture or container-level variable
+declared `f16`, `f32` or `f64`, or such a field of a struct the file
+declares, found the way escape finds types.
+
+Not reported: a value bounded before it is printed, where any comparison
+of it (`<`, `<=`, `>`, `>=`), or `@min`, `@max` or `clamp` of it, or of a
+local made from it, earlier in the function counts as a bound, since a
+bound can take many shapes; one made from an integer with
+`@floatFromInt`, which prints no longer than the integer; a constant whose
+value is a literal; and a float whose type is not written (`anytype`, an
+untyped local) or is declared in another file, or is an f80 or f128.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -398,7 +450,7 @@ is not a zigvet rule. Code that is right but larger or slower than it could
 be is out of scope as well: what it costs depends on the build mode and on
 how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
-for what it catches: `escape`, `alias` and `cancel` so far.
+for what it catches: `escape`, `alias`, `cancel` and `fit` so far.
 
 ## Tests
 

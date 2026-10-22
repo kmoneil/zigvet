@@ -279,6 +279,7 @@ test {
     _ = @import("children.zig");
     _ = @import("clobber.zig");
     _ = @import("escape.zig");
+    _ = @import("fit.zig");
     _ = @import("report.zig");
     _ = @import("types.zig");
     _ = @import("vet.zig");
