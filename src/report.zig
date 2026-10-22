@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit };
+pub const Rule = enum { escape, alias, cancel, fit, refill };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -44,6 +44,7 @@ pub const Finding = struct {
         alias: Alias,
         cancel: Cancel,
         fit: Fit,
+        refill: Refill,
         allow: Allow,
     };
 
@@ -90,6 +91,13 @@ pub const Finding = struct {
         capacity: u64,
     };
 
+    pub const Refill = struct {
+        /// The place freed, as written: `self.items`.
+        place: []const u8,
+        /// What can fail before it is refilled, as written: `gpa.alloc`.
+        fails: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -109,6 +117,7 @@ pub const Finding = struct {
             .alias => .alias,
             .cancel => .cancel,
             .fit => .fit,
+            .refill => .refill,
             .allow => null,
         };
     }
@@ -159,6 +168,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .fit => |f| try w.print("`{s}` of {s} '{s}' can need {d} bytes, but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{
             f.placeholder, f.float, f.value, f.need, f.buffer, f.capacity, f.callee,
+        }),
+        .refill => |f| try w.print("`{s}` freed here still holds the freed memory if {s} fails before it is refilled", .{
+            f.place, f.fails,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),

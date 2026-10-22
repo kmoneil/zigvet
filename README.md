@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: four rules. Escape, run over the 0.17.0 standard library and
+Status: five rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive (below). Alias,
 run over the same standard library and seven application repos, found one
@@ -16,7 +16,9 @@ real defect and one harmless case, a test's task that nothing cancels.
 Fit, over the same standard library and nine application repos, reports
 nothing; over zig-charts as it was before an audit fixed three of these,
 it finds two, the third printing a field of a type declared in another
-file.
+file. Refill, over the same code, reports twelve, all real: two in the
+standard library, four in three application repos, and six in third-party
+UI code one of them keeps for reference.
 
 ## Rule one: escape
 
@@ -258,6 +260,54 @@ bound can take many shapes; one made from an integer with
 value is a literal; and a float whose type is not written (`anytype`, an
 untyped local) or is declared in another file, or is an f80 or f128.
 
+## Rule five: refill
+
+A place freed, then given new memory by something that can fail first.
+
+```zig
+fn resize(self: *Rows, n: usize) !void {
+    self.gpa.free(self.items);
+    self.items = try self.gpa.alloc(u32, n);
+}
+```
+
+When the `try` fails, the store never happens: `self.items` still holds
+what was just freed, and the error goes back to a caller that still owns
+`self`. Its `deinit` frees it again, and anything that reads it first reads
+freed memory. It compiles clean in every build mode and reads naturally,
+free the old and make the new, and it goes wrong only when an allocation
+fails, the path tests seldom take: the debugging allocator says "double
+free" when a test makes that allocation fail, and a release build corrupts
+the heap and says nothing. Zig 0.17.0's standard library has two, in
+`std.Io.Threaded`'s Windows command line cache and in
+`std.compress.lzma`'s decoder reset.
+
+The fix is to make the new value first, then free the old one and store
+the new, so a failure leaves the old value in place:
+
+```zig
+const items = try self.gpa.alloc(u32, n);
+self.gpa.free(self.items);
+self.items = items;
+```
+
+### What refill reports
+
+`x.free(place)`, `x.destroy(place)` or `place.deinit(...)`, as a statement
+or the body of an `if` with no `else`, or `if (place) |old| x.free(old)`,
+where the place is a field or what a pointer points at (`self.items`,
+`a.*`), and a later statement of the same block stores to the place, or to
+what holds it written whole (`history.* = .{ ... }`), with something that
+can fail first: a `try`, or a `catch` that returns, in the stored value or
+in a statement between.
+
+Not reported: a place reset first (`self.items = &.{}`, or a store into it
+such as `self.items.len = 0`), reset by an `errdefer`, or perhaps reset by
+a call between that is handed what holds it (`self.clear()`); a field of a
+`var` local not declared as a pointer, which holds a struct by value that
+the failing function throws away; and a bare local, which an `errdefer` of
+its own can cover.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -450,7 +500,8 @@ is not a zigvet rule. Code that is right but larger or slower than it could
 be is out of scope as well: what it costs depends on the build mode and on
 how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
-for what it catches: `escape`, `alias`, `cancel` and `fit` so far.
+for what it catches: `escape`, `alias`, `cancel`, `fit` and `refill` so
+far.
 
 ## Tests
 
