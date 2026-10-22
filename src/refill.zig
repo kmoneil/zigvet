@@ -22,11 +22,12 @@
 //! a `catch` that returns, in the stored value or a statement between.
 //!
 //! Not reported: a place reset first (`self.items = &.{}`, or any store
-//! into it), by an `errdefer`, or perhaps by a call between that is handed
-//! what holds it (`self.clear()`); a field of a `var` local, which holds a
-//! struct by value that the failing function throws away (Zig rejects a
-//! `var` that is never changed, and a store to a field changes no
-//! pointer); and a bare local, which an `errdefer` of its own can cover.
+//! into it), by an `errdefer` or by the `catch` that handles the failure,
+//! or perhaps by a call between that is handed what holds it
+//! (`self.clear()`); a field of a `var` local, which holds a struct by
+//! value that the failing function throws away (Zig rejects a `var` that
+//! is never changed, and a store to a field changes no pointer); and a
+//! bare local, which an `errdefer` of its own can cover.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -164,7 +165,7 @@ const Rule = struct {
             }
             if (refill) |store| {
                 const end = t.lastToken(store);
-                const point = fails orelse failing(t, nodes.items, end) orelse return;
+                const point = fails orelse try r.failing(nodes.items, end, freed.path) orelse return;
                 if (r.parents.len == 0) r.parents = (try types.Types.init(r.arena, t)).parents;
                 if (r.heldByValue(freed.call, freed.path.root)) return;
                 if (try r.resetOnError(freed, point)) return;
@@ -178,7 +179,7 @@ const Rule = struct {
                 });
             }
             if (other or try r.handsOver(nodes.items, freed.path)) return;
-            if (fails == null) fails = failing(t, nodes.items, std.math.maxInt(Ast.TokenIndex));
+            if (fails == null) fails = try r.failing(nodes.items, std.math.maxInt(Ast.TokenIndex), freed.path);
         }
     }
 
@@ -268,6 +269,37 @@ const Rule = struct {
         return false;
     }
 
+    /// The first of `nodes`, before token `end`, that can make the function
+    /// fail while `place` still holds what was freed: a `try`, or a `catch`
+    /// whose handler returns without storing to the place first
+    /// (`catch |err| { place = null; return err; }` leaves nothing freed).
+    fn failing(r: *Rule, nodes: []const Node.Index, end: Ast.TokenIndex, place: Path) Allocator.Error!?Node.Index {
+        const t = r.tree;
+        var first: ?Node.Index = null;
+        for (nodes) |node| {
+            if (t.nodeMainToken(node) >= end) continue;
+            const fails = switch (t.nodeTag(node)) {
+                .@"try" => true,
+                .@"catch" => fails: {
+                    const handler = t.nodeData(node).node_and_node[1];
+                    if (!returns(t, handler)) break :fails false;
+                    var handled: std.ArrayList(Node.Index) = .empty;
+                    try r.within(handler, &handled);
+                    for (handled.items) |h| {
+                        if (t.nodeTag(h) != .assign) continue;
+                        const store = try r.path(t.nodeData(h).node_and_node[0]) orelse continue;
+                        if (Store.of(store, place) == .refill) break :fails false;
+                    }
+                    break :fails true;
+                },
+                else => false,
+            };
+            if (!fails) continue;
+            if (first == null or t.nodeMainToken(node) < t.nodeMainToken(first.?)) first = node;
+        }
+        return first;
+    }
+
     /// Appends `node` and every node under it, but not what nested
     /// functions and types hold.
     fn within(r: *Rule, node: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
@@ -334,23 +366,6 @@ pub fn releaseCall(t: *const Ast, node: Node.Index) ?struct { Node.Index, Node.I
     if (call.ast.params.len != 1) return null;
     if (std.mem.eql(u8, name, "free") or std.mem.eql(u8, name, "destroy")) return .{ node, call.ast.params[0] };
     return null;
-}
-
-/// The first of `nodes`, before token `end`, that can make the function
-/// fail: a `try`, or a `catch` whose handler returns.
-fn failing(t: *const Ast, nodes: []const Node.Index, end: Ast.TokenIndex) ?Node.Index {
-    var first: ?Node.Index = null;
-    for (nodes) |node| {
-        if (t.nodeMainToken(node) >= end) continue;
-        const fails = switch (t.nodeTag(node)) {
-            .@"try" => true,
-            .@"catch" => returns(t, t.nodeData(node).node_and_node[1]),
-            else => false,
-        };
-        if (!fails) continue;
-        if (first == null or t.nodeMainToken(node) < t.nodeMainToken(first.?)) first = node;
-    }
-    return first;
 }
 
 /// Whether `node` is or holds a `return`.
@@ -448,5 +463,6 @@ test "not reported: reset first, made first, by value, a bare local, or nothing 
         \\fn elsewhere(gpa: Allocator, s: *S, n: usize) !void { gpa.free(s.a); s.b = try gpa.alloc(u8, n); }
         \\fn caughtHere(gpa: Allocator, s: *S) void { gpa.destroy(s.node); s.node = gpa.create(Node) catch unreachable; }
         \\fn withElse(gpa: Allocator, s: *S, n: usize) !void { if (n > 0) gpa.free(s.items) else log(); s.items = try gpa.alloc(u8, n); }
+        \\fn resetInCatch(gpa: Allocator, s: *S, name: []const u8) void { if (s.name) |old| gpa.free(old); s.name = gpa.dupe(u8, name) catch |err| { s.name = null; log(err); return; }; }
     , "");
 }
