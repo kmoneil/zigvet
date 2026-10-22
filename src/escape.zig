@@ -16,7 +16,10 @@
 //! struct: a type is resolved by name through the containers around where it
 //! is written (`Id`, `Self`, `@This()`), never across files. So
 //! `id.bytes[0..n]` of an `id: Id` held by value is reported when `bytes` is
-//! `[8]u8`, and not when it is a slice, which points elsewhere.
+//! `[8]u8`, and not when it is a slice, which points elsewhere. Fields held
+//! by value are followed as deep as the file's types show them
+//! (`t.name.bytes`), and a `for` loop's capture held by value has the type
+//! of an element of its input, when the file writes that input's type.
 //!
 //! Comptime-known memory is static, so `&.{"literal"}` is fine and
 //! `&.{f()}` is not: a call is evaluated at run time unless it is under
@@ -29,7 +32,11 @@
 //! Returned, any stack address is reported. Stored through a parameter or
 //! to a container-level variable, only a temporary (`&.{...}`, `&f()`) is:
 //! a named local stored outward is usually deliberate and bounded by the
-//! call, and a store a `defer` undoes is not reported at all.
+//! call, and a store a `defer` undoes is not reported at all. A capture held
+//! by value in a loop is the exception: it is a copy made for one turn, so
+//! what points into it is reported stored outward, and stored to a local
+//! declared outside the loop. A store through a pointer capture is a store
+//! into what its loop or `if` walks.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -72,6 +79,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
 const hint_literal = "make it comptime-known (`comptime` on the runtime elements) or a container-level const";
 const hint_storage = "return the value itself, have the caller pass in the memory, or allocate it";
 const hint_storage_comptime = hint_storage ++ "; if it only runs at compile time, say so with `return comptime blk: { ... }`";
+const hint_turn = "copy what it points at, or use it only within the turn";
 
 const Rule = struct {
     arena: Allocator,
@@ -151,17 +159,33 @@ const Rule = struct {
             try r.leaves(site.value, &values);
             for (values.items) |value| {
                 const source = try r.stackSource(value, 0) orelse continue;
-                // A named local stored outward is often deliberate: a
-                // context pointer for the length of a call, a thread's
-                // `current`, `argv` just before `execve`. A temporary
-                // stored outward never is. Returned, both are wrong.
-                if (site.sink != .@"return" and !source.temporary) continue;
+                switch (site.sink) {
+                    .@"return" => {},
+                    // Only a loop's capture is gone before the local is,
+                    // and only when the capture is declared after it, so
+                    // that its loop runs inside the local's scope.
+                    .outer_local => {
+                        const capture = source.capture orelse continue;
+                        if (capture < site.local.?) continue;
+                    },
+                    // A named local stored outward is often deliberate: a
+                    // context pointer for the length of a call, a thread's
+                    // `current`, `argv` just before `execve`. A temporary
+                    // stored outward never is, nor a loop's capture, which
+                    // the next turn writes over. Returned, all are wrong.
+                    else => if (!source.temporary and source.capture == null) continue,
+                }
                 const gop = try r.reported.getOrPut(r.arena, .{ source.token, site.sink });
                 if (gop.found_existing) continue;
                 try r.findings.append(r.arena, .{
                     .offset = tree.tokenStart(source.token),
-                    .hint = source.hint,
-                    .detail = .{ .escape = .{ .what = source.what, .function = r.function_name, .sink = site.sink } },
+                    .hint = if (source.capture) |capture| try r.captureHint(capture, site.sink, source.hint) else source.hint,
+                    .detail = .{ .escape = .{
+                        .what = source.what,
+                        .function = r.function_name,
+                        .sink = site.sink,
+                        .local = if (site.local) |local| r.bindings.items[local].name else "",
+                    } },
                 });
             }
         }
@@ -231,11 +255,11 @@ const Rule = struct {
                 const full = tree.fullIf(node).?;
                 try r.walk(full.ast.cond_expr);
                 const outer = r.scope.items.len;
-                if (full.payload_token) |t| try r.declareCaptures(t, false);
+                if (full.payload_token) |t| try r.declareCaptures(t, false, &.{full.ast.cond_expr}, .none);
                 try r.walk(full.ast.then_expr);
                 r.scope.shrinkRetainingCapacity(outer);
                 if (full.ast.else_expr.unwrap()) |else_expr| {
-                    if (full.error_token) |t| try r.declareCaptures(t, false);
+                    if (full.error_token) |t| try r.declareCaptures(t, false, &.{}, .none);
                     try r.walk(else_expr);
                     r.scope.shrinkRetainingCapacity(outer);
                 }
@@ -245,12 +269,12 @@ const Rule = struct {
                 const full = tree.fullWhile(node).?;
                 try r.walk(full.ast.cond_expr);
                 const outer = r.scope.items.len;
-                if (full.payload_token) |t| try r.declareCaptures(t, full.inline_token != null);
+                if (full.payload_token) |t| try r.declareCaptures(t, full.inline_token != null, &.{full.ast.cond_expr}, .@"while");
                 if (full.ast.cont_expr.unwrap()) |cont| try r.walk(cont);
                 try r.walk(full.ast.then_expr);
                 r.scope.shrinkRetainingCapacity(outer);
                 if (full.ast.else_expr.unwrap()) |else_expr| {
-                    if (full.error_token) |t| try r.declareCaptures(t, false);
+                    if (full.error_token) |t| try r.declareCaptures(t, false, &.{}, .none);
                     try r.walk(else_expr);
                     r.scope.shrinkRetainingCapacity(outer);
                 }
@@ -260,7 +284,7 @@ const Rule = struct {
                 const full = tree.fullFor(node).?;
                 for (full.ast.inputs) |input| try r.walk(input);
                 const outer = r.scope.items.len;
-                try r.declareCaptures(full.payload_token, full.inline_token != null);
+                try r.declareCaptures(full.payload_token, full.inline_token != null, full.ast.inputs, .@"for");
                 try r.walk(full.ast.then_expr);
                 r.scope.shrinkRetainingCapacity(outer);
                 if (full.ast.else_expr.unwrap()) |else_expr| try r.walk(else_expr);
@@ -270,7 +294,7 @@ const Rule = struct {
                 const full = tree.fullSwitchCase(node).?;
                 for (full.ast.values) |value| try r.walk(value);
                 const outer = r.scope.items.len;
-                if (full.payload_token) |t| try r.declareCaptures(t, full.inline_token != null);
+                if (full.payload_token) |t| try r.declareCaptures(t, full.inline_token != null, &.{}, .none);
                 try r.walk(full.ast.target_expr);
                 r.scope.shrinkRetainingCapacity(outer);
             },
@@ -280,7 +304,7 @@ const Rule = struct {
                 try r.walk(lhs);
                 const outer = r.scope.items.len;
                 const catch_token = tree.nodeMainToken(node);
-                if (tree.tokenTag(catch_token + 1) == .pipe) try r.declareCaptures(catch_token + 2, false);
+                if (tree.tokenTag(catch_token + 1) == .pipe) try r.declareCaptures(catch_token + 2, false, &.{}, .none);
                 try r.walk(rhs);
                 r.scope.shrinkRetainingCapacity(outer);
             },
@@ -341,22 +365,31 @@ const Rule = struct {
     }
 
     /// Declares `|a, *b|` starting at the token after the opening `|`.
-    fn declareCaptures(r: *Rule, first: Ast.TokenIndex, is_comptime: bool) Allocator.Error!void {
+    /// `inputs` are what the captures are taken from, in order: a `for`
+    /// loop's inputs, or the condition of an `if` or `while`. A capture
+    /// held by value in a loop is a copy made for each turn, and in a `for`
+    /// loop it has the type of an element of its input, when the file
+    /// shows it.
+    fn declareCaptures(r: *Rule, first: Ast.TokenIndex, is_comptime: bool, inputs: []const Node.Index, loop: Loop) Allocator.Error!void {
         const tree = r.tree;
         var token = first;
-        while (true) {
+        var i: usize = 0;
+        while (true) : (i += 1) {
             const by_pointer = tree.tokenTag(token) == .asterisk;
             if (by_pointer) token += 1;
             if (tree.tokenTag(token) != .identifier) return;
             const name = tree.tokenSlice(token);
+            const input: ?Node.Index = if (i < inputs.len) inputs[i] else null;
+            const element: ?Node.Index = if (loop != .@"for" or by_pointer) null else if (input) |n| r.elementType(n) else null;
             if (!std.mem.eql(u8, name, "_")) try r.declare(.{
                 .name = name,
                 .kind = .capture,
                 .mutable = false,
                 .is_comptime = is_comptime,
-                .storage = if (by_pointer) .pointer else .unknown,
-                .type_expr = .none,
-                .init = .none,
+                .storage = if (by_pointer) .pointer else if (element) |t| storageOfType(tree, t) else .unknown,
+                .type_expr = .fromOptional(element),
+                .init = .fromOptional(input),
+                .per_turn = loop != .none and !by_pointer,
             });
             token += 1;
             if (tree.tokenTag(token) != .comma) return;
@@ -365,23 +398,23 @@ const Rule = struct {
     }
 
     /// Records `lhs = rhs` as a sink when `lhs` is memory outside the
-    /// function, or as a store to a local for following aliases.
+    /// function or a local that outlives a loop's capture in scope, and as
+    /// a store to a local for following aliases.
     fn assignment(r: *Rule, node: Node.Index) Allocator.Error!void {
         const tree = r.tree;
         const lhs, const rhs = tree.nodeData(node).node_and_node;
-        var through_field = false;
-        var root = lhs;
-        while (true) switch (tree.nodeTag(root)) {
-            .field_access => {
-                through_field = true;
-                root = tree.nodeData(root).node_and_token[0];
-            },
-            .array_access => root = tree.nodeData(root).node_and_node[0],
-            .deref => root = tree.nodeData(root).node,
-            .unwrap_optional, .grouped_expression => root = tree.nodeData(root).node_and_token[0],
-            else => break,
-        };
+        var root, const through_field = rootOf(tree, lhs);
         if (tree.nodeTag(root) != .identifier) return;
+        const whole = root == lhs;
+        // A pointer capture points into what its loop or `if` walks, so a
+        // store through it is a store into that.
+        var hops: u8 = 0;
+        while (r.resolved.get(root)) |index| : (hops += 1) {
+            const binding = r.bindings.items[index];
+            if (binding.kind != .capture or binding.storage != .pointer or hops == 4) break;
+            root = rootOf(tree, binding.init.unwrap() orelse return)[0];
+            if (tree.nodeTag(root) != .identifier) return;
+        }
 
         const index = r.resolved.get(root) orelse {
             // `_ = x` discards; any other name not in scope is a
@@ -392,13 +425,112 @@ const Rule = struct {
         switch (r.bindings.items[index].kind) {
             // Parameters are immutable, so a store through one goes through
             // a pointer the caller passed in.
-            .parameter => if (root != lhs) try r.sinks.append(r.arena, .{
+            .parameter => if (!whole) try r.sinks.append(r.arena, .{
                 .value = rhs,
                 .sink = if (through_field) .field else .out_param,
                 .target = lhs,
             }),
-            .local => if (root == lhs) try r.stores.append(r.arena, .{ .binding = index, .value = rhs }),
+            .local => {
+                if (whole) try r.stores.append(r.arena, .{ .binding = index, .value = rhs });
+                if (r.capturedSince(index)) try r.sinks.append(r.arena, .{
+                    .value = rhs,
+                    .sink = .outer_local,
+                    .target = lhs,
+                    .local = index,
+                });
+            },
             .capture => {},
+        }
+    }
+
+    /// Whether a capture held by value in a loop, declared after binding
+    /// `index`, is in scope: a store to `index` from there outlives the
+    /// capture's turn.
+    fn capturedSince(r: *const Rule, index: u32) bool {
+        // Scope holds binding indices in the order they were declared.
+        var i = r.scope.items.len;
+        while (i > 0) {
+            i -= 1;
+            const later = r.scope.items[i];
+            if (later <= index) return false;
+            if (r.bindings.items[later].per_turn) return true;
+        }
+        return false;
+    }
+
+    /// The type of an element of a `for` loop's input, when the file shows
+    /// it: `xs`, `&xs` or `xs[a..b]`, with `xs` an array, a slice or a
+    /// pointer to an array, a binding or a field of a struct the file
+    /// declares (`self.items`).
+    fn elementType(r: *Rule, input: Node.Index) ?Node.Index {
+        const tree = r.tree;
+        return switch (tree.nodeTag(input)) {
+            .grouped_expression => r.elementType(tree.nodeData(input).node_and_token[0]),
+            .address_of => r.elementType(tree.nodeData(input).node),
+            .slice_open, .slice, .slice_sentinel => r.elementType(tree.fullSlice(input).?.ast.sliced),
+            else => elementOf(tree, r.typeOf(input, 0) orelse return null),
+        };
+    }
+
+    /// The type of `node` as the file writes it: a binding's, or a field's
+    /// reached from one through structs the file declares, held by value
+    /// or through a pointer (`self.items`).
+    fn typeOf(r: *Rule, node: Node.Index, depth: u8) ?Node.Index {
+        const tree = r.tree;
+        if (depth > 8) return null;
+        switch (tree.nodeTag(node)) {
+            .grouped_expression => return r.typeOf(tree.nodeData(node).node_and_token[0], depth + 1),
+            .identifier => return r.bindings.items[r.resolved.get(node) orelse return null].type_expr.unwrap(),
+            .field_access => {
+                const lhs, const field = tree.nodeData(node).node_and_token;
+                const outer = r.typeOf(lhs, depth + 1) orelse return null;
+                const container = r.containerOf(pointee(tree, outer) orelse outer, 0) orelse return null;
+                return fieldType(tree, container, tree.tokenSlice(field));
+            },
+            else => return null,
+        }
+    }
+
+    /// A place in a binding's own memory.
+    const Place = struct {
+        binding: u32,
+        /// The binding's name where the place starts, for a report.
+        root: Node.Index,
+        /// A field of the binding, not the binding itself.
+        field: bool,
+        storage: Storage,
+        type_expr: Node.OptionalIndex,
+    };
+
+    /// `node` as a place in a binding's own memory, reached without going
+    /// through a pointer: the binding, or a field of one held by value, as
+    /// deep as the file's types show it (`t.name` with `t: Topic` and
+    /// `name: Name` declared in `Topic`).
+    fn place(r: *Rule, node: Node.Index, depth: u8) ?Place {
+        const tree = r.tree;
+        if (depth > 8) return null;
+        switch (tree.nodeTag(node)) {
+            .grouped_expression => return r.place(tree.nodeData(node).node_and_token[0], depth + 1),
+            .identifier => {
+                const index = r.resolved.get(node) orelse return null;
+                const binding = r.bindings.items[index];
+                return .{ .binding = index, .root = node, .field = false, .storage = binding.storage, .type_expr = binding.type_expr };
+            },
+            .field_access => {
+                const lhs, const field = tree.nodeData(node).node_and_token;
+                const outer = r.place(lhs, depth + 1) orelse return null;
+                if (outer.storage != .value) return null;
+                const container = r.containerOf(outer.type_expr.unwrap() orelse return null, 0) orelse return null;
+                const field_type = fieldType(tree, container, tree.tokenSlice(field)) orelse return null;
+                return .{
+                    .binding = outer.binding,
+                    .root = outer.root,
+                    .field = true,
+                    .storage = storageOfType(tree, field_type),
+                    .type_expr = field_type.toOptional(),
+                };
+            },
+            else => return null,
         }
     }
 
@@ -483,6 +615,9 @@ const Rule = struct {
         /// A temporary, `&.{...}` or `&f()`, which nothing else can name.
         /// Otherwise a named local, parameter or capture.
         temporary: bool,
+        /// The capture held by value in a loop that it points into: a copy
+        /// the next turn writes over.
+        capture: ?u32 = null,
     };
 
     /// Whether `node` evaluates to the address of, or a slice of, stack
@@ -549,18 +684,17 @@ const Rule = struct {
             .field_access => {
                 const receiver, const name_token = tree.nodeData(callee).node_and_token;
                 const name = tree.tokenSlice(name_token);
-                const index = if (tree.nodeTag(receiver) == .identifier) r.resolved.get(receiver) else null;
-                // `Id.slice(&id)`, through the type's namespace.
-                if (index == null) {
+                // A method: the receiver, a binding or a field of one held
+                // by value (`t.name.slice()`), is its first argument.
+                const p = r.place(receiver, 0) orelse {
+                    // `Id.slice(&id)`, through the type's namespace.
                     const container = r.containerOf(receiver, 0) orelse return null;
                     const fn_decl = memberFn(tree, container, name) orelse return null;
                     const view = try r.viewOf(fn_decl) orelse return null;
                     return if (view < arguments.len) r.stackSource(arguments[view], depth) else null;
-                }
-                // A method: the receiver is its first argument.
-                const binding = r.bindings.items[index.?];
-                const type_expr = binding.type_expr.unwrap() orelse return null;
-                const value_type = switch (binding.storage) {
+                };
+                const type_expr = p.type_expr.unwrap() orelse return null;
+                const value_type = switch (p.storage) {
                     .value => type_expr,
                     .pointer => pointee(tree, type_expr) orelse return null,
                     .array, .unknown => return null,
@@ -569,9 +703,10 @@ const Rule = struct {
                 const fn_decl = memberFn(tree, container, name) orelse return null;
                 const view = try r.viewOf(fn_decl) orelse return null;
                 if (view > 0) return if (view - 1 < arguments.len) r.stackSource(arguments[view - 1], depth) else null;
-                if (binding.storage == .pointer) return r.stackSource(receiver, depth);
-                if (r.isComptimeBinding(index.?)) return null;
-                return try r.storageSource(tree.nodeMainToken(receiver), "address of", index.?);
+                // A pointer field points where nothing here shows.
+                if (p.storage == .pointer) return if (p.field) null else r.stackSource(receiver, depth);
+                if (r.isComptimeBinding(p.binding)) return null;
+                return try r.storageSource(tree.nodeMainToken(p.root), if (p.field) "address of a field of" else "address of", p.binding);
             },
             else => return null,
         }
@@ -746,16 +881,18 @@ const Rule = struct {
                 return try r.storageSource(amp, "address of", index);
             },
             // `&s.field` of a struct held by value, `&arr[i]` of an array.
-            // One level only: in `&s.a.b`, `a` may be a pointer, and `.b`
-            // would then reach through it to memory that is not `s`'s.
+            // Deeper only where the file's types show every field on the
+            // way is held by value (`&t.name.bytes`): in `&s.a.b`, `a` may
+            // be a pointer, and `.b` would then reach through it to memory
+            // that is not `s`'s.
             .field_access, .array_access => {
                 const by_field = tree.nodeTag(operand) == .field_access;
                 const root = if (by_field) tree.nodeData(operand).node_and_token[0] else tree.nodeData(operand).node_and_node[0];
-                if (tree.nodeTag(root) != .identifier) return null;
-                const index = r.resolved.get(root) orelse return null;
-                if (r.isComptimeBinding(index)) return null;
-                if (r.bindings.items[index].storage != if (by_field) Storage.value else Storage.array) return null;
-                return try r.storageSource(amp, if (by_field) "address of a field of" else "address of an element of", index);
+                const p = r.place(root, 0) orelse return null;
+                if (r.isComptimeBinding(p.binding)) return null;
+                if (p.storage != if (by_field) Storage.value else Storage.array) return null;
+                const access = if (by_field or p.field) "address of a field of" else "address of an element of";
+                return try r.storageSource(amp, access, p.binding);
             },
             else => {
                 if (!isInit(tree.nodeTag(operand)) or r.isComptime(operand)) return null;
@@ -775,19 +912,13 @@ const Rule = struct {
                     return try r.storageSource(tree.nodeMainToken(sliced), "slice of", index);
                 }
             },
-            // `x.field[a..b]` of an `x` held by value, with `field` an array.
-            .field_access => {
-                const lhs, const field = tree.nodeData(sliced).node_and_token;
-                if (tree.nodeTag(lhs) == .identifier) if (r.resolved.get(lhs)) |index| {
-                    const binding = r.bindings.items[index];
-                    if (binding.storage == .value and !r.isComptimeBinding(index)) {
-                        if (binding.type_expr.unwrap()) |type_expr| if (r.containerOf(type_expr, 0)) |container| {
-                            if (fieldIsArray(tree, container, tree.tokenSlice(field))) {
-                                return try r.storageSource(tree.nodeMainToken(lhs), "slice of a field of", index);
-                            }
-                        };
-                    }
-                };
+            // `x.field[a..b]` of an `x` held by value, with `field` an
+            // array, through as many fields held by value as the file's
+            // types show (`t.name.bytes[0..]`).
+            .field_access => if (r.place(sliced, 0)) |p| {
+                if (p.storage == .array and !r.isComptimeBinding(p.binding)) {
+                    return try r.storageSource(tree.nodeMainToken(p.root), "slice of a field of", p.binding);
+                }
             },
             else => if (isInit(tree.nodeTag(sliced)) and !r.isComptime(sliced)) return .{
                 .token = tree.firstToken(sliced),
@@ -812,11 +943,42 @@ const Rule = struct {
             .what = try r.arena.print("{s} {s} '{s}'", .{ access, kind, binding.name }),
             .hint = r.storageHint(),
             .temporary = false,
+            .capture = if (binding.per_turn) index else null,
         };
     }
 
     fn storageHint(r: *const Rule) []const u8 {
         return if (r.comptime_params) hint_storage_comptime else hint_storage;
+    }
+
+    /// The hint for what points into `capture`, held by value in a loop
+    /// and stored to `sink`: capture by pointer, when the capture's type
+    /// shows what the loop walks and that it outlives the turn. Returned
+    /// or stored outward from a loop over an array of the function's own,
+    /// a pointer capture would still point into the function's frame.
+    fn captureHint(r: *Rule, capture: u32, sink: Sink, otherwise: []const u8) Allocator.Error![]const u8 {
+        const binding = r.bindings.items[capture];
+        const input = binding.init.unwrap() orelse return otherwise;
+        if (binding.type_expr == .none or (sink != .outer_local and r.walksOwnArray(input))) {
+            return if (sink == .outer_local) hint_turn else otherwise;
+        }
+        return r.arena.print("capture it by pointer, `|*{s}|`, to point into what the loop walks rather than a copy made for one turn", .{binding.name});
+    }
+
+    /// Whether `input`, a loop's input, is an array in the function's own
+    /// memory: `arr`, `&arr` or `arr[a..b]` with `arr: [N]T`, or such a
+    /// field of a struct held by value.
+    fn walksOwnArray(r: *Rule, input: Node.Index) bool {
+        const tree = r.tree;
+        var node = input;
+        while (true) switch (tree.nodeTag(node)) {
+            .grouped_expression => node = tree.nodeData(node).node_and_token[0],
+            .address_of => node = tree.nodeData(node).node,
+            .slice_open, .slice, .slice_sentinel => node = tree.fullSlice(node).?.ast.sliced,
+            else => break,
+        };
+        const p = r.place(node, 0) orelse return false;
+        return p.storage == .array;
     }
 
     fn isComptimeBinding(r: *Rule, index: u32) bool {
@@ -1047,14 +1209,21 @@ const Binding = struct {
     /// anything declared under `comptime`.
     is_comptime: bool,
     storage: Storage,
-    /// Its type as written: a parameter's, a local's annotation, or `T` of
-    /// a local's `T{...}`.
+    /// Its type as written: a parameter's, a local's annotation, `T` of a
+    /// local's `T{...}`, or the element type of a `for` loop's input for a
+    /// capture held by value.
     type_expr: Node.OptionalIndex,
-    /// A local's initializer.
+    /// A local's initializer, or what a capture is taken from: its `for`
+    /// loop's input, or the condition of its `if` or `while`.
     init: Node.OptionalIndex,
+    /// A capture held by value in a loop: a copy made for one turn.
+    per_turn: bool = false,
 
     const Kind = enum { local, parameter, capture };
 };
+
+/// The loop a capture is declared by, if any.
+const Loop = enum { none, @"while", @"for" };
 
 /// What a binding's own memory holds, as far as the syntax shows: whether
 /// `&x.field` and `x[a..b]` point into the binding or through it.
@@ -1070,6 +1239,8 @@ const SinkSite = struct {
     sink: Sink,
     /// What a store writes to; null for `return`.
     target: ?Node.Index,
+    /// The local stored to, for `.outer_local`.
+    local: ?u32 = null,
 };
 
 /// Builtins whose result is always known at compile time.
@@ -1186,8 +1357,9 @@ fn typeOfLocal(tree: *const Ast, type_node: Node.OptionalIndex, init_node: Node.
     if (type_node != .none) return type_node;
     const init = init_node.unwrap() orelse return .none;
     var buffer: [2]Node.Index = undefined;
-    const struct_init = tree.fullStructInit(&buffer, init) orelse return .none;
-    return struct_init.ast.type_expr;
+    if (tree.fullStructInit(&buffer, init)) |struct_init| return struct_init.ast.type_expr;
+    if (tree.fullArrayInit(&buffer, init)) |array_init| return array_init.ast.type_expr;
+    return .none;
 }
 
 /// What a pointer to one value, `*T` or `*const T`, points at.
@@ -1236,19 +1408,60 @@ fn memberFn(tree: *const Ast, container: Node.Index, name: []const u8) ?Node.Ind
     return null;
 }
 
-/// Whether `container` has a field `name` declared as an array.
-fn fieldIsArray(tree: *const Ast, container: Node.Index, name: []const u8) bool {
+/// The type `container`'s field `name` is declared with.
+fn fieldType(tree: *const Ast, container: Node.Index, name: []const u8) ?Node.Index {
     var buffer: [2]Node.Index = undefined;
     for (tree.fullContainerDecl(&buffer, container).?.ast.members) |member| {
         const field = tree.fullContainerField(member) orelse continue;
         if (field.ast.tuple_like or !std.mem.eql(u8, tree.tokenSlice(field.ast.main_token), name)) continue;
-        const type_expr = field.ast.type_expr.unwrap() orelse return false;
-        return switch (tree.nodeTag(type_expr)) {
-            .array_type, .array_type_sentinel => true,
-            else => false,
-        };
+        return field.ast.type_expr.unwrap();
     }
-    return false;
+    return null;
+}
+
+/// Whether `container` has a field `name` declared as an array.
+fn fieldIsArray(tree: *const Ast, container: Node.Index, name: []const u8) bool {
+    const type_expr = fieldType(tree, container, name) orelse return false;
+    return switch (tree.nodeTag(type_expr)) {
+        .array_type, .array_type_sentinel => true,
+        else => false,
+    };
+}
+
+/// What an array, a slice or a pointer to an array holds: `T` of `[N]T`,
+/// `[]const T`, `[*]T` or `*const [N]T`.
+fn elementOf(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
+    switch (tree.nodeTag(type_expr)) {
+        .grouped_expression => return elementOf(tree, tree.nodeData(type_expr).node_and_token[0]),
+        .array_type, .array_type_sentinel => return tree.fullArrayType(type_expr).?.ast.elem_type,
+        else => {
+            const ptr = tree.fullPtrType(type_expr) orelse return null;
+            if (ptr.size != .one) return ptr.ast.child_type;
+            return switch (tree.nodeTag(ptr.ast.child_type)) {
+                .array_type, .array_type_sentinel => tree.fullArrayType(ptr.ast.child_type).?.ast.elem_type,
+                else => null,
+            };
+        },
+    }
+}
+
+/// The name at the root of a place, `self` of `self.items[i].*`, or of a
+/// loop's input, `self` of `&self.buf` or `self.items[1..]`, and whether a
+/// field is reached on the way.
+fn rootOf(tree: *const Ast, node: Node.Index) struct { Node.Index, bool } {
+    var root = node;
+    var through_field = false;
+    while (true) switch (tree.nodeTag(root)) {
+        .field_access => {
+            through_field = true;
+            root = tree.nodeData(root).node_and_token[0];
+        },
+        .array_access => root = tree.nodeData(root).node_and_node[0],
+        .deref, .address_of => root = tree.nodeData(root).node,
+        .unwrap_optional, .grouped_expression => root = tree.nodeData(root).node_and_token[0],
+        .slice_open, .slice, .slice_sentinel => root = tree.fullSlice(root).?.ast.sliced,
+        else => return .{ root, through_field },
+    };
 }
 
 /// Appends the value of every `return` in `node`, a function's body, but
@@ -1310,7 +1523,11 @@ fn expectEscapes(source: [:0]const u8, expected: []const u8) !void {
     for (findings.items) |finding| {
         const loc = report.location(tree.source, finding.offset);
         const e = finding.detail.escape;
-        try out.writer.print("{d}:{d} {s} -> {s} through {s}\n", .{ loc.line + 1, loc.column + 1, e.what, e.function, e.sink.text() });
+        if (e.sink == .outer_local) {
+            try out.writer.print("{d}:{d} {s} -> a loop in {s} through local '{s}'\n", .{ loc.line + 1, loc.column + 1, e.what, e.function, e.local });
+        } else {
+            try out.writer.print("{d}:{d} {s} -> {s} through {s}\n", .{ loc.line + 1, loc.column + 1, e.what, e.function, e.sink.text() });
+        }
     }
     try std.testing.expectEqualStrings(expected, out.written());
 }
@@ -1567,6 +1784,76 @@ test "an array field of a struct held by value, sliced or through the file's own
         \\21:79 address of local 'buf' -> freeCall through return
         \\
     );
+}
+
+test "a capture held by value in a loop is a copy made for one turn (#34)" {
+    try expectEscapes(
+        \\const Name = struct {
+        \\    bytes: [16]u8 = undefined,
+        \\    len: usize = 0,
+        \\    fn slice(self: *const Name) []const u8 { return self.bytes[0..self.len]; }
+        \\};
+        \\const Topic = struct { name: Name, ref: *const Name, partitions: u32 };
+        \\const Holder = struct { topics: []const Topic, last: []const u8, names: [2]Name };
+        \\fn direct(topics: []const Topic, into: [][]const u8) void { for (topics, into) |topic, *out| out.* = topic.name.bytes[0..topic.name.len]; }
+        \\fn method(topics: []const Topic, into: [][]const u8) void { for (topics, into) |topic, *out| out.* = topic.name.slice(); }
+        \\fn local(topics: []const Topic) usize { var last: []const u8 = ""; for (topics) |topic| last = topic.name.slice(); return last.len; }
+        \\fn returned(topics: []const Topic) []const u8 { for (topics) |topic| return topic.name.slice(); return ""; }
+        \\fn field(h: *Holder) void { for (h.topics) |topic| h.last = topic.name.slice(); }
+        \\fn outerArray(topics: []const Topic) usize { var names: [4][]const u8 = undefined; for (topics, &names) |topic, *n| n.* = topic.name.slice(); return names[0].len; }
+        \\fn ownArray(h: Holder) []const u8 { for (h.names) |n| return n.slice(); return ""; }
+        \\fn nested(t: Topic) []const u8 { return t.name.bytes[0..t.name.len]; }
+        \\fn nestedMethod(t: Topic) []const u8 { return t.name.slice(); }
+        \\fn nestedAddress(t: Topic) *const [16]u8 { return &t.name.bytes; }
+        \\fn temporaryThroughCapture(into: [][]const u8, n: u8) void { for (into) |*b| b.* = &.{n}; }
+        \\fn borrowed(topics: []const Topic, into: [][]const u8) void { for (topics, into) |*topic, *out| out.* = topic.name.slice(); }
+        \\fn inside(topics: []const Topic) usize { var n: usize = 0; for (topics) |topic| { var name: []const u8 = ""; name = topic.name.slice(); n += name.len; } return n; }
+        \\fn pointerField(topics: []const Topic, into: [][]const u8) void { for (topics, into) |topic, *out| out.* = topic.ref.slice(); }
+        \\fn indices(topics: []const Topic, into: []usize) void { for (topics, into, 0..) |_, *out, i| out.* = i; }
+        \\fn temporaryIntoLocal(n: u8) usize { var bufs: [2][]const u8 = undefined; for (&bufs) |*b| b.* = &.{n}; return bufs[0].len; }
+        \\fn passed(topics: []const Topic) bool { for (topics) |topic| if (eql(topic.name.slice(), "a")) return true; return false; }
+        \\fn eql(a: []const u8, b: []const u8) bool { return a.len == b.len; }
+    ,
+        \\8:102 slice of a field of capture 'topic' -> direct through out param
+        \\9:102 address of a field of capture 'topic' -> method through out param
+        \\10:96 address of a field of capture 'topic' -> a loop in local through local 'last'
+        \\11:77 address of a field of capture 'topic' -> returned through return
+        \\12:61 address of a field of capture 'topic' -> field through field
+        \\13:123 address of a field of capture 'topic' -> a loop in outerArray through local 'names'
+        \\14:62 address of capture 'n' -> ownArray through return
+        \\15:41 slice of a field of parameter 't' -> nested through return
+        \\16:47 address of a field of parameter 't' -> nestedMethod through return
+        \\17:51 address of a field of parameter 't' -> nestedAddress through return
+        \\18:84 anonymous array -> temporaryThroughCapture through out param
+        \\
+    );
+}
+
+test "a loop capture's hint: by pointer when the loop walks memory that outlives it" {
+    const gpa = std.testing.allocator;
+    var tree = try Ast.parse(gpa,
+        \\const Name = struct { bytes: [4]u8, fn slice(self: *const Name) []const u8 { return &self.bytes; } };
+        \\fn caller(names: []const Name) []const u8 { for (names) |n| return n.slice(); return ""; }
+        \\fn own(n: u8) []const u8 { const names = [_]Name{.{ .bytes = .{ n, n, n, n } }}; for (names) |m| return m.slice(); return ""; }
+        \\fn untyped(it: *Iterator) usize { var last: *const u8 = undefined; while (it.next()) |b| last = &b; return last.*; }
+    , .{});
+    defer tree.deinit(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    var findings: std.ArrayList(Finding) = .empty;
+    try check(arena_state.allocator(), &tree, &findings);
+    std.mem.sort(Finding, findings.items, {}, struct {
+        fn before(_: void, a: Finding, b: Finding) bool {
+            return a.offset < b.offset;
+        }
+    }.before);
+    const expected = [_][]const u8{
+        "capture it by pointer, `|*n|`, to point into what the loop walks rather than a copy made for one turn",
+        hint_storage,
+        hint_turn,
+    };
+    try std.testing.expectEqual(expected.len, findings.items.len);
+    for (expected, findings.items) |hint, finding| try std.testing.expectEqualStrings(hint, finding.hint);
 }
 
 test "comptime contexts and nested declarations" {
