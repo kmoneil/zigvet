@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel };
+pub const Rule = enum { escape, alias, cancel, fit };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -43,6 +43,7 @@ pub const Finding = struct {
         escape: Escape,
         alias: Alias,
         cancel: Cancel,
+        fit: Fit,
         allow: Allow,
     };
 
@@ -72,6 +73,23 @@ pub const Finding = struct {
         handler: []const u8,
     };
 
+    pub const Fit = struct {
+        /// The call that prints, as written: `std.fmt.bufPrint`.
+        callee: []const u8,
+        /// The replacement field that prints the float, as written: `{d}`.
+        placeholder: []const u8,
+        /// The float's type: `f64`.
+        float: []const u8,
+        /// The float, as written.
+        value: []const u8,
+        /// The most bytes it can print in.
+        need: u64,
+        /// The buffer, as written: `&buf`.
+        buffer: []const u8,
+        /// How many bytes the buffer holds.
+        capacity: u64,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -90,6 +108,7 @@ pub const Finding = struct {
             .escape => .escape,
             .alias => .alias,
             .cancel => .cancel,
+            .fit => .fit,
             .allow => null,
         };
     }
@@ -137,6 +156,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .cancel => |c| try w.print("`{s}` drops what {s} returns, error.Canceled included, which is delivered once", .{
             c.handler, c.callee,
+        }),
+        .fit => |f| try w.print("`{s}` of {s} '{s}' can need {d} bytes, but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{
+            f.placeholder, f.float, f.value, f.need, f.buffer, f.capacity, f.callee,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
