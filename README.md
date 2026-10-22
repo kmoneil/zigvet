@@ -17,8 +17,8 @@ task that nothing cancels.
 Fit, over the same standard library and nine application repos, reports
 nothing; over zig-charts as it was before an audit fixed three of these,
 it finds two, the third printing a field of a type declared in another
-file. Refill, over the same code, reports twelve, all real: two in the
-standard library, four in three application repos, and six in third-party
+file. Refill, over the same code, reports eleven, all real: two in the
+standard library, four in three application repos, and five in third-party
 UI code one of them keeps for reference. Owner, over the same code,
 reports three, all real: two in two application repos, and a copy of one
 of them another keeps.
@@ -320,11 +320,12 @@ can fail first: a `try`, or a `catch` that returns, in the stored value or
 in a statement between.
 
 Not reported: a place reset first (`self.items = &.{}`, or a store into it
-such as `self.items.len = 0`), reset by an `errdefer`, or perhaps reset by
-a call between that is handed what holds it (`self.clear()`); a field of a
-`var` local not declared as a pointer, which holds a struct by value that
-the failing function throws away; and a bare local, which an `errdefer` of
-its own can cover.
+such as `self.items.len = 0`), reset by an `errdefer` or by the `catch`
+that handles the failure (`catch |err| { self.name = null; return err; }`),
+or perhaps reset by a call between that is handed what holds it
+(`self.clear()`); a field of a `var` local not declared as a pointer, which
+holds a struct by value that the failing function throws away; and a bare
+local, which an `errdefer` of its own can cover.
 
 ## Rule six: owner
 
