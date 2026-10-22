@@ -9,6 +9,8 @@ _bench/
 _issues/
 # scripts/corpus-diff.sh's directories, which are paths on this machine.
 /corpus.txt
+# scripts/wild-corpus.sh's clones of public Zig projects.
+/.wild/
 
 # OS / editor
 .DS_Store

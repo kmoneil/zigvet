@@ -597,6 +597,14 @@ nothing but the reports it was written for. List the directories in
 `corpus.txt` at the repository root (gitignored, one per line) or give them
 as arguments; `--base` and `--head` each take a git ref or a zigvet binary.
 
+`scripts/wild-corpus.sh` keeps shallow clones of fourteen well-known public
+Zig projects (Ghostty, TigerBeetle, ZLS, Roc and others) in `.wild/`, which
+git ignores and the walk skips, and prints their directories, so a rule is
+also measured on code nobody here wrote:
+`scripts/corpus-diff.sh --base main $(scripts/wild-corpus.sh)`. A clone
+already there is used as it is; `--update` fetches each project's latest
+commit.
+
 ## License
 
 Apache-2.0; see [LICENSE](LICENSE).
