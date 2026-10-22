@@ -1,8 +1,9 @@
 //! What one file's syntax shows about types: the structs and unions it
 //! declares, found by name through the containers around where a type is
 //! written (`Id`, `Self`, an alias, `@This()`), their fields and functions,
-//! and what a pointer, array or slice type holds. Never across files: a type
-//! from another file, or one a function returns, is not known.
+//! what a pointer, array or slice type holds, and the type a name or a field
+//! reached from one is declared with. Never across files: a type from
+//! another file, or one a function returns, is not known.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -77,6 +78,126 @@ pub const Types = struct {
         }
         return null;
     }
+
+    /// The type of `node` as the file writes it: a binding's, or a field's
+    /// reached from one through structs the file declares.
+    pub fn typeOf(t: Types, node: Node.Index, depth: u8) ?Node.Index {
+        const tree = t.tree;
+        if (depth > 8) return null;
+        switch (tree.nodeTag(node)) {
+            .grouped_expression => return t.typeOf(tree.nodeData(node).node_and_token[0], depth + 1),
+            .identifier => return t.bindingType(node, depth),
+            .field_access => {
+                const lhs, const field = tree.nodeData(node).node_and_token;
+                const outer = t.typeOf(lhs, depth + 1) orelse return null;
+                const container = t.containerOf(pointee(tree, outer) orelse outer, 0) orelse return null;
+                return fieldType(tree, container, tree.tokenSlice(field));
+            },
+            else => return null,
+        }
+    }
+
+    /// The type the file writes for what `use`, an identifier, names: found
+    /// by walking out from it, as Zig allows no shadowing. A local's
+    /// annotation, a parameter's type, a container-level variable's
+    /// annotation, or what a capture is taken from: an element of a `for`
+    /// loop's input, the payload of an `if` or `while` on an optional or
+    /// error union, or a union's field for a `switch` prong on one tag.
+    pub fn bindingType(t: Types, use: Node.Index, depth: u8) ?Node.Index {
+        const tree = t.tree;
+        const name = tree.tokenSlice(tree.nodeMainToken(use));
+        var child = use;
+        var up = t.parents[@backingInt(use)].unwrap();
+        while (up) |parent| : ({
+            child = parent;
+            up = t.parents[@backingInt(parent)].unwrap();
+        }) {
+            switch (tree.nodeTag(parent)) {
+                .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                    if (t.localBefore(parent, child, name)) |decl| return decl.ast.type_node.unwrap();
+                },
+                .for_simple, .@"for" => {
+                    const full = tree.fullFor(parent).?;
+                    if (child != full.ast.then_expr) continue;
+                    const index = captureIndex(tree, full.payload_token, name) orelse continue;
+                    if (index >= full.ast.inputs.len) return null;
+                    return t.elementType(full.ast.inputs[index], depth);
+                },
+                .if_simple, .@"if" => {
+                    const full = tree.fullIf(parent).?;
+                    if (child != full.ast.then_expr) continue;
+                    if (captureIndex(tree, full.payload_token orelse continue, name) != 0) continue;
+                    return payload(tree, t.typeOf(full.ast.cond_expr, depth + 1) orelse return null);
+                },
+                .while_simple, .while_cont, .@"while" => {
+                    const full = tree.fullWhile(parent).?;
+                    if (child != full.ast.then_expr) continue;
+                    if (captureIndex(tree, full.payload_token orelse continue, name) != 0) continue;
+                    return payload(tree, t.typeOf(full.ast.cond_expr, depth + 1) orelse return null);
+                },
+                .switch_case_one, .switch_case => {
+                    const case = tree.fullSwitchCase(parent).?;
+                    if (captureIndex(tree, case.payload_token orelse continue, name) != 0) continue;
+                    // One prong per tag: `.number => |v|`.
+                    if (case.ast.values.len != 1 or tree.nodeTag(case.ast.values[0]) != .enum_literal) return null;
+                    const switch_node = t.parents[@backingInt(parent)].unwrap() orelse return null;
+                    const condition = tree.fullSwitch(switch_node).?.ast.condition;
+                    const of = t.typeOf(condition, depth + 1) orelse return null;
+                    const container = t.containerOf(pointee(tree, of) orelse of, 0) orelse return null;
+                    return fieldType(tree, container, tree.tokenSlice(tree.nodeMainToken(case.ast.values[0])));
+                },
+                .fn_decl => {
+                    var buffer: [1]Node.Index = undefined;
+                    const proto = tree.fullFnProto(&buffer, tree.nodeData(parent).node_and_node[0]).?;
+                    var params = proto.iterate(tree);
+                    while (params.next()) |param| {
+                        const name_token = param.name_token orelse continue;
+                        if (std.mem.eql(u8, tree.tokenSlice(name_token), name)) return param.type_expr;
+                    }
+                    return t.containerVariable(parent, name);
+                },
+                .test_decl => return t.containerVariable(parent, name),
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    /// The declared type of the container-level variable `name` in a
+    /// container around `node`.
+    fn containerVariable(t: Types, node: Node.Index, name: []const u8) ?Node.Index {
+        const tree = t.tree;
+        var around = t.enclosingContainer(node);
+        while (around) |container| : (around = t.enclosingContainer(container)) {
+            const decl = memberDecl(tree, container, name) orelse continue;
+            return tree.fullVarDecl(decl).?.ast.type_node.unwrap();
+        }
+        return null;
+    }
+
+    /// The local `name` declared in `block` before its statement `child`.
+    fn localBefore(t: Types, block: Node.Index, child: Node.Index, name: []const u8) ?Ast.full.VarDecl {
+        const tree = t.tree;
+        var buffer: [2]Node.Index = undefined;
+        for (tree.blockStatements(&buffer, block).?) |statement| {
+            if (statement == child) return null;
+            const decl = tree.fullVarDecl(statement) orelse continue;
+            if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) return decl;
+        }
+        return null;
+    }
+
+    /// The type of an element of a `for` loop's input: `xs`, `&xs` or
+    /// `xs[a..b]`, with `xs` an array, a slice or a pointer to an array.
+    fn elementType(t: Types, input: Node.Index, depth: u8) ?Node.Index {
+        const tree = t.tree;
+        return switch (tree.nodeTag(input)) {
+            .grouped_expression => t.elementType(tree.nodeData(input).node_and_token[0], depth),
+            .address_of => t.elementType(tree.nodeData(input).node, depth),
+            .slice_open, .slice, .slice_sentinel => t.elementType(tree.fullSlice(input).?.ast.sliced, depth),
+            else => elementOf(tree, t.typeOf(input, depth + 1) orelse return null),
+        };
+    }
 };
 
 /// What a pointer to one value, `*T` or `*const T`, points at.
@@ -135,4 +256,28 @@ pub fn elementOf(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
             };
         },
     }
+}
+
+/// Which of `|a, *b|`, starting at `first`, is `name` and held by value.
+fn captureIndex(tree: *const Ast, first: Ast.TokenIndex, name: []const u8) ?usize {
+    var token = first;
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        const by_pointer = tree.tokenTag(token) == .asterisk;
+        if (by_pointer) token += 1;
+        if (tree.tokenTag(token) != .identifier) return null;
+        if (std.mem.eql(u8, tree.tokenSlice(token), name)) return if (by_pointer) null else index;
+        token += 1;
+        if (tree.tokenTag(token) != .comma) return null;
+        token += 1;
+    }
+}
+
+/// `T` of `?T` or `E!T`: what an `if` or `while` captures.
+fn payload(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
+    return switch (tree.nodeTag(type_expr)) {
+        .optional_type => tree.nodeData(type_expr).node,
+        .error_union => tree.nodeData(type_expr).node_and_node[1],
+        else => null,
+    };
 }
