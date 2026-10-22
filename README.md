@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: five rules. Escape, run over the 0.17.0 standard library and
+Status: six rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive (below). Alias,
 run over the same standard library and seven application repos, found one
@@ -18,7 +18,9 @@ nothing; over zig-charts as it was before an audit fixed three of these,
 it finds two, the third printing a field of a type declared in another
 file. Refill, over the same code, reports twelve, all real: two in the
 standard library, four in three application repos, and six in third-party
-UI code one of them keeps for reference.
+UI code one of them keeps for reference. Owner, over the same code,
+reports three, all real: two in two application repos, and a copy of one
+of them another keeps.
 
 ## Rule one: escape
 
@@ -308,6 +310,51 @@ a call between that is handed what holds it (`self.clear()`); a field of a
 the failing function throws away; and a bare local, which an `errdefer` of
 its own can cover.
 
+## Rule six: owner
+
+One allocation freed by two errdefers: the caller's, and the one in the
+function it hands the allocation to.
+
+```zig
+/// Takes `bytes`, even when it fails.
+fn keep(self: *Store, bytes: []u8) !void {
+    errdefer self.gpa.free(bytes);
+    try self.kept.append(self.gpa, bytes);
+}
+
+fn save(self: *Store, text: []const u8) !void {
+    const bytes = try self.gpa.dupe(u8, text);
+    errdefer self.gpa.free(bytes);
+    try self.keep(bytes);
+}
+```
+
+`keep` frees `bytes` itself when it fails. So when `append` fails, both
+errdefers run, `keep`'s and then `save`'s, and the second frees freed
+memory. It compiles clean in every build mode, and each function reads
+correctly on its own, which is why review passes it: the bug is where the
+two meet. The debugging allocator says "double free" only when a test makes
+that allocation fail; a release build corrupts the heap and says nothing.
+
+The fix is to free it in one place: drop the caller's errdefer, or have the
+callee leave the allocation to its caller when it fails.
+
+### What owner reports
+
+A call under `try` to one of the file's own functions that takes a
+parameter on failure, where the argument for that parameter is a name that
+an `errdefer` of the caller, declared before the call in a block around it,
+frees. A function takes a parameter on failure when an `errdefer` in it
+frees the parameter (`x.free(p)`, `x.destroy(p)` or `p.deinit(...)`) and
+something after it can fail: a `try` or a `return error.X`. The function is
+found by name, through its type (`Store.keep(s, b)`), or as a method of a
+binding whose type the file declares (`self.keep(b)`).
+
+Not reported: a call whose error is handled rather than returned with
+`try`, which only the caller can judge; an `errdefer` declared after the
+call; an argument that is not a plain name; and a function declared in
+another file.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -500,8 +547,8 @@ is not a zigvet rule. Code that is right but larger or slower than it could
 be is out of scope as well: what it costs depends on the build mode and on
 how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
-for what it catches: `escape`, `alias`, `cancel`, `fit` and `refill` so
-far.
+for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill` and
+`owner` so far.
 
 ## Tests
 

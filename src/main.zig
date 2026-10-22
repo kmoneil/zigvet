@@ -280,6 +280,7 @@ test {
     _ = @import("clobber.zig");
     _ = @import("escape.zig");
     _ = @import("fit.zig");
+    _ = @import("owner.zig");
     _ = @import("refill.zig");
     _ = @import("report.zig");
     _ = @import("types.zig");

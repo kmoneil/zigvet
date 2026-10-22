@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -45,6 +45,7 @@ pub const Finding = struct {
         cancel: Cancel,
         fit: Fit,
         refill: Refill,
+        owner: Owner,
         allow: Allow,
     };
 
@@ -98,6 +99,14 @@ pub const Finding = struct {
         fails: []const u8,
     };
 
+    pub const Owner = struct {
+        /// The function that frees the argument when it fails, as written:
+        /// `self.keep`.
+        callee: []const u8,
+        /// The argument, a name.
+        argument: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -118,6 +127,7 @@ pub const Finding = struct {
             .cancel => .cancel,
             .fit => .fit,
             .refill => .refill,
+            .owner => .owner,
             .allow => null,
         };
     }
@@ -171,6 +181,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .refill => |f| try w.print("`{s}` freed here still holds the freed memory if {s} fails before it is refilled", .{
             f.place, f.fails,
+        }),
+        .owner => |o| try w.print("{s} frees '{s}' itself when it fails, and an errdefer here frees it again", .{
+            o.callee, o.argument,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
