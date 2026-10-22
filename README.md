@@ -9,10 +9,11 @@ style, which the existing linters cover, but silent wrongness.
 
 Status: six rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
-defects and three of its one accepted kind of false positive (below). Alias,
-run over the same standard library and seven application repos, found one
-real defect and no false positive. Cancel, over the same code, found one
-real defect and one harmless case, a test's task that nothing cancels.
+defects and three of its one accepted kind of false positive, which it now
+tells apart (below). Alias, run over the same standard library and seven
+application repos, found one real defect and no false positive. Cancel,
+over the same code, found one real defect and one harmless case, a test's
+task that nothing cancels.
 Fit, over the same standard library and nine application repos, reports
 nothing; over zig-charts as it was before an audit fixed three of these,
 it finds two, the third printing a field of a type declared in another
@@ -121,10 +122,16 @@ receiver's written type: `const p = &id; return p.slice();` is not
 followed, `const p: *const Id = &id;` is. A function whose
 return type only comptime has (`type`, `comptime_int`, `comptime_float`, or
 a pointer, slice, array, optional or error union of one, such as
-`[]const type`) runs only at compile time, and is not checked.
+`[]const type`) runs only at compile time, and is not checked. Nor is one
+the file shows runs only then: one with a `var` only comptime allows
+(`var count = 0;`), or one the file uses at least once and only ever calls
+at compile time, under `comptime`, in container-level code
+(`pub const entries = entriesArray();`) or from another such function.
+Over fourteen public Zig projects these were 16 of escape's 20 reports.
 
 The one accepted false positive is any other function only ever run at
-compile time, where the address is comptime memory and legal. Say so with a
+compile time, such as a `pub` one called from another file, where the
+address is comptime memory and legal. Say so with a
 `comptime` block in the function, as upstream asks for its own check, or
 with an allow comment. A function with a `comptime` parameter, which such a
 function always has, gets that fix in its hint too.

@@ -24,10 +24,14 @@
 //! Comptime-known memory is static, so `&.{"literal"}` is fine and
 //! `&.{f()}` is not: a call is evaluated at run time unless it is under
 //! `comptime`, or the callee is an `inline fn` (or returns a comptime-only
-//! type) given comptime-known arguments. A function that itself returns a
-//! comptime-only type runs only at compile time and is not checked. The one
-//! accepted false positive is any other function only ever called at
-//! compile time; it can say `comptime`, or carry an allow comment.
+//! type) given comptime-known arguments. A function that only ever runs at
+//! compile time is not checked: one returning a comptime-only type, one
+//! with a `var` only comptime allows (`var count = 0;`), and one the file
+//! uses at least once and only ever calls at compile time, under
+//! `comptime`, in container-level code or from another such function. The
+//! one accepted false positive is any other function only ever called at
+//! compile time, such as one called from another file; it can say
+//! `comptime`, or carry an allow comment.
 //!
 //! Returned, any stack address is reported. Stored through a parameter or
 //! to a container-level variable, only a temporary (`&.{...}`, `&f()`) is:
@@ -69,8 +73,34 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
     }
     for (0..tree.nodes.len) |i| {
         const node: Node.Index = @fromBackingInt(@intCast(i));
-        if (tree.nodeTag(node) == .fn_decl) try rule.function(node);
+        if (tree.nodeTag(node) != .fn_decl) continue;
+        const before = findings.items.len;
+        try rule.function(node);
+        // Asked only of a function that made a finding, as most make none.
+        if (findings.items.len > before and try rule.compileTime(node)) findings.shrinkRetainingCapacity(before);
     }
+}
+
+/// Whether `body` declares a `var` only comptime allows: an untyped number
+/// (`var count = 0;`) is a comptime_int, which only comptime lets change.
+fn countsAtComptime(arena: Allocator, tree: *const Ast, body: Node.Index) Allocator.Error!bool {
+    var stack: std.ArrayList(Node.Index) = .empty;
+    try stack.append(arena, body);
+    while (stack.pop()) |node| {
+        if (tree.nodeTag(node) == .fn_decl) continue;
+        var buffer: [2]Node.Index = undefined;
+        if (tree.fullContainerDecl(&buffer, node) != null) continue;
+        if (tree.fullVarDecl(node)) |decl| {
+            if (tree.tokenTag(decl.ast.mut_token) == .keyword_var and decl.comptime_token == null and decl.ast.type_node == .none) {
+                if (decl.ast.init_node.unwrap()) |init| {
+                    const literal = if (tree.nodeTag(init) == .negation) tree.nodeData(init).node else init;
+                    if (tree.nodeTag(literal) == .number_literal) return true;
+                }
+            }
+        }
+        try children.append(arena, tree, node, &stack);
+    }
+    return false;
 }
 
 const hint_literal = "make it comptime-known (`comptime` on the runtime elements) or a container-level const";
@@ -96,6 +126,13 @@ const Rule = struct {
     comptime_result_fns: std.StringHashMapUnmanaged(bool) = .empty,
     /// The structs and unions the file declares, by where a type is named.
     types: Types,
+    /// Whether each of the file's functions asked about only ever runs at
+    /// compile time; null while it is being decided.
+    compile_time: std.AutoHashMapUnmanaged(Node.Index, ?bool) = .empty,
+    /// The file's functions by name, and every node naming one, made at the
+    /// first question.
+    fns_by_name: std.StringHashMapUnmanaged(std.ArrayList(Node.Index)) = .empty,
+    uses_by_name: std.StringHashMapUnmanaged(std.ArrayList(Node.Index)) = .empty,
     /// The file's functions looked at so far, to which parameter their
     /// result points into (`viewOf`).
     views: std.AutoHashMapUnmanaged(Node.Index, ?u32) = .empty,
@@ -112,15 +149,99 @@ const Rule = struct {
     /// at compile time always does: its storage hint names that fix too.
     comptime_params: bool = false,
 
+    /// Whether `fn_decl` only ever runs at compile time, so what it returns
+    /// is comptime memory: it returns a type only comptime has, has a `var`
+    /// only comptime allows (`var count = 0;`), or is used in the file at
+    /// least once and only ever as the callee of a call made at compile
+    /// time: under `comptime`, in container-level code (`pub const entries
+    /// = entriesArray();`), or in a function that only runs then. One the
+    /// file never calls, names without calling (`&f`), or exports may be
+    /// called at run time from elsewhere.
+    fn compileTime(r: *Rule, fn_decl: Node.Index) Allocator.Error!bool {
+        const gop = try r.compile_time.getOrPut(r.arena, fn_decl);
+        // Still being decided: calls that go round in a cycle show nothing.
+        if (gop.found_existing) return gop.value_ptr.* orelse false;
+        gop.value_ptr.* = null;
+        const yes = try r.decideCompileTime(fn_decl);
+        try r.compile_time.put(r.arena, fn_decl, yes);
+        return yes;
+    }
+
+    fn decideCompileTime(r: *Rule, fn_decl: Node.Index) Allocator.Error!bool {
+        const tree = r.tree;
+        const proto_node, const body = tree.nodeData(fn_decl).node_and_node;
+        var buffer: [1]Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, proto_node).?;
+        if (proto.ast.return_type.unwrap()) |t| if (isComptimeType(tree, t)) return true;
+        if (proto.extern_export_inline_token) |t| if (tree.tokenTag(t) == .keyword_export) return false;
+        if (try countsAtComptime(r.arena, tree, body)) return true;
+        const name = tree.tokenSlice(proto.name_token orelse return false);
+        if (r.fns_by_name.count() == 0) try r.indexFunctions();
+        const fns = r.fns_by_name.get(name).?.items;
+        const uses = r.uses_by_name.get(name) orelse return false;
+        for (uses.items) |use| {
+            if (!try r.calledAtCompileTime(use, fns)) return false;
+        }
+        return true;
+    }
+
+    /// The file's functions by name, and every node that names one of them,
+    /// called or not.
+    fn indexFunctions(r: *Rule) Allocator.Error!void {
+        const tree = r.tree;
+        for (0..tree.nodes.len) |i| {
+            const node: Node.Index = @fromBackingInt(@intCast(i));
+            if (tree.nodeTag(node) != .fn_decl) continue;
+            var buffer: [1]Node.Index = undefined;
+            const proto = tree.fullFnProto(&buffer, tree.nodeData(node).node_and_node[0]).?;
+            const gop = try r.fns_by_name.getOrPut(r.arena, tree.tokenSlice(proto.name_token orelse continue));
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(r.arena, node);
+        }
+        for (0..tree.nodes.len) |i| {
+            const node: Node.Index = @fromBackingInt(@intCast(i));
+            const name = switch (tree.nodeTag(node)) {
+                .identifier => tree.tokenSlice(tree.nodeMainToken(node)),
+                .field_access => tree.tokenSlice(tree.nodeData(node).node_and_token[1]),
+                else => continue,
+            };
+            if (!r.fns_by_name.contains(name)) continue;
+            const gop = try r.uses_by_name.getOrPut(r.arena, name);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(r.arena, node);
+        }
+    }
+
+    /// Whether `use`, naming one of `fns`, is the callee of a call made at
+    /// compile time. A call from within one of `fns` runs when they do.
+    fn calledAtCompileTime(r: *Rule, use: Node.Index, fns: []const Node.Index) Allocator.Error!bool {
+        const tree = r.tree;
+        const parents = r.types.parents;
+        const call_node = parents[@backingInt(use)].unwrap() orelse return false;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, call_node) orelse return false;
+        if (call.ast.fn_expr != use) return false;
+        var up = parents[@backingInt(call_node)].unwrap();
+        while (up) |node| : (up = parents[@backingInt(node)].unwrap()) {
+            switch (tree.nodeTag(node)) {
+                .@"comptime" => return true,
+                .fn_decl => return std.mem.findScalar(Node.Index, fns, node) != null or try r.compileTime(node),
+                .test_decl => return false,
+                else => {
+                    // Container-level code, such as a declaration's value.
+                    var container: [2]Node.Index = undefined;
+                    if (tree.fullContainerDecl(&container, node) != null) return true;
+                },
+            }
+        }
+        return true;
+    }
+
     fn function(r: *Rule, fn_decl: Node.Index) Allocator.Error!void {
         const tree = r.tree;
         const proto_node, const body = tree.nodeData(fn_decl).node_and_node;
         var buffer: [1]Node.Index = undefined;
         const proto = tree.fullFnProto(&buffer, proto_node).?;
-
-        // Its calls are all evaluated at compile time, so nothing it makes
-        // is on a run-time stack.
-        if (proto.ast.return_type.unwrap()) |t| if (isComptimeType(tree, t)) return;
 
         r.function_name = if (proto.name_token) |t| tree.tokenSlice(t) else "function";
         r.scope.clearRetainingCapacity();
@@ -1583,6 +1704,46 @@ test "a function returning a type only comptime has runs only at compile time" {
         \\fn sizes(comptime ts: []const type) []const usize { var a: [ts.len]usize = undefined; const f = a; return &f; }
     ,
         \\5:107 address of local 'f' -> sizes through return
+        \\
+    );
+}
+
+test "a function the file only calls at compile time is not checked" {
+    try expectEscapes(
+        \\const entries: []const u8 = entriesArray();
+        \\fn entriesArray() []const u8 { var a: [2]u8 = .{ 1, 2 }; a[0] = 3; const f = a; return &f; }
+        \\fn fixture(n: u8) []const u8 { return &.{n}; }
+        \\test { _ = comptime fixture(1); }
+        \\fn describe(n: u8) []const u8 { var out: [1]u8 = .{n}; return out[0..1]; }
+        \\fn generate() []const u8 { return describe(3); }
+        \\pub const completions = comptimeGenerate();
+        \\fn comptimeGenerate() []const u8 { comptime { return generate(); } }
+        \\pub fn alphabet() []const u8 { var count = 0; count += 1; var a: [count]u8 = undefined; a[0] = 'a'; const r = a; return &r; }
+        \\pub const sigs = blk: { var arr: [1][]const u8 = undefined; arr[0] = derive(7); break :blk arr; };
+        \\fn derive(n: u8) []const u8 { return &.{n}; }
+    , "");
+}
+
+test "a function called at run time, named, exported, or never called in the file is checked" {
+    try expectEscapes(
+        \\fn leak(n: u8) []const u8 { return &.{n}; }
+        \\fn use(n: u8) usize { return leak(n).len; }
+        \\fn mixed(n: u8) []const u8 { return &.{n}; }
+        \\const m = mixed(1);
+        \\fn run(n: u8) usize { return mixed(n).len; }
+        \\fn pointed(n: u8) []const u8 { return &.{n}; }
+        \\const fp = &pointed;
+        \\pub fn api(n: u8) []const u8 { return &.{n}; }
+        \\export fn exported(n: u8) [*]const u8 { return &[_]u8{n}; }
+        \\const e = exported(1);
+        \\fn counted(n: u8) []const u8 { comptime var count = 0; count += 1; return &.{n}; }
+    ,
+        \\1:36 anonymous array -> leak through return
+        \\3:37 anonymous array -> mixed through return
+        \\6:39 anonymous array -> pointed through return
+        \\8:39 anonymous array -> api through return
+        \\9:48 array literal -> exported through return
+        \\11:75 anonymous array -> counted through return
         \\
     );
 }
