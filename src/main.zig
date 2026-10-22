@@ -12,7 +12,7 @@ const vet = @import("vet.zig");
 const walk = @import("walk.zig");
 
 const usage =
-    \\Usage: zigvet [--exclude <path>]... [--format <format>] <path>...
+    \\Usage: zigvet [--exclude <path>]... [--format <format>] [--summary] <path>...
     \\       zigvet --version
     \\
     \\Checks each file named, and every .zig file under each directory named,
@@ -24,6 +24,8 @@ const usage =
     \\                    given more than once.
     \\  --format <format> How to write reports: text (the default), github
     \\                    (GitHub Actions annotations) or json.
+    \\  --summary         Then say on stderr how many files were checked and
+    \\                    what each rule reported.
     \\
     \\Exit status: 0 if nothing was reported, 1 if a finding or parse error
     \\was, 2 on a usage error or a path that could not be read or holds no
@@ -90,6 +92,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer reports.deinit();
     try reports.begin();
     var reported: usize = 0;
+    var checked: usize = 0;
     for (files.items) |path| {
         const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
@@ -101,9 +104,13 @@ pub fn main(init: std.process.Init) !u8 {
         };
         defer gpa.free(source);
         reported += try vet.vetSource(gpa, path, source, &reports);
+        checked += 1;
     }
     try reports.end();
     try out.flush();
+    // A clean run is silent, as `zig fmt --check` is, so a lint step in a
+    // build prints nothing; asked, say what was looked at (#46).
+    if (run.summary) std.debug.print("zigvet: checked {d} file{s}, {f}\n", .{ checked, if (checked == 1) "" else "s", reports.tally });
 
     if (unreadable) return 2;
     return @intFromBool(reported > 0);
@@ -116,6 +123,7 @@ const Command = union(enum) {
         /// Cleaned, as `walk.collect` cleans the paths it lists.
         excludes: []const []const u8,
         format: report.Format,
+        summary: bool,
     },
     help,
     version,
@@ -129,11 +137,16 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     var paths: std.ArrayList([]const u8) = .empty;
     var excludes: std.ArrayList([]const u8) = .empty;
     var format: report.Format = .text;
+    var summary = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return .help;
         if (std.mem.eql(u8, arg, "--version")) return .version;
+        if (std.mem.eql(u8, arg, "--summary")) {
+            summary = true;
+            continue;
+        }
         if (optionValue(args, &i, "--exclude")) |path| {
             if (path.len == 0) return .{ .usage_error = "--exclude needs a path" };
             try excludes.append(arena, try std.fs.path.resolveAlloc(arena, &.{path}));
@@ -145,7 +158,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
         } else try paths.append(arena, arg);
     }
     if (paths.items.len == 0) return .{ .usage_error = "" };
-    return .{ .run = .{ .paths = paths.items, .excludes = excludes.items, .format = format } };
+    return .{ .run = .{ .paths = paths.items, .excludes = excludes.items, .format = format, .summary = summary } };
 }
 
 /// The value of option `name` if `args[i.*]` is it, given as `name value`
@@ -191,6 +204,38 @@ test "a named path that yields no file to check is an error, not a clean run" {
     , result.stderr);
 }
 
+test "--summary says on stderr what was checked and reported, in every format" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "fn f() []const u8 {\n    return &.{g()};\n}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.zig", .data = "fn g() u8 {\n    return 1;\n}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "" });
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+
+    const cases = [_]struct { argv: []const []const u8, exit: u8, stdout: []const u8, stderr: []const u8 }{
+        .{ .argv = &.{ exe, "--summary", "--format", "json", "b.zig" }, .exit = 0, .stdout = "[]\n", .stderr = "zigvet: checked 1 file, no findings\n" },
+        .{
+            .argv = &.{ exe, ".", "--summary", "--format", "github" },
+            .exit = 1,
+            .stdout = "::error file=a.zig,line=2,col=12,title=zigvet escape::anonymous array made here leaves f through return. hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const\n",
+            .stderr = "zigvet: checked 2 files, 1 finding (escape 1)\n",
+        },
+        // Without it, a clean run says nothing at all.
+        .{ .argv = &.{ exe, "b.zig" }, .exit = 0, .stdout = "", .stderr = "" },
+    };
+    for (cases) |case| {
+        const result = try std.process.run(gpa, io, .{ .argv = case.argv, .cwd = .{ .dir = tmp.dir } });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = case.exit }, result.term);
+        try std.testing.expectEqualStrings(case.stdout, result.stdout);
+        try std.testing.expectEqualStrings(case.stderr, result.stderr);
+    }
+}
+
 test "parseArgs: paths and excludes, in any order" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -213,6 +258,8 @@ test "parseArgs: --format" {
 
     try std.testing.expectEqual(.github, (try parseArgs(arena, &.{ "--format", "github", "src" })).run.format);
     try std.testing.expectEqual(.json, (try parseArgs(arena, &.{ "src", "--format=json" })).run.format);
+    try std.testing.expect(!(try parseArgs(arena, &.{"src"})).run.summary);
+    try std.testing.expect((try parseArgs(arena, &.{ "src", "--summary" })).run.summary);
     try std.testing.expectEqualStrings("--format takes text, github or json, not 'xml'", (try parseArgs(arena, &.{ "--format", "xml", "src" })).usage_error);
     try std.testing.expectEqualStrings("--format takes text, github or json, not ''", (try parseArgs(arena, &.{ "src", "--format" })).usage_error);
     try std.testing.expectEqualStrings("unknown option '--formats'", (try parseArgs(arena, &.{ "--formats", "src" })).usage_error);
