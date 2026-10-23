@@ -103,7 +103,7 @@ const hint = "the errdefer above runs again when this path fails; drop this one 
 /// some kind (`gpa.free`, `closeHandle`, `deinitAll`). A call run twice
 /// that is safe to run twice, such as `shrinkRetainingCapacity` or a
 /// restore, is no bug.
-fn releases(tree: *const Ast, fn_expr: Node.Index) bool {
+pub fn releases(tree: *const Ast, fn_expr: Node.Index) bool {
     const name = switch (tree.nodeTag(fn_expr)) {
         .identifier => tree.tokenSlice(tree.nodeMainToken(fn_expr)),
         .field_access => tree.tokenSlice(tree.nodeData(fn_expr).node_and_token[1]),
@@ -234,7 +234,7 @@ fn isStatement(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node
 /// that makes the function fail. Null if the path leaves another way
 /// first, or a statement between assigns to one of `handed`, the names the
 /// call is handed.
-fn failsAfter(arena: Allocator, tree: *const Ast, parents: []const Node.OptionalIndex, statement: Node.Index, block: Node.Index, handed: []const Node.Index) Allocator.Error!?Node.Index {
+pub fn failsAfter(arena: Allocator, tree: *const Ast, parents: []const Node.OptionalIndex, statement: Node.Index, block: Node.Index, handed: []const Node.Index) Allocator.Error!?Node.Index {
     var child = statement;
     var up = parents[@backingInt(statement)].unwrap();
     while (up) |parent| : ({

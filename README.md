@@ -21,11 +21,13 @@ file. Refill, over the same code, reports eleven, all real: two in the
 standard library, four in three application repos, and five in third-party
 UI code one of them keeps for reference. Owner, over the same code,
 reports three, all real: two in two application repos, and a copy of one
-of them another keeps. Kept, over the same code, reports four, all real,
-in one application repo's fake storage server; over fourteen public Zig
-projects, 22: 20 real, one of them an optional left set over what its
-errdefer frees, and two that leave a freed value in something their
-caller throws away. Torn, over the same code, reports nothing;
+of them another keeps; over the public projects, six, all real, in one
+compiler, two of them in its tests. Kept, over the same code, reports
+four, all real, in one application repo's fake storage server; over
+fourteen public Zig projects, 22: 20 real, one of them an optional left
+set over what its errdefer frees, and two that leave a freed value in
+something their caller throws away. Torn, over the same code, reports
+nothing;
 over the fourteen public projects, four, all real, in a terminal
 emulator, a compiler and a browser. Twice, over the same code, reports
 nothing; over the public projects, 23 in one compiler: 22 real, at seven
@@ -410,17 +412,40 @@ callee leave the allocation to its caller when it fails.
 A call under `try` to one of the file's own functions that takes a
 parameter on failure, where the argument for that parameter is a name that
 an `errdefer` of the caller, declared before the call in a block around it,
-frees. A function takes a parameter on failure when an `errdefer` in it
-frees the parameter (`x.free(p)`, `x.destroy(p)`, `x.rawFree(p, ...)` or
+frees, or carries one: its address (`&list`), or a field of an
+initializer, as deep as they nest (`.{ .state = .{ .items = items } }`).
+A function takes a parameter on failure when an `errdefer` in it frees
+the parameter (`x.free(p)`, `x.destroy(p)`, `x.rawFree(p, ...)` or
 `p.deinit(...)`) and something after it can fail: a `try` or a
-`return error.X`. The function is found by name, through its type
-(`Store.keep(s, b)`), or as a method of a binding whose type the file
-declares (`self.keep(b)`).
+`return error.X`. It takes it too when it releases the parameter itself,
+or a local copy of it, by hand or in a `defer`, with one of those calls or
+with a call whose name says it releases, handed it as its only argument or
+one after the first, and fails after that on its path:
+
+```zig
+fn push(frames: *std.ArrayList(Frame), frame: Frame) !void {
+    var pushed = frame;
+    frames.append(gpa, pushed) catch |err| {
+        release(&pushed); // frees the frame's components
+        return err;
+    };
+}
+```
+
+A caller that frees the components in an errdefer and hands them to
+`push` in a frame frees them twice when the append fails. The function is
+found by name, through its type (`Store.keep(s, b)`), or as a method of a
+binding whose type the file declares (`self.keep(b)`).
 
 Not reported: a call whose error is handled rather than returned with
 `try`, which only the caller can judge; an `errdefer` declared after the
-call; an argument that is not a plain name; and a function declared in
-another file.
+call; an argument that neither is a name nor carries one; a release of
+something reached through the parameter (`self.list.deinit()`), which is
+not what the caller frees; a method's receiver, or the first of several
+arguments, for a call recognized only by its name
+(`releasePages(pool, pages)` releases into `pool`); a release that leaves
+the value empty (`clearAndFree`), or one followed by an assignment to it;
+and a function declared in another file.
 
 ## Rule seven: kept
 
