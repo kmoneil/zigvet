@@ -325,6 +325,7 @@ test {
     _ = @import("cases.zig");
     _ = @import("children.zig");
     _ = @import("clobber.zig");
+    _ = @import("copy.zig");
     _ = @import("escape.zig");
     _ = @import("fit.zig");
     _ = @import("freed.zig");

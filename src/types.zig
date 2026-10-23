@@ -189,6 +189,28 @@ pub const Types = struct {
         return null;
     }
 
+    /// The initializer of the local `use`, an identifier, names, when it
+    /// has one: found by walking out from it, as `bindingType` does.
+    pub fn localInit(t: Types, use: Node.Index) ?Node.Index {
+        const tree = t.tree;
+        const name = tree.tokenSlice(tree.nodeMainToken(use));
+        var child = use;
+        var up = t.parents[@backingInt(use)].unwrap();
+        while (up) |parent| : ({
+            child = parent;
+            up = t.parents[@backingInt(parent)].unwrap();
+        }) {
+            switch (tree.nodeTag(parent)) {
+                .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                    if (t.localBefore(parent, child, name)) |decl| return decl.ast.init_node.unwrap();
+                },
+                .fn_decl, .test_decl => return null,
+                else => {},
+            }
+        }
+        return null;
+    }
+
     /// The declared type of the container-level variable `name` in a
     /// container around `node`.
     fn containerVariable(t: Types, node: Node.Index, name: []const u8) ?Node.Index {
