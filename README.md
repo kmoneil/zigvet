@@ -23,13 +23,16 @@ UI code one of them keeps for reference. Owner, over the same code,
 reports three, all real: two in two application repos, and a copy of one
 of them another keeps. Kept, over the same code, reports four, all real,
 in one application repo's fake storage server; over fourteen public Zig
-projects, 23, of which 22 are real and one leaves a freed argument in a
-list its caller throws away. Torn, over the same code, reports nothing;
+projects, 23: 19 real; two that leave a freed value in something their
+caller throws away; and two false positives, a local emptied between the
+store and the failure (#86). Torn, over the same code, reports nothing;
 over the fourteen public projects, four, all real, in a terminal
 emulator, a compiler and a browser. Twice, over the same code, reports
-nothing; over the public projects, 26 at nine places, all real, in one
-compiler. Sweep, over the same code, reports nothing; over the public
-projects, one, real, in an editor. Unlock, over the same code, reports
+nothing; over the public projects, 26 in one compiler: 22 real, at seven
+places, and four false positives, a deinit that resets what it frees run
+twice and an empty slice freed twice (#87). Sweep, over the same code,
+reports nothing; over the public projects, one, real, in an editor.
+Unlock, over the same code, reports
 nothing; over the public projects, two, both real, in an HTTP server
 library and a game engine. Wipe, over the same code as it is now and the
 public projects, reports nothing; over a Kafka client as it was before
