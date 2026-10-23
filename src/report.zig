@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -51,6 +51,7 @@ pub const Finding = struct {
         twice: Twice,
         sweep: Sweep,
         unlock: Unlock,
+        wipe: Wipe,
         allow: Allow,
     };
 
@@ -155,6 +156,11 @@ pub const Finding = struct {
         fails: []const u8,
     };
 
+    pub const Wipe = struct {
+        /// The local wiped, as written: `secret`.
+        local: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -181,6 +187,7 @@ pub const Finding = struct {
             .twice => .twice,
             .sweep => .sweep,
             .unlock => .unlock,
+            .wipe => .wipe,
             .allow => null,
         };
     }
@@ -253,6 +260,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .unlock => |u| try w.print("{s} is locked here and left locked if {s} fails before it is unlocked", .{
             u.lock, u.fails,
         }),
+        .wipe => |p| try w.print("nothing reads '{s}' after this `@memset`, so release builds drop it and what it held stays in memory", .{p.local}),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),

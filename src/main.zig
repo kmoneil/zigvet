@@ -338,4 +338,5 @@ test {
     _ = @import("unlock.zig");
     _ = @import("vet.zig");
     _ = @import("walk.zig");
+    _ = @import("wipe.zig");
 }
