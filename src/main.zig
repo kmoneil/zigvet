@@ -328,6 +328,7 @@ test {
     _ = @import("copy.zig");
     _ = @import("escape.zig");
     _ = @import("fit.zig");
+    _ = @import("flush.zig");
     _ = @import("freed.zig");
     _ = @import("grow.zig");
     _ = @import("kept.zig");

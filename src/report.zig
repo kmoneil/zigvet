@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -55,6 +55,7 @@ pub const Finding = struct {
         freed: Freed,
         grow: Grow,
         copy: Copy,
+        flush: Flush,
         allow: Allow,
     };
 
@@ -187,6 +188,13 @@ pub const Finding = struct {
         parent: []const u8,
     };
 
+    pub const Flush = struct {
+        /// The writer, as declared: `fw`.
+        writer: []const u8,
+        /// The buffer it collects in, as written: `&buf`.
+        buffer: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -217,6 +225,7 @@ pub const Finding = struct {
             .freed => .freed,
             .grow => .grow,
             .copy => .copy,
+            .flush => .flush,
             .allow => null,
         };
     }
@@ -303,6 +312,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
             }),
         .copy => |c| try w.print("copies `{s}`, whose methods find `{s}` from its address: the copy's first flush or refill reads what sits next to it as `{s}`", .{
             c.interface, c.parent, c.parent,
+        }),
+        .flush => |f| try w.print("'{s}' keeps what is written through it in `{s}` until it is flushed, and nothing here flushes it or hands it on, so the last of it is never written", .{
+            f.writer, f.buffer,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
