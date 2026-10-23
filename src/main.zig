@@ -335,6 +335,7 @@ test {
     _ = @import("torn.zig");
     _ = @import("twice.zig");
     _ = @import("types.zig");
+    _ = @import("unlock.zig");
     _ = @import("vet.zig");
     _ = @import("walk.zig");
 }

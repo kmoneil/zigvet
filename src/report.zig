@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -50,6 +50,7 @@ pub const Finding = struct {
         torn: Torn,
         twice: Twice,
         sweep: Sweep,
+        unlock: Unlock,
         allow: Allow,
     };
 
@@ -146,6 +147,14 @@ pub const Finding = struct {
         reset: []const u8,
     };
 
+    pub const Unlock = struct {
+        /// What is locked, as written: `self.mutex`.
+        lock: []const u8,
+        /// What can fail before the unlock, as written: `self.flush`, or
+        /// `error.Closed`.
+        fails: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -171,6 +180,7 @@ pub const Finding = struct {
             .torn => .torn,
             .twice => .twice,
             .sweep => .sweep,
+            .unlock => .unlock,
             .allow => null,
         };
     }
@@ -239,6 +249,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .sweep => |s| try w.print("freed here, but if {s} fails on a later turn, {s} still holds what earlier turns freed, since only `{s}` after the loop empties it", .{
             s.fails, s.list, s.reset,
+        }),
+        .unlock => |u| try w.print("{s} is locked here and left locked if {s} fails before it is unlocked", .{
+            u.lock, u.fails,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),

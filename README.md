@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: ten rules. Escape, run over the 0.17.0 standard library and
+Status: eleven rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive, which it now
 tells apart (below). Alias, run over the same standard library and seven
@@ -29,7 +29,9 @@ over the fourteen public projects, four, all real, in a terminal
 emulator, a compiler and a browser. Twice, over the same code, reports
 nothing; over the public projects, 26 at nine places, all real, in one
 compiler. Sweep, over the same code, reports nothing; over the public
-projects, one, real, in an editor.
+projects, one, real, in an editor. Unlock, over the same code, reports
+nothing; over the public projects, two, both real, in an HTTP server
+library and a game engine.
 
 ## Rule one: escape
 
@@ -599,6 +601,40 @@ Not reported: a list taken apart as it is freed (`swapRemove`,
 `orderedRemove` or `pop` on it in the loop); a list a local holds; and a
 list an `errdefer` before the loop resets.
 
+## Rule eleven: unlock
+
+A lock taken, then something that can fail before the unlock, with no
+`defer` to unlock it.
+
+```zig
+try self.pool_mut.lock(io);
+const conn = try self.pool.create(self.allocator); // fails: the function returns holding the lock
+self.pool_mut.unlock(io);
+```
+
+When `create` fails, the error leaves the function with the mutex still
+held, and the next `lock` waits for good. It compiles clean in every build
+mode and goes wrong only when the step between fails, the path tests
+seldom take, and nothing at run time says why the program hangs. An HTTP
+server library's connection pool has this exact code.
+
+The fix is `defer self.pool_mut.unlock(io);` straight after the lock.
+
+### What unlock reports
+
+`x.lock(...)`, `x.lockUncancelable(...)`, `x.lockShared(...)` or
+`x.lockSharedUncancelable(...)` as a statement, or under `try`, then
+`x.unlock(...)` (or `x.unlockShared(...)`) later in the same block, `x`
+the same as written, and between them something that fails with an error:
+a `try`, a `return error.X`, or a `return` of what a `catch` caught, on a
+path that does not unlock first.
+
+Not reported: a lock a `defer` or `errdefer` unlocks before the failure,
+however it is written (`defer if (!unlocked) m.unlock();`); a plain
+`return` between, since a function may return holding the lock on
+purpose; the lock call's own `catch`; and code in a `test` block, where a
+failure ends the test.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -805,7 +841,7 @@ be is out of scope as well: what it costs depends on the build mode and on
 how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
 for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill`,
-`owner`, `kept`, `torn`, `twice` and `sweep` so far.
+`owner`, `kept`, `torn`, `twice`, `sweep` and `unlock` so far.
 
 ## Tests
 
