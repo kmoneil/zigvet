@@ -27,10 +27,15 @@
 //! or `continue`, which is correct, since the errdefer does not run; a
 //! failure on another branch; one after a statement that assigns to a name
 //! the call is handed or is called on, which then frees something else; a
-//! call safe to run twice (`shrinkRetainingCapacity`, a restore); code in
-//! a `test` block, where a failure ends the test; and a failure the syntax
-//! cannot see, such as `return f()` with no `try`, whose type it does not
-//! know.
+//! call safe to run twice (`shrinkRetainingCapacity`, a restore); a method
+//! of a type the file declares whose body ends by writing its receiver
+//! whole with anything but `undefined` (`self.* = .{};`), so the second
+//! call frees nothing, the type shown by the receiver's declaration or
+//! what made it (`T{ ... }`, `T.init(...)`); a free inside
+//! `if (x.len == 0)` for the `x` it is handed, which frees nothing either
+//! time; code in a `test` block, where a failure ends the test; and a
+//! failure the syntax cannot see, such as `return f()` with no `try`, whose
+//! type it does not know.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -62,6 +67,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
         if (!releases(tree, call.ast.fn_expr)) continue;
         if (parents.len == 0) parents = (try types.Types.init(arena, tree)).parents;
         if (inTest(tree, parents, errdefer_node)) continue;
+        if (resets(.{ .tree = tree, .parents = parents }, call.ast.fn_expr)) continue;
         const block = parents[@backingInt(errdefer_node)].unwrap() orelse continue;
         // What the call is handed: its arguments, and the receiver of a
         // method (`current` of `current.close(io)`).
@@ -75,6 +81,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
             if (tree.nodeMainToken(node) <= tree.nodeMainToken(errdefer_node)) continue;
             if (!isStatement(tree, parents, node)) continue;
             if (!std.mem.eql(u8, try squeeze(arena, tree.getNodeSource(node)), text)) continue;
+            if (onlyWhenEmpty(tree, parents, node, block, handed.items)) continue;
             const point = try failsAfter(arena, tree, parents, node, block, handed.items) orelse continue;
             try findings.append(arena, .{
                 .offset = tree.tokenStart(tree.firstToken(node)),
@@ -107,6 +114,84 @@ fn releases(tree: *const Ast, fn_expr: Node.Index) bool {
     const folded = std.ascii.lowerString(&lower, name);
     for ([_][]const u8{ "free", "destroy", "deinit", "close", "unmap", "release" }) |word| {
         if (std.mem.indexOf(u8, folded, word) != null) return true;
+    }
+    return false;
+}
+
+/// Whether the call `fn_expr` names is a method of a type the file declares
+/// whose body ends by writing its receiver whole with anything but
+/// `undefined` (`self.* = .{};`), so a second call finds nothing to free.
+fn resets(t: types.Types, fn_expr: Node.Index) bool {
+    const tree = t.tree;
+    const fn_decl = method(t, fn_expr) orelse return false;
+    var buffer: [1]Node.Index = undefined;
+    const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
+    var params = proto.iterate(tree);
+    const receiver = (params.next() orelse return false).name_token orelse return false;
+    var block: [2]Node.Index = undefined;
+    const statements = tree.blockStatements(&block, tree.nodeData(fn_decl).node_and_node[1]) orelse return false;
+    if (statements.len == 0) return false;
+    const last = statements[statements.len - 1];
+    if (tree.nodeTag(last) != .assign) return false;
+    const lhs, const rhs = tree.nodeData(last).node_and_node;
+    if (tree.nodeTag(lhs) != .deref) return false;
+    const target = tree.nodeData(lhs).node;
+    if (tree.nodeTag(target) != .identifier) return false;
+    if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(target)), tree.tokenSlice(receiver))) return false;
+    return tree.nodeTag(rhs) != .identifier or !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(rhs)), "undefined");
+}
+
+/// The file's own function a method call's `fn_expr` names: as
+/// `types.callee` finds it, or through the type that made a local
+/// receiver (`T{ ... }`, `T.init(...)`).
+fn method(t: types.Types, fn_expr: Node.Index) ?Node.Index {
+    const tree = t.tree;
+    if (tree.nodeTag(fn_expr) != .field_access) return null;
+    if (t.callee(fn_expr)) |found| return found[0];
+    const receiver, const name = tree.nodeData(fn_expr).node_and_token;
+    if (tree.nodeTag(receiver) != .identifier) return null;
+    const type_expr = madeType(tree, t.localInit(receiver) orelse return null) orelse return null;
+    const container = t.containerOf(type_expr, 0) orelse return null;
+    return types.memberFn(tree, container, tree.tokenSlice(name));
+}
+
+/// The type an initializer makes, as written: `T` of `T{ ... }`, or of
+/// `T.init(...)` or another `T.init...`, through a `try`.
+fn madeType(tree: *const Ast, init: Node.Index) ?Node.Index {
+    const made = if (tree.nodeTag(init) == .@"try") tree.nodeData(init).node else init;
+    var buffer: [2]Node.Index = undefined;
+    if (tree.fullStructInit(&buffer, made)) |full| return full.ast.type_expr.unwrap();
+    var call_buffer: [1]Node.Index = undefined;
+    const call = tree.fullCall(&call_buffer, made) orelse return null;
+    if (tree.nodeTag(call.ast.fn_expr) != .field_access) return null;
+    const type_expr, const name = tree.nodeData(call.ast.fn_expr).node_and_token;
+    if (!std.mem.startsWith(u8, tree.tokenSlice(name), "init")) return null;
+    return type_expr;
+}
+
+/// Whether `node` is the body, or in the body, of an `if (x.len == 0)`
+/// inside `block`, with `x` among `handed`: a free of an empty slice frees
+/// nothing.
+fn onlyWhenEmpty(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index, block: Node.Index, handed: []const Node.Index) bool {
+    var child = node;
+    var up = parents[@backingInt(node)].unwrap();
+    while (up) |parent| : ({
+        child = parent;
+        up = parents[@backingInt(parent)].unwrap();
+    }) {
+        if (parent == block) return false;
+        const full = tree.fullIf(parent) orelse continue;
+        if (full.ast.then_expr != child) continue;
+        const condition = full.ast.cond_expr;
+        if (tree.nodeTag(condition) != .equal_equal) continue;
+        const lhs, const rhs = tree.nodeData(condition).node_and_node;
+        if (tree.nodeTag(rhs) != .number_literal or !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(rhs)), "0")) continue;
+        if (tree.nodeTag(lhs) != .field_access) continue;
+        const of, const field = tree.nodeData(lhs).node_and_token;
+        if (!std.mem.eql(u8, tree.tokenSlice(field), "len")) continue;
+        for (handed) |argument| {
+            if (std.mem.eql(u8, tree.getNodeSource(argument), tree.getNodeSource(of))) return true;
+        }
     }
     return false;
 }
@@ -319,4 +404,28 @@ test "not reported: a plain return after it, another branch, a name assigned aga
         \\fn receiver(io: Io, dir: Dir, next: Dir) !void { var current = dir; errdefer current.close(io); current.close(io); current = next; try current.stat(io); }
         \\test "a test" { const b = try gpa.alloc(u8, 4); errdefer gpa.free(b); gpa.free(b); try expect(false); }
     , "");
+}
+
+test "a deinit that resets its receiver, and a free of an empty slice, run twice safely (#87)" {
+    try expectTwice(
+        \\const Builder = struct {
+        \\    items: []u8 = &.{},
+        \\    fn init(gpa: Allocator) !Builder { return .{ .items = try gpa.alloc(u8, 4) }; }
+        \\    fn deinit(self: *Builder, gpa: Allocator) void { gpa.free(self.items); self.* = .{}; }
+        \\    fn deinitAll(self: *Builder, gpa: Allocator) void { gpa.free(self.items); self.* = Builder.init(gpa) catch .{}; }
+        \\    fn release(self: *Builder, gpa: Allocator) void { gpa.free(self.items); self.* = undefined; }
+        \\};
+        \\fn annotated(gpa: Allocator, fail: bool) !void { var b: Builder = .{ .items = try gpa.alloc(u8, 4) }; errdefer b.deinit(gpa); b.deinit(gpa); if (fail) return error.Failed; }
+        \\fn literal(gpa: Allocator, fail: bool) !void { var b = Builder{ .items = try gpa.alloc(u8, 4) }; errdefer b.deinit(gpa); b.deinit(gpa); if (fail) return error.Failed; }
+        \\fn made(gpa: Allocator, fail: bool) !void { var b = try Builder.init(gpa); errdefer b.deinitAll(gpa); b.deinitAll(gpa); if (fail) return error.Failed; }
+        \\fn undef(gpa: Allocator, fail: bool) !void { var b = try Builder.init(gpa); errdefer b.release(gpa); b.release(gpa); if (fail) return error.Failed; }
+        \\fn elsewhere(gpa: Allocator, fail: bool) !void { var b = other.Builder{}; errdefer b.deinit(gpa); b.deinit(gpa); if (fail) return error.Failed; }
+        \\fn empty(gpa: Allocator, components: []u8, fail: bool) !void { errdefer gpa.free(components); if (components.len == 0) { gpa.free(components); if (fail) return error.Failed; return; } gpa.free(components); }
+        \\fn nonEmpty(gpa: Allocator, components: []u8, fail: bool) !void { errdefer gpa.free(components); if (components.len != 0) { gpa.free(components); if (fail) return error.Failed; return; } }
+    ,
+        \\11:102 b.release(gpa) <- it returns error.Failed
+        \\12:99 b.deinit(gpa) <- it returns error.Failed
+        \\14:125 gpa.free(components) <- it returns error.Failed
+        \\
+    );
 }
