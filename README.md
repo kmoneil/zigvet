@@ -74,6 +74,8 @@ Leaving the function:
 
 - returned, directly or through `if`, `switch`, `orelse`, `catch`, `try`, a
   labeled block, a cast, a struct returned by value, a local that holds it,
+  an element or field read out of a local made with an initializer that
+  holds it (`whole[i]` of `const whole = [_][]const T{ &.{}, &.{f()} };`),
   a `std` call that returns part of its argument
   (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`), or one of
   the file's own that does, such as `return id.slice();` with `id` held by

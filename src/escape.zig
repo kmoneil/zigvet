@@ -6,7 +6,8 @@
 //! capture it names, and collecting the sinks: `return`, a store through a
 //! parameter, and a store to a container-level variable. The second follows
 //! each sink's value back through `if`, `switch`, `orelse`, `catch`, labeled
-//! blocks, locals, the `std` calls that return a view of an argument
+//! blocks, locals, the elements and fields of a local made with an
+//! initializer, the `std` calls that return a view of an argument
 //! (`std.fmt.bufPrint`, `std.mem.sliceTo`, ...) and the file's own functions
 //! that return part of what a pointer parameter points at, and reports a
 //! value that is the address or a slice of stack memory whose contents are
@@ -747,11 +748,22 @@ const Rule = struct {
             .grouped_expression => r.stackSource(tree.nodeData(node).node_and_token[0], depth),
             .address_of => r.addressSource(tree.nodeData(node).node, tree.nodeMainToken(node)),
             .slice_open, .slice, .slice_sentinel => r.sliceSource(tree.fullSlice(node).?.ast.sliced, depth),
-            // `slice.ptr` points where the slice does.
+            // `slice.ptr` points where the slice does; another field of a
+            // local made with an initializer holds what it was given.
             .field_access => {
                 const lhs, const field = tree.nodeData(node).node_and_token;
-                if (!std.mem.eql(u8, tree.tokenSlice(field), "ptr")) return null;
-                return r.stackSource(lhs, depth);
+                const name = tree.tokenSlice(field);
+                if (std.mem.eql(u8, name, "ptr")) return r.stackSource(lhs, depth);
+                return r.heldSource(lhs, .{ .field = name }, depth);
+            },
+            // An element of a local array made with an initializer.
+            .array_access => {
+                const lhs, const index = tree.nodeData(node).node_and_node;
+                const at: ?usize = if (tree.nodeTag(index) == .number_literal)
+                    std.fmt.parseInt(usize, tree.tokenSlice(tree.nodeMainToken(index)), 0) catch null
+                else
+                    null;
+                return r.heldSource(lhs, .{ .element = at }, depth);
             },
             // A local holding one: `const x = &.{f()}; return x;`, or
             // `const s = try std.fmt.bufPrint(&buf, ...); return s;`.
@@ -778,6 +790,46 @@ const Rule = struct {
             },
             else => null,
         };
+    }
+
+    /// What is read out of a local made with an initializer, an element
+    /// (`whole[i]` of `const whole = [_][]const T{ &.{}, &.{.{ .end = n }} };`)
+    /// or a field (`s.all` of `const s = .{ .all = &[_]T{...} };`): what
+    /// that element or field was given, there or in a store of the whole
+    /// local. An index the syntax does not give picks any element.
+    fn heldSource(r: *Rule, holder: Node.Index, read: union(enum) { element: ?usize, field: []const u8 }, depth: u8) Allocator.Error!?Source {
+        const tree = r.tree;
+        var h = holder;
+        while (tree.nodeTag(h) == .grouped_expression) h = tree.nodeData(h).node_and_token[0];
+        if (tree.nodeTag(h) != .identifier) return null;
+        const index = r.resolved.get(h) orelse return null;
+        const binding = r.bindings.items[index];
+        if (binding.kind != .local or binding.is_comptime) return null;
+        var made: std.ArrayList(Node.Index) = .empty;
+        if (binding.init.unwrap()) |init| try made.append(r.arena, init);
+        for (r.stores.items) |store| if (store.binding == index) try made.append(r.arena, store.value);
+        for (made.items) |value| {
+            var init = value;
+            while (tree.nodeTag(init) == .grouped_expression) init = tree.nodeData(init).node_and_token[0];
+            var buffer: [2]Node.Index = undefined;
+            switch (read) {
+                .element => |at| {
+                    const elements = (tree.fullArrayInit(&buffer, init) orelse continue).ast.elements;
+                    if (at) |i| {
+                        if (i >= elements.len) continue;
+                        if (try r.leafSource(elements[i], depth + 1)) |source| return source;
+                    } else for (elements) |element| {
+                        if (try r.leafSource(element, depth + 1)) |source| return source;
+                    }
+                },
+                .field => |name| for ((tree.fullStructInit(&buffer, init) orelse continue).ast.fields) |value_node| {
+                    // A field's value follows its `.name =`.
+                    if (!std.mem.eql(u8, tree.tokenSlice(tree.firstToken(value_node) - 2), name)) continue;
+                    if (try r.leafSource(value_node, depth + 1)) |source| return source;
+                },
+            }
+        }
+        return null;
     }
 
     /// A call to one of the file's own functions whose result points into
@@ -1635,6 +1687,31 @@ test "the real bug, and the same escape through every expression that yields a v
         \\15:33 anonymous array -> viaVar through return
         \\18:74 anonymous array -> viaCast through return
         \\19:82 anonymous array -> viaStruct through return
+        \\
+    );
+}
+
+test "an element or field of a local made with an initializer (#59)" {
+    try expectEscapes(
+        \\const C = struct { start: usize, end: usize };
+        \\fn element(n: usize) []const C { const whole = [_][]const C{ &.{}, &.{.{ .start = 0, .end = n }} }; return whole[1]; }
+        \\fn picked(n: usize, some: bool) struct { c: []const C } { const whole = [_][]const C{ &.{}, &.{.{ .start = 0, .end = n }} }; return .{ .c = whole[@intFromBool(some)] }; }
+        \\fn field(n: usize) []const C { const s = .{ .all = &[_]C{.{ .start = 0, .end = n }}, .none = &[_]C{} }; return s.all; }
+        \\fn aliased(n: usize) []const C { const whole = [_][]const C{ &.{}, &.{.{ .start = 0, .end = n }} }; const one = whole[1]; return one; }
+        \\fn stored(n: usize, out: *[]const C) void { const whole = [_][]const C{&.{.{ .start = 0, .end = n }}}; out.* = whole[0]; }
+        \\fn ofLocal(n: usize) *const usize { var x = n; const ptrs = [_]*const usize{&x}; return ptrs[0]; }
+        \\fn static(n: usize) []const C { const whole = [_][]const C{ &.{}, &.{.{ .start = 0, .end = n }} }; return whole[0]; }
+        \\fn values(n: usize) usize { const pair = [_]usize{ n, n + 1 }; return pair[1]; }
+        \\fn fromParam(items: []const C) []const C { const whole = [_][]const C{ items, items[1..] }; return whole[1]; }
+        \\fn literal() []const u8 { const names = [_][]const u8{ "a", "b" }; return names[1]; }
+        \\fn otherField(n: usize, keep: []const C) []const C { const s = .{ .all = &[_]C{.{ .start = 0, .end = n }}, .kept = keep }; _ = s.all.len; return s.kept; }
+    ,
+        \\2:68 anonymous array -> element through return
+        \\3:93 anonymous array -> picked through return
+        \\4:52 array literal -> field through return
+        \\5:68 anonymous array -> aliased through return
+        \\6:72 anonymous array -> stored through out param
+        \\7:77 address of local 'x' -> ofLocal through return
         \\
     );
 }
