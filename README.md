@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: eight rules. Escape, run over the 0.17.0 standard library and
+Status: nine rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive, which it now
 tells apart (below). Alias, run over the same standard library and seven
@@ -26,7 +26,9 @@ in one application repo's fake storage server; over fourteen public Zig
 projects, 23, of which 22 are real and one leaves a freed argument in a
 list its caller throws away. Torn, over the same code, reports nothing;
 over the fourteen public projects, four, all real, in a terminal
-emulator, a compiler and a browser.
+emulator, a compiler and a browser. Twice, over the same code, reports
+nothing; over the public projects, 26 at nine places, all real, in one
+compiler.
 
 ## Rule one: escape
 
@@ -514,6 +516,48 @@ function makes; a place an `errdefer` declared before it resets
 `init...`, whose caller deinits nothing if it fails; and a `catch` that
 falls back (`f() catch 0`), which cannot fail.
 
+## Rule nine: twice
+
+An errdefer's free also written out by hand on a path that then fails.
+
+```zig
+const conn = try gpa.create(Conn);
+errdefer gpa.destroy(conn);
+if (fd < 0) {
+    gpa.destroy(conn);
+    return error.BadConfig; // the errdefer destroys conn a second time
+}
+```
+
+An errdefer runs on every error return in its scope, including one that
+has already cleaned up by hand, so `conn` is destroyed twice. It compiles
+clean in every build mode and reads as careful code: the hand-written free
+looks like the author making sure. Unlike refill and owner it needs no
+allocation to fail: any input that takes the refusing path frees twice,
+though such paths (a library refusing a config, a platform call failing)
+are often ones tests do not reach. An agent wrote this in a Kafka
+client's librdkafka binding, where a refused config freed the handle's
+state twice.
+
+The fix is to drop the hand-written free and let the errdefer do it.
+
+### What twice reports
+
+An `errdefer` whose call releases by its name (a `free`, `destroy`,
+`deinit`, `close`, `unmap` or `release` of some kind: `gpa.free`,
+`closeHandle`, `deinitAll`), and the same call, but for whitespace,
+written as a statement after it in its block, not in a `defer` or
+`errdefer`, followed on its path by something that makes the function
+fail: a `try`, a `return error.X`, or a `return` of what a `catch` caught.
+
+Not reported: the same statement followed by a plain `return`, `break` or
+`continue`, which is correct, since the errdefer does not run; a failure
+on another branch; one after a statement that assigns to a name the call
+is handed or is called on, which then frees something else; a call safe
+to run twice (`shrinkRetainingCapacity`, a restore); code in a `test`
+block; and a failure the syntax cannot see, such as `return f()` with no
+`try`.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -720,7 +764,7 @@ be is out of scope as well: what it costs depends on the build mode and on
 how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
 for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill`,
-`owner`, `kept` and `torn` so far.
+`owner`, `kept`, `torn` and `twice` so far.
 
 ## Tests
 

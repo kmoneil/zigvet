@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -48,6 +48,7 @@ pub const Finding = struct {
         owner: Owner,
         kept: Kept,
         torn: Torn,
+        twice: Twice,
         allow: Allow,
     };
 
@@ -127,6 +128,14 @@ pub const Finding = struct {
         fails: []const u8,
     };
 
+    pub const Twice = struct {
+        /// The call written out by hand, as written: `gpa.destroy(conn)`.
+        call: []const u8,
+        /// What fails after it: `it returns error.BadConfig`, or
+        /// `self.spawn fails`.
+        fails: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -150,6 +159,7 @@ pub const Finding = struct {
             .owner => .owner,
             .kept => .kept,
             .torn => .torn,
+            .twice => .twice,
             .allow => null,
         };
     }
@@ -212,6 +222,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .torn => |t| try w.print("{s} is built in place, so if {s} fails it is left set over what was never made, and deinit frees it", .{
             t.place, t.fails,
+        }),
+        .twice => |t| try w.print("`{s}` here, and the errdefer above it does the same again if {s}", .{
+            t.call, t.fails,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
