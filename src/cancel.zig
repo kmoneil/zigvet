@@ -25,6 +25,16 @@
 //! `catch null`), which only the caller can judge. Whether the callee's
 //! error set holds error.Canceled is beyond the syntax; the hint says how to
 //! tell.
+//!
+//! A function a task calls inside one of its loops is where a handler that
+//! leaves can drop it too: `catch |err| { if (err == error.Canceled) return;
+//! ... }`, or a `switch (err)` prong `error.Canceled => return` or `=> {}`.
+//! Leaving that function returns to the task's loop, which goes on with the
+//! cancel spent, and naming the error shows the call can return it. Not
+//! reported: a handler that calls `recancel`, returns a value, which the
+//! loop may read (`while (tick())`), or hands the error on
+//! (`error.Canceled => |e| return e`); and the same handler in the task's
+//! own function, where returning ends the task.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -77,6 +87,46 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
         }
     }
     for (run.keys()) |function| try rule.walk(tree.nodeData(function).node_and_node[1], false, false);
+
+    // What a task calls inside one of its loops, and the first task found
+    // to: a handler there that leaves on error.Canceled lets the loop go on.
+    var looped: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    names = tasks.keyIterator();
+    while (names.next()) |name| {
+        const task = functions.get(name.*) orelse continue;
+        var called: std.ArrayList([]const u8) = .empty;
+        try rule.loopCalls(tree.nodeData(task).node_and_node[1], false, &called);
+        for (called.items) |callee| {
+            if (tasks.contains(callee) or !functions.contains(callee)) continue;
+            const gop = try looped.getOrPut(arena, callee);
+            if (!gop.found_existing) gop.value_ptr.* = name.*;
+        }
+    }
+    for (looped.keys(), looped.values()) |callee, task| {
+        try rule.spent(tree.nodeData(functions.get(callee).?).node_and_node[1], false, callee, task);
+    }
+}
+
+fn isLoop(tag: Node.Tag) bool {
+    return switch (tag) {
+        .while_simple, .while_cont, .@"while", .for_simple, .@"for" => true,
+        else => false,
+    };
+}
+
+/// A nested function or type, which is not the code around it.
+fn isNested(tag: Node.Tag) bool {
+    return switch (tag) {
+        .fn_decl,
+        .container_decl,
+        .container_decl_trailing,
+        .container_decl_two,
+        .container_decl_two_trailing,
+        .container_decl_arg,
+        .container_decl_arg_trailing,
+        => true,
+        else => false,
+    };
 }
 
 /// `name` or the last name of `a.b.name`.
@@ -99,29 +149,59 @@ const Rule = struct {
     /// functions and types are not the task's code.
     fn walk(r: *Rule, node: Node.Index, deferred: bool, looping: bool) Allocator.Error!void {
         const tree = r.tree;
-        switch (tree.nodeTag(node)) {
-            .fn_decl,
-            .container_decl,
-            .container_decl_trailing,
-            .container_decl_two,
-            .container_decl_two_trailing,
-            .container_decl_arg,
-            .container_decl_arg_trailing,
-            => return,
-            else => {},
-        }
+        if (isNested(tree.nodeTag(node))) return;
         const in_defer = deferred or switch (tree.nodeTag(node)) {
             .@"defer", .@"errdefer" => true,
             else => false,
         };
-        const in_loop = looping or switch (tree.nodeTag(node)) {
-            .while_simple, .while_cont, .@"while", .for_simple, .@"for" => true,
-            else => false,
-        };
+        const in_loop = looping or isLoop(tree.nodeTag(node));
         if (tree.nodeTag(node) == .@"catch" and in_loop and !in_defer) try r.dropped(node);
         var nodes: std.ArrayList(Node.Index) = .empty;
         try children.append(r.arena, tree, node, &nodes);
         for (nodes.items) |child| try r.walk(child, in_defer, in_loop);
+    }
+
+    /// Appends the name of every function `node` calls inside a loop.
+    fn loopCalls(r: *Rule, node: Node.Index, looping: bool, out: *std.ArrayList([]const u8)) Allocator.Error!void {
+        const tree = r.tree;
+        if (isNested(tree.nodeTag(node))) return;
+        const in_loop = looping or isLoop(tree.nodeTag(node));
+        var buffer: [1]Node.Index = undefined;
+        if (in_loop) if (tree.fullCall(&buffer, node)) |call| {
+            if (calleeName(tree, call.ast.fn_expr)) |name| try out.append(r.arena, name);
+        };
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try children.append(r.arena, tree, node, &nodes);
+        for (nodes.items) |child| try r.loopCalls(child, in_loop, out);
+    }
+
+    /// Reports, in `node`, of `callee`, which the loop in `task` calls, each
+    /// handler that names error.Canceled and leaves without it, outside a
+    /// `defer`.
+    fn spent(r: *Rule, node: Node.Index, deferred: bool, callee: []const u8, task: []const u8) Allocator.Error!void {
+        const tree = r.tree;
+        if (isNested(tree.nodeTag(node))) return;
+        const in_defer = deferred or switch (tree.nodeTag(node)) {
+            .@"defer", .@"errdefer" => true,
+            else => false,
+        };
+        if (tree.nodeTag(node) == .@"catch" and !in_defer) if (leavesOnCanceled(tree, node)) |at| {
+            var lhs = tree.nodeData(node).node_and_node[0];
+            while (tree.nodeTag(lhs) == .grouped_expression) lhs = tree.nodeData(lhs).node_and_token[0];
+            var buffer: [1]Node.Index = undefined;
+            const call = if (tree.fullCall(&buffer, lhs)) |c| c.ast.fn_expr else lhs;
+            try r.findings.append(r.arena, .{
+                .offset = tree.tokenStart(tree.firstToken(at)),
+                .hint = try r.arena.print("{s} returns to the loop in {s}, which goes on with the cancel spent; return error.Canceled from {s} and `try` it in the loop, or call `io.recancel()`", .{ callee, task, callee }),
+                .detail = .{ .cancel = .{
+                    .callee = tree.getNodeSource(call),
+                    .handler = try handlerText(r.arena, tree, at),
+                } },
+            });
+        };
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try children.append(r.arena, tree, node, &nodes);
+        for (nodes.items) |child| try r.spent(child, in_defer, callee, task);
     }
 
     /// Appends the name of every function `node` calls.
@@ -183,6 +263,91 @@ fn ioCallee(tree: *const Ast, node: Node.Index) ?Node.Index {
     return null;
 }
 
+/// In `lhs catch |err| handler`, the part of the handler that names
+/// error.Canceled and leaves without it: `if (err == error.Canceled)
+/// return`, or a `switch (err)` prong `error.Canceled => return` or
+/// `=> {}`, as the handler or one of its statements. Null when the handler
+/// calls `recancel`, which arms the cancel again.
+fn leavesOnCanceled(tree: *const Ast, node: Node.Index) ?Node.Index {
+    const catch_token = tree.nodeMainToken(node);
+    if (tree.tokenTag(catch_token + 1) != .pipe) return null;
+    const capture = tree.tokenSlice(catch_token + 2);
+    const handler = tree.nodeData(node).node_and_node[1];
+    for (tree.firstToken(handler)..tree.lastToken(handler) + 1) |token| {
+        if (std.mem.eql(u8, tree.tokenSlice(@intCast(token)), "recancel")) return null;
+    }
+    var buffer: [2]Node.Index = undefined;
+    const statements = tree.blockStatements(&buffer, handler) orelse (&handler)[0..1];
+    for (statements) |statement| {
+        if (tree.fullIf(statement)) |full| {
+            if (testsCanceled(tree, full.ast.cond_expr, capture) and returnsBare(tree, full.ast.then_expr)) return statement;
+        } else if (tree.fullSwitch(statement)) |full| {
+            if (!isName(tree, full.ast.condition, capture)) continue;
+            for (full.ast.cases) |case| {
+                const prong = tree.fullSwitchCase(case).?;
+                if (prong.payload_token != null) continue;
+                const names_it = for (prong.ast.values) |value| {
+                    if (isCanceled(tree, value)) break true;
+                } else false;
+                if (!names_it) continue;
+                if (returnsBare(tree, prong.ast.target_expr) or isEmptyBlock(tree, prong.ast.target_expr)) return case;
+            }
+        }
+    }
+    return null;
+}
+
+/// What `leavesOnCanceled` found, on one line: `if (err == error.Canceled)
+/// return`, `error.Canceled => {}`, or a block that ends in `return` as
+/// `{ ... return; }`.
+fn handlerText(arena: Allocator, tree: *const Ast, at: Node.Index) Allocator.Error![]const u8 {
+    if (tree.fullIf(at)) |full| {
+        return arena.print("if ({s}) {s}", .{ tree.getNodeSource(full.ast.cond_expr), leaving(tree, full.ast.then_expr) });
+    }
+    const prong = tree.fullSwitchCase(at).?;
+    const first = tree.tokenStart(tree.firstToken(prong.ast.values[0]));
+    const last = tree.lastToken(prong.ast.values[prong.ast.values.len - 1]);
+    const values = tree.source[first .. tree.tokenStart(last) + tree.tokenSlice(last).len];
+    return arena.print("{s} => {s}", .{ values, leaving(tree, prong.ast.target_expr) });
+}
+
+fn leaving(tree: *const Ast, node: Node.Index) []const u8 {
+    if (tree.nodeTag(node) == .@"return") return "return";
+    if (isEmptyBlock(tree, node)) return "{}";
+    return "{ ... return; }";
+}
+
+/// `err == error.Canceled` or `error.Canceled == err`, with `err` named
+/// `capture`.
+fn testsCanceled(tree: *const Ast, node: Node.Index, capture: []const u8) bool {
+    if (tree.nodeTag(node) != .equal_equal) return false;
+    const lhs, const rhs = tree.nodeData(node).node_and_node;
+    return (isName(tree, lhs, capture) and isCanceled(tree, rhs)) or (isCanceled(tree, lhs) and isName(tree, rhs, capture));
+}
+
+fn isCanceled(tree: *const Ast, node: Node.Index) bool {
+    return tree.nodeTag(node) == .error_value and std.mem.eql(u8, tree.tokenSlice(tree.lastToken(node)), "Canceled");
+}
+
+fn isName(tree: *const Ast, node: Node.Index, name: []const u8) bool {
+    return tree.nodeTag(node) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), name);
+}
+
+/// `return` with no value, alone or as a block's last statement.
+fn returnsBare(tree: *const Ast, node: Node.Index) bool {
+    if (tree.nodeTag(node) == .@"return") return tree.nodeData(node).opt_node == .none;
+    var buffer: [2]Node.Index = undefined;
+    const statements = tree.blockStatements(&buffer, node) orelse return false;
+    return statements.len > 0 and returnsBare(tree, statements[statements.len - 1]);
+}
+
+fn isEmptyBlock(tree: *const Ast, node: Node.Index) bool {
+    return switch (tree.nodeTag(node)) {
+        .block_two, .block_two_semicolon => tree.nodeData(node).opt_node_and_opt_node[0] == .none,
+        else => false,
+    };
+}
+
 /// `io`, or a field named `io`.
 fn namesIo(tree: *const Ast, node: Node.Index) bool {
     const name = switch (tree.nodeTag(node)) {
@@ -233,6 +398,46 @@ test "in a task's loop, an Io call whose error is dropped" {
         \\5:138 io.sleep catch |_| {}
         \\
     );
+}
+
+test "in a function a task's loop calls, a handler that names error.Canceled and returns (#66)" {
+    try expectDropped(
+        \\fn start(io: Io, s: *Sub) !void { _ = try io.concurrent(janitorLoop, .{s}); }
+        \\fn janitorLoop(s: *Sub) Io.Cancelable!void { while (true) { try s.io.sleep(.fromMilliseconds(1), .awake); s.flush(); } }
+        \\fn flush(s: *Sub) void {
+        \\    s.sub.modifyAckDeadline(s.chunk) catch |err| { if (err == error.Canceled) return; log(err); };
+        \\    s.sendIds() catch |err| switch (err) { error.Canceled => return, else => log(err) };
+        \\    (s.other()) catch |e| switch (e) { error.Timeout, error.Canceled => {}, else => {} };
+        \\    s.last() catch |err| if (error.Canceled == err) { log(err); return; } else log(err);
+        \\}
+    ,
+        \\4:52 s.sub.modifyAckDeadline if (err == error.Canceled) return
+        \\5:44 s.sendIds error.Canceled => return
+        \\6:40 s.other error.Timeout, error.Canceled => {}
+        \\7:26 s.last if (error.Canceled == err) { ... return; }
+        \\
+    );
+}
+
+test "not reported: the task's own handler, a call outside its loops, recancel, a value, the error handed on" {
+    try expectDropped(
+        \\fn start(io: Io, s: *Sub) !void { _ = try io.concurrent(task, .{s}); }
+        \\fn task(s: *Sub) void {
+        \\    outside(s);
+        \\    while (true) {
+        \\        s.io.sleep(.fromMilliseconds(1), .awake) catch |err| { if (err == error.Canceled) return; };
+        \\        if (!tick(s)) return;
+        \\        rearmed(s);
+        \\        handed(s) catch return;
+        \\        deferred(s);
+        \\    }
+        \\}
+        \\fn outside(s: *Sub) void { s.io.sleep(.fromMilliseconds(1), .awake) catch |err| { if (err == error.Canceled) return; }; }
+        \\fn tick(s: *Sub) bool { s.io.sleep(.fromMilliseconds(1), .awake) catch |err| { if (err == error.Canceled) return false; }; return true; }
+        \\fn rearmed(s: *Sub) void { s.io.sleep(.fromMilliseconds(1), .awake) catch |err| { if (err == error.Canceled) { s.io.recancel(); return; } }; }
+        \\fn handed(s: *Sub) !void { s.io.sleep(.fromMilliseconds(1), .awake) catch |err| switch (err) { error.Canceled => |e| return e }; }
+        \\fn deferred(s: *Sub) void { defer s.io.sleep(.fromMilliseconds(1), .awake) catch |err| { if (err == error.Canceled) return; }; }
+    , "");
 }
 
 test "not reported: outside tasks and their loops, cancel and await, defer, handlers that do something" {

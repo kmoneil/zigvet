@@ -225,12 +225,22 @@ or one such a function calls directly, in the same file, and only in its
 loops. Reported there: `catch {}`, `catch |_| {}` or `catch continue` on a
 call passed `io` or a field named `io`, or called on one.
 
+And in a function a task calls inside one of its loops, a handler that
+names `error.Canceled` and leaves without it:
+`catch |err| { if (err == error.Canceled) return; ... }`, or a
+`switch (err)` prong `error.Canceled => return` or `=> {}`. Leaving that
+function returns to the task's loop, which goes on with the cancel spent,
+and naming the error shows the call can return it, whatever its name.
+
 Not reported: `cancel` and `await`, which drop the task's own result, not a
 cancelation sent to it; anything in a `defer` or `errdefer`; handlers that
 use the error or leave (`catch return`, `catch null`); and a task started
 from another file, which the syntax of this one cannot see. Whether the
 call's error set holds `error.Canceled` is beyond the syntax too; the hint
-says how to tell.
+says how to tell. Of the handlers that name it: one that calls
+`io.recancel()`, returns a value the loop may read (`while (tick())`), or
+hands the error on (`error.Canceled => |e| return e`), and the same
+handler in the task's own function, where returning ends the task.
 
 ## Rule four: fit
 
