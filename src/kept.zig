@@ -22,8 +22,9 @@
 //! `insert`, `put`, `putAssumeCapacity` or `putNoClobber`, as an argument
 //! or a field of one (`.{ .name = name }`), or assigned to a field or what
 //! a pointer points at (`self.pty = name`, or in a field initializer),
-//! where what holds it is reached through a parameter, or through a local
-//! pointer made from one (`const self: *T = @ptrCast(@alignCast(ctx));`).
+//! where what holds it is reached through a parameter, a local pointer made
+//! from one (`const self: *T = @ptrCast(@alignCast(ctx));`), or what an
+//! `if` or `while` captures from one, or is a container-level `var`.
 //! It is reported when, after the store and on its path, before the
 //! errdefer's block ends, something makes the function fail with the
 //! errdefer armed: a `try`, a `return error.X`, or a handler that returns
@@ -105,7 +106,7 @@ const Rule = struct {
             // name, a capture of a loop that ended before it was declared.
             if (tree.nodeMainToken(node) < tree.nodeMainToken(errdefer_node)) continue;
             const store = r.storeOf(node, name) orelse continue;
-            if (!r.callersOwn(store.holder)) continue;
+            if (!callersKeep(tree, r.parents, store.holder)) continue;
             if (try r.initializes(errdefer_node, store.holder)) continue;
             const holder = tree.getNodeSource(store.holder);
             const point = try r.failsAfter(store.node, block, tree.nodeMainToken(errdefer_node)) orelse continue;
@@ -141,34 +142,6 @@ const Rule = struct {
         const lhs, const rhs = tree.nodeData(node).node_and_node;
         if (tree.nodeTag(lhs) == .identifier or !holds(tree, rhs, name)) return null;
         return .{ .node = node, .holder = lhs };
-    }
-
-    /// Whether `holder` is reached through a parameter of the function
-    /// around it, or through a local pointer made from one.
-    fn callersOwn(r: *Rule, holder: Node.Index) bool {
-        const tree = r.tree;
-        const root = rootOf(tree, holder) orelse return false;
-        const name = tree.tokenSlice(tree.nodeMainToken(root));
-        // A local declared before it, in a block around it.
-        var child = root;
-        var up = r.parents[@backingInt(root)].unwrap();
-        while (up) |parent| : ({
-            child = parent;
-            up = r.parents[@backingInt(parent)].unwrap();
-        }) {
-            if (tree.nodeTag(parent) == .fn_decl) return isParam(tree, parent, name);
-            if (tree.nodeTag(parent) == .test_decl) return false;
-            var buffer: [2]Node.Index = undefined;
-            const statements = tree.blockStatements(&buffer, parent) orelse continue;
-            for (statements) |statement| {
-                if (statement == child) break;
-                const decl = tree.fullVarDecl(statement) orelse continue;
-                if (!std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) continue;
-                const init = decl.ast.init_node.unwrap() orelse return false;
-                return r.callersOwn(pointerFrom(tree, init) orelse return false);
-            }
-        }
-        return false;
     }
 
     /// Whether the function around `node` makes what `holder` is reached
@@ -359,7 +332,7 @@ const Rule = struct {
     }
 };
 
-fn isNested(tag: Node.Tag) bool {
+pub fn isNested(tag: Node.Tag) bool {
     return switch (tag) {
         .fn_decl,
         .container_decl,
@@ -368,6 +341,12 @@ fn isNested(tag: Node.Tag) bool {
         .container_decl_two_trailing,
         .container_decl_arg,
         .container_decl_arg_trailing,
+        .tagged_union,
+        .tagged_union_trailing,
+        .tagged_union_two,
+        .tagged_union_two_trailing,
+        .tagged_union_enum_tag,
+        .tagged_union_enum_tag_trailing,
         => true,
         else => false,
     };
@@ -400,7 +379,7 @@ fn isName(tree: *const Ast, node: Node.Index, name: []const u8) bool {
 }
 
 /// The variable `node` is reached from: `self` of `self.names.items`.
-fn rootOf(tree: *const Ast, node: Node.Index) ?Node.Index {
+pub fn rootOf(tree: *const Ast, node: Node.Index) ?Node.Index {
     var n = node;
     while (true) switch (tree.nodeTag(n)) {
         .identifier => return n,
@@ -440,6 +419,68 @@ fn pointerFrom(tree: *const Ast, init: Node.Index) ?Node.Index {
         .identifier, .field_access, .unwrap_optional, .deref, .array_access => return if (pointer) n else null,
         else => return null,
     };
+}
+
+/// Whether `place` is memory the caller of the function around it keeps:
+/// reached through a parameter, a local pointer made from one
+/// (`const self: *T = @ptrCast(@alignCast(ctx));`), what an `if` or
+/// `while` captures from one (`if (req.head_out) |out| out.* = ...`), or a
+/// container-level `var`. `parents` gives every node's parent.
+pub fn callersKeep(tree: *const Ast, parents: []const Node.OptionalIndex, place: Node.Index) bool {
+    const root = rootOf(tree, place) orelse return false;
+    const name = tree.tokenSlice(tree.nodeMainToken(root));
+    var child = root;
+    var up = parents[@backingInt(root)].unwrap();
+    while (up) |parent| : ({
+        child = parent;
+        up = parents[@backingInt(parent)].unwrap();
+    }) {
+        switch (tree.nodeTag(parent)) {
+            .fn_decl => return isParam(tree, parent, name) or containerVar(tree, parents, parent, name),
+            .test_decl => return false,
+            .if_simple, .@"if" => {
+                const full = tree.fullIf(parent).?;
+                if (child == full.ast.then_expr and captures(tree, full.payload_token, name)) return callersKeep(tree, parents, full.ast.cond_expr);
+                continue;
+            },
+            .while_simple, .while_cont, .@"while" => {
+                const full = tree.fullWhile(parent).?;
+                if (child == full.ast.then_expr and captures(tree, full.payload_token, name)) return callersKeep(tree, parents, full.ast.cond_expr);
+                continue;
+            },
+            else => {},
+        }
+        // A local declared before it, in a block around it.
+        var buffer: [2]Node.Index = undefined;
+        const statements = tree.blockStatements(&buffer, parent) orelse continue;
+        for (statements) |statement| {
+            if (statement == child) break;
+            const decl = tree.fullVarDecl(statement) orelse continue;
+            if (!std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) continue;
+            const init = decl.ast.init_node.unwrap() orelse return false;
+            return callersKeep(tree, parents, pointerFrom(tree, init) orelse return false);
+        }
+    }
+    return false;
+}
+
+/// Whether `|name|` or `|*name|` is the capture at `payload`.
+fn captures(tree: *const Ast, payload: ?Ast.TokenIndex, name: []const u8) bool {
+    const token = payload orelse return false;
+    const captured = if (tree.tokenTag(token) == .asterisk) token + 1 else token;
+    return std.mem.eql(u8, tree.tokenSlice(captured), name);
+}
+
+/// Whether `name` is a `var` declared in a container around `fn_decl`.
+fn containerVar(tree: *const Ast, parents: []const Node.OptionalIndex, fn_decl: Node.Index, name: []const u8) bool {
+    var up = parents[@backingInt(fn_decl)].unwrap();
+    while (up) |parent| : (up = parents[@backingInt(parent)].unwrap()) {
+        var buffer: [2]Node.Index = undefined;
+        if (tree.fullContainerDecl(&buffer, parent) == null) continue;
+        const decl = types.memberDecl(tree, parent, name) orelse continue;
+        return tree.tokenTag(tree.fullVarDecl(decl).?.ast.mut_token) == .keyword_var;
+    }
+    return false;
 }
 
 fn isParam(tree: *const Ast, fn_decl: Node.Index, name: []const u8) bool {

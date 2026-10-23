@@ -331,6 +331,7 @@ test {
     _ = @import("owner.zig");
     _ = @import("refill.zig");
     _ = @import("report.zig");
+    _ = @import("torn.zig");
     _ = @import("types.zig");
     _ = @import("vet.zig");
     _ = @import("walk.zig");
