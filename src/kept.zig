@@ -30,9 +30,27 @@
 //! errdefer armed: a `try`, a `return error.X`, or a handler that returns
 //! the error it caught.
 //!
+//! The same goes for what an optional holds, freed through it:
+//!
+//!     self.search = .{ .state = try .init(self.alloc), .thread = undefined };
+//!     const s: *Search = &self.search.?;
+//!     errdefer s.state.deinit();
+//!     s.thread = try .spawn(.{}, run, .{&s.state});
+//!
+//! When `spawn` fails, the errdefer deinits `s.state`, but `self.search`
+//! is still set, so whatever reads it next takes the search as running,
+//! and the `deinit` that checks it deinits the state again. That is an
+//! errdefer releasing a place reached through `.?` of an optional, written
+//! there or through a local pointer made from it, where the optional is a
+//! field reached as a store's holder is, the function assigns it before the
+//! errdefer, a function of the file named `deinit` names it, and the
+//! errdefer does not assign it too.
+//!
 //! Not reported: a store into a local, which the failing function throws
 //! away; a value made from `name` (`name.toOwnedSlice(...)`, `name.len`),
-//! which is not what the errdefer frees; a store in a function that makes
+//! which is not what the errdefer frees; a local emptied after the store
+//! and before the failure (`procs = .empty;`), which leaves the errdefer
+//! freeing that, not what the holder keeps; a store in a function that makes
 //! what holds it, one named `init...` or one that writes it whole
 //! (`self.* = .{ ... }`), whose caller holds nothing of it if it fails; a
 //! store a `defer` or `errdefer` armed before the failure can undo, one
@@ -51,6 +69,7 @@ const children = @import("children.zig");
 const refill = @import("refill.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
+const torn = @import("torn.zig");
 const types = @import("types.zig");
 
 /// Appends a finding for every errdefer that frees what its function has
@@ -61,8 +80,16 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
     for (tree.nodes.items(.tag), 0..) |tag, i| {
         if (tag != .@"errdefer") continue;
         const node: Node.Index = @fromBackingInt(@intCast(i));
-        const name = freedName(tree, tree.nodeData(node).node) orelse continue;
-        try rule.errdeferred(node, name);
+        const deferred = tree.nodeData(node).node;
+        if (freedName(tree, deferred)) |name| {
+            if (try rule.errdeferred(node, name)) continue;
+        }
+        var buffer: [2]Node.Index = undefined;
+        const statements = tree.blockStatements(&buffer, deferred) orelse (&deferred)[0..1];
+        for (statements) |statement| {
+            _, const operand = refill.releaseCall(tree, statement) orelse continue;
+            if (try rule.unwrapped(node, operand)) break;
+        }
     }
 }
 
@@ -94,11 +121,11 @@ const Rule = struct {
 
     /// Reports `errdefer_node`, which frees `name`, if `name` is stored
     /// where the caller keeps it and something fails after the store with
-    /// the errdefer armed.
-    fn errdeferred(r: *Rule, errdefer_node: Node.Index, name: []const u8) Allocator.Error!void {
+    /// the errdefer armed. Whether it reported.
+    fn errdeferred(r: *Rule, errdefer_node: Node.Index, name: []const u8) Allocator.Error!bool {
         const tree = r.tree;
         if (r.parents.len == 0) r.parents = (try types.Types.init(r.arena, tree)).parents;
-        const block = r.parents[@backingInt(errdefer_node)].unwrap() orelse return;
+        const block = r.parents[@backingInt(errdefer_node)].unwrap() orelse return false;
         var nodes: std.ArrayList(Node.Index) = .empty;
         try r.within(block, &nodes);
         for (nodes.items) |node| {
@@ -109,9 +136,9 @@ const Rule = struct {
             if (!callersKeep(tree, r.parents, store.holder)) continue;
             if (try r.initializes(errdefer_node, store.holder)) continue;
             const holder = tree.getNodeSource(store.holder);
-            const point = try r.failsAfter(store.node, block, tree.nodeMainToken(errdefer_node)) orelse continue;
+            const point = try r.failsAfter(store.node, block, tree.nodeMainToken(errdefer_node), name) orelse continue;
             if (try r.undone(errdefer_node, store.node, name, holder, point)) continue;
-            return r.findings.append(r.arena, .{
+            try r.findings.append(r.arena, .{
                 .offset = tree.tokenStart(tree.nodeMainToken(errdefer_node)),
                 .hint = hint,
                 .detail = .{ .kept = .{
@@ -120,7 +147,90 @@ const Rule = struct {
                     .fails = try r.what(point),
                 } },
             });
+            return true;
         }
+        return false;
+    }
+
+    /// Reports `errdefer_node`, which frees `operand`, if `operand` is
+    /// reached through an optional the function has set where its caller
+    /// keeps it (`s.state`, with `s` made from `&self.search.?`), the
+    /// errdefer leaves the optional set, and something fails after it.
+    /// Whether it reported.
+    fn unwrapped(r: *Rule, errdefer_node: Node.Index, operand: Node.Index) Allocator.Error!bool {
+        const tree = r.tree;
+        if (r.parents.len == 0) r.parents = (try types.Types.init(r.arena, tree)).parents;
+        const optional = r.optionalOf(operand) orelse return false;
+        if (!callersKeep(tree, r.parents, optional) or !torn.freedByDeinit(tree, optional)) return false;
+        const holder = tree.getNodeSource(optional);
+        const armed = tree.nodeMainToken(errdefer_node);
+        const body = r.bodyOf(errdefer_node) orelse return false;
+        if (!try r.assigned(body, holder, armed)) return false;
+        if (try r.assigned(tree.nodeData(errdefer_node).node, holder, null)) return false;
+        if (try r.initializes(errdefer_node, optional)) return false;
+        const block = r.parents[@backingInt(errdefer_node)].unwrap() orelse return false;
+        const point = try r.failsAfter(errdefer_node, block, armed, null) orelse return false;
+        if (try r.undone(errdefer_node, errdefer_node, "", holder, point)) return false;
+        try r.findings.append(r.arena, .{
+            .offset = tree.tokenStart(armed),
+            .hint = try r.arena.print("set it back in the same errdefer (`{s} = null;`), so a failure leaves it unset", .{holder}),
+            .detail = .{ .kept = .{
+                .name = tree.getNodeSource(operand),
+                .holder = holder,
+                .fails = try r.what(point),
+            } },
+        });
+        return true;
+    }
+
+    /// The optional `place` is reached through, as written where it is
+    /// unwrapped: `self.search` of `self.search.?.state`, or of `s.state`
+    /// when `s` is a local pointer made from `&self.search.?`.
+    fn optionalOf(r: *Rule, place: Node.Index) ?Node.Index {
+        const tree = r.tree;
+        var n = place;
+        var through_local = false;
+        while (true) switch (tree.nodeTag(n)) {
+            .unwrap_optional => return tree.nodeData(n).node_and_token[0],
+            .field_access, .grouped_expression => n = tree.nodeData(n).node_and_token[0],
+            .array_access => n = tree.nodeData(n).node_and_node[0],
+            .deref => n = tree.nodeData(n).node,
+            .identifier => {
+                if (through_local) return null;
+                through_local = true;
+                const t: types.Types = .{ .tree = tree, .parents = r.parents };
+                n = pointerFrom(tree, t.localInit(n) orelse return null) orelse return null;
+            },
+            else => return null,
+        };
+    }
+
+    /// The body of the function or test around `node`.
+    fn bodyOf(r: *Rule, node: Node.Index) ?Node.Index {
+        const tree = r.tree;
+        var up = r.parents[@backingInt(node)].unwrap();
+        while (up) |parent| : (up = r.parents[@backingInt(parent)].unwrap()) {
+            switch (tree.nodeTag(parent)) {
+                .fn_decl => return tree.nodeData(parent).node_and_node[1],
+                .test_decl => return tree.nodeData(parent).opt_token_and_node[1],
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    /// Whether `node` holds an assignment to `place`, as written, before
+    /// token `before` when there is one.
+    fn assigned(r: *Rule, node: Node.Index, place: []const u8, before: ?Ast.TokenIndex) Allocator.Error!bool {
+        const tree = r.tree;
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try r.within(node, &nodes);
+        for (nodes.items) |n| {
+            if (tree.nodeTag(n) != .assign) continue;
+            if (before) |token| if (tree.nodeMainToken(n) >= token) continue;
+            if (std.mem.eql(u8, tree.getNodeSource(tree.nodeData(n).node_and_node[0]), place)) return true;
+        }
+        return false;
     }
 
     /// `node` as a store of `name`: `name`, or a field initializer holding
@@ -180,8 +290,9 @@ const Rule = struct {
 
     /// The first thing after `store`, on its path, that makes the function
     /// fail with the errdefer at `armed` armed, before `block`, the
-    /// errdefer's, ends. Null if the path leaves first.
-    fn failsAfter(r: *Rule, store: Node.Index, block: Node.Index, armed: Ast.TokenIndex) Allocator.Error!?Node.Index {
+    /// errdefer's, ends. Null if the path leaves first, or a statement on
+    /// it assigns `name` anew, leaving the errdefer to free that.
+    fn failsAfter(r: *Rule, store: Node.Index, block: Node.Index, armed: Ast.TokenIndex, name: ?[]const u8) Allocator.Error!?Node.Index {
         const tree = r.tree;
         var child = store;
         var up = r.parents[@backingInt(store)].unwrap();
@@ -197,6 +308,9 @@ const Rule = struct {
             const statements = tree.blockStatements(&buffer, parent) orelse continue;
             const at = std.mem.findScalar(Node.Index, statements, child) orelse return null;
             for (statements[at + 1 ..]) |statement| {
+                if (name) |freed| {
+                    if (tree.nodeTag(statement) == .assign and isName(tree, tree.nodeData(statement).node_and_node[0], freed)) return null;
+                }
                 if (try r.failing(statement, armed)) |point| return point;
                 switch (tree.nodeTag(statement)) {
                     .@"return", .@"break", .@"continue" => return null,
@@ -559,5 +673,52 @@ test "not reported: a local, a value made from it, undone, or a failure off the 
         \\fn deferred(self: *Store, v: []const u8) !void { const staging = try self.gpa.dupe(u8, v); errdefer self.gpa.free(staging); self.pending = staging; defer self.pending = null; try more(); }
         \\fn disowned(self: *Pool) !void { const conn = try self.pool.create(self.gpa); errdefer self.pool.destroy(conn); self.list.insert(conn); errdefer self.disown(conn); try more(); }
         \\fn shadowed(self: *Pool, items: []*Entry) !void { for (items) |entry| self.kept.appendAssumeCapacity(entry); const entry = try self.gpa.create(Entry); errdefer self.gpa.destroy(entry); try more(); return; }
+    , "");
+}
+
+test "a local emptied after the store leaves the errdefer freeing that, one emptied after the failure does not (#86)" {
+    try expectKept(
+        \\fn retain(gpa: Allocator, result: *Lowered, n: usize, fail: bool) !void { var procs = try List.initCapacity(gpa, n); errdefer procs.deinit(gpa); result.procs.deinit(gpa); result.procs = procs; procs = .empty; if (fail) return error.Failed; }
+        \\fn late(gpa: Allocator, result: *Lowered, fail: bool) !void { var procs = try List.initCapacity(gpa, 4); errdefer procs.deinit(gpa); result.procs = procs; if (fail) return error.Failed; procs = .empty; }
+    ,
+        \\2:106 procs result.procs <- it returns error.Failed
+        \\
+    );
+}
+
+test "an errdefer frees what an optional the function set holds, and leaves it set" {
+    try expectKept(
+        \\const Surface = struct {
+        \\    search: ?Search = null,
+        \\    job: ?Job = null,
+        \\    other: ?Job = null,
+        \\    fn deinit(self: *Surface) void { if (self.search) |*s| s.deinit(); if (self.job) |*j| j.deinit(); }
+        \\    fn start(self: *Surface) !void { self.search = .{ .state = try .init(self.alloc), .thread = undefined }; const s: *Search = &self.search.?; errdefer s.state.deinit(); s.thread = try .spawn(.{}, run, .{&s.state}); }
+        \\    fn direct(self: *Surface, gpa: Allocator) !void { self.job = try .init(gpa); errdefer self.job.?.deinit(gpa); try self.job.?.run(); }
+        \\    fn aliased(self: *Surface, gpa: Allocator) !void { self.job = try .init(gpa); const j = &self.job.?; errdefer j.deinit(gpa); try j.run(); }
+        \\};
+    ,
+        \\6:145 s.state self.search <- .spawn fails
+        \\7:82 self.job.? self.job <- self.job.?.run fails
+        \\8:106 j self.job <- j.run fails
+        \\
+    );
+}
+
+test "not reported: the optional reset, not set here, not deinit'd, made by an init, a copy, or nothing after" {
+    try expectKept(
+        \\const Surface = struct {
+        \\    job: ?Job = null,
+        \\    other: ?Job = null,
+        \\    fn deinit(self: *Surface) void { if (self.job) |*j| j.deinit(); }
+        \\    fn reset(self: *Surface, gpa: Allocator) !void { self.job = try .init(gpa); errdefer { self.job.?.deinit(gpa); self.job = null; } try self.job.?.run(); }
+        \\    fn resetFirst(self: *Surface, gpa: Allocator) !void { self.job = try .init(gpa); errdefer self.job = null; errdefer self.job.?.deinit(gpa); try self.job.?.run(); }
+        \\    fn notSet(self: *Surface, gpa: Allocator) !void { errdefer self.job.?.deinit(gpa); try self.job.?.run(); }
+        \\    fn unnamed(self: *Surface, gpa: Allocator) !void { self.other = try .init(gpa); errdefer self.other.?.deinit(gpa); try self.other.?.run(); }
+        \\    fn initJob(self: *Surface, gpa: Allocator) !void { self.job = try .init(gpa); errdefer self.job.?.deinit(gpa); try self.job.?.run(); }
+        \\    fn copied(self: *Surface, gpa: Allocator) !void { self.job = try .init(gpa); var j = self.job.?; errdefer j.deinit(gpa); try j.run(); }
+        \\    fn last(self: *Surface, gpa: Allocator) !void { self.job = try .init(gpa); errdefer self.job.?.deinit(gpa); self.job.?.go(); }
+        \\};
+        \\fn local(gpa: Allocator) !void { var job: ?Job = try .init(gpa); errdefer job.?.deinit(gpa); try job.?.run(); }
     , "");
 }

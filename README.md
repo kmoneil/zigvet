@@ -23,9 +23,9 @@ UI code one of them keeps for reference. Owner, over the same code,
 reports three, all real: two in two application repos, and a copy of one
 of them another keeps. Kept, over the same code, reports four, all real,
 in one application repo's fake storage server; over fourteen public Zig
-projects, 23: 19 real; two that leave a freed value in something their
-caller throws away; and two false positives, a local emptied between the
-store and the failure (#86). Torn, over the same code, reports nothing;
+projects, 22: 20 real, one of them an optional left set over what its
+errdefer frees, and two that leave a freed value in something their
+caller throws away. Torn, over the same code, reports nothing;
 over the fourteen public projects, four, all real, in a terminal
 emulator, a compiler and a browser. Twice, over the same code, reports
 nothing; over the public projects, 26 in one compiler: 22 real, at seven
@@ -478,9 +478,31 @@ after the store and on its path, before the errdefer's block ends,
 something makes the function fail: a `try`, a `return error.X`, or a
 handler that returns the error it caught.
 
+The same goes for what an optional holds, freed through `.?`:
+
+```zig
+self.search = .{ .state = try .init(self.alloc), .thread = undefined };
+const s: *Search = &self.search.?;
+errdefer s.state.deinit();
+s.thread = try .spawn(.{}, run, .{&s.state});
+```
+
+When `spawn` fails, the errdefer deinits the state but leaves
+`self.search` set, so the next search takes it as running, and the
+`deinit` that checks it deinits the state again. It is reported when an
+errdefer releases a place reached through `.?` of an optional, written
+there or through a local pointer made from it (`&self.search.?`), where
+the optional is a field reached as a store's holder is, the function
+assigns it before the errdefer, a function of the file named `deinit`
+names it, the errdefer does not assign it as well, and something fails
+after the errdefer. Setting it back in the same errdefer
+(`self.search = null;`) is the fix.
+
 Not reported: a store into a local, which the failing function throws
 away; a value made from `name` (`name.toOwnedSlice(...)`, `name.len`),
-which is not what the errdefer frees; a store in a function that makes
+which is not what the errdefer frees; a local emptied after the store and
+before the failure (`procs = .empty;`), which leaves the errdefer freeing
+that, not what the holder keeps (#86); a store in a function that makes
 what holds it, one named `init...` or one that writes it whole
 (`self.* = .{ ... }`), whose caller holds nothing of it if it fails; a
 store a `defer` or `errdefer` armed before the failure can undo, one that

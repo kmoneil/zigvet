@@ -133,7 +133,7 @@ fn setFirst(t: types.Types, place: Node.Index) bool {
 
 /// Whether a function of the file named `deinit` names `place`'s field
 /// (`.pending` of `self.pending`).
-fn freedByDeinit(tree: *const Ast, place: Node.Index) bool {
+pub fn freedByDeinit(tree: *const Ast, place: Node.Index) bool {
     if (tree.nodeTag(place) != .field_access) return false;
     const field = tree.tokenSlice(tree.nodeData(place).node_and_token[1]);
     for (tree.nodes.items(.tag), 0..) |tag, i| {
