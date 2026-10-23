@@ -28,9 +28,9 @@ errdefer frees, and two that leave a freed value in something their
 caller throws away. Torn, over the same code, reports nothing;
 over the fourteen public projects, four, all real, in a terminal
 emulator, a compiler and a browser. Twice, over the same code, reports
-nothing; over the public projects, 26 in one compiler: 22 real, at seven
-places, and four false positives, a deinit that resets what it frees run
-twice and an empty slice freed twice (#87). Sweep, over the same code,
+nothing; over the public projects, 23 in one compiler: 22 real, at seven
+places, and one false positive, a deinit that resets what it frees run
+twice, its type declared in another file. Sweep, over the same code,
 reports nothing; over the public projects, one, real, in an editor.
 Unlock, over the same code, reports
 nothing; over the public projects, two, both real, in an HTTP server
@@ -600,9 +600,15 @@ Not reported: the same statement followed by a plain `return`, `break` or
 `continue`, which is correct, since the errdefer does not run; a failure
 on another branch; one after a statement that assigns to a name the call
 is handed or is called on, which then frees something else; a call safe
-to run twice (`shrinkRetainingCapacity`, a restore); code in a `test`
+to run twice (`shrinkRetainingCapacity`, a restore); a method of a type
+the file declares whose body ends by writing its receiver whole with
+anything but `undefined` (`self.* = .{};`), so the second call frees
+nothing, the type shown by the receiver's declaration or by what made it
+(`T{ ... }`, `T.init(...)`); a free inside `if (x.len == 0)` for the `x`
+it is handed, which frees nothing either time (#87); code in a `test`
 block; and a failure the syntax cannot see, such as `return f()` with no
-`try`.
+`try`. A method of a type declared in another file is not seen, so one
+that resets its receiver is still reported.
 
 ## Rule ten: sweep
 
