@@ -311,21 +311,27 @@ self.items = items;
 
 ### What refill reports
 
-`x.free(place)`, `x.destroy(place)` or `place.deinit(...)`, as a statement
-or the body of an `if` with no `else`, or `if (place) |old| x.free(old)`,
-where the place is a field or what a pointer points at (`self.items`,
-`a.*`), and a later statement of the same block stores to the place, or to
-what holds it written whole (`history.* = .{ ... }`), with something that
-can fail first: a `try`, or a `catch` that returns, in the stored value or
-in a statement between.
+`x.free(place)`, `x.destroy(place)`, `x.rawFree(place, ...)` or
+`place.deinit(...)`, or a call to one of the file's own functions that
+frees the parameter the place is passed to (`self.destroyLocal(self.one)`,
+where a statement of `destroyLocal` frees `local` or a field of it), as a
+statement or the body of an `if` with no `else`, or
+`if (place) |old| x.free(old)`, where the place is a field or what a
+pointer points at (`self.items`, `a.*`), and a later statement of the same
+block stores to the place, or to what holds it written whole
+(`history.* = .{ ... }`), with something that can fail first: a `try`, or
+a `catch` or `orelse` that returns (`orelse return error.OutOfMemory`), in
+the stored value or in a statement between.
 
 Not reported: a place reset first (`self.items = &.{}`, or a store into it
-such as `self.items.len = 0`), reset by an `errdefer` or by the `catch`
-that handles the failure (`catch |err| { self.name = null; return err; }`),
-or perhaps reset by a call between that is handed what holds it
-(`self.clear()`); a field of a `var` local not declared as a pointer, which
-holds a struct by value that the failing function throws away; and a bare
-local, which an `errdefer` of its own can cover.
+such as `self.items.len = 0`), reset by an `errdefer` or by the `catch` or
+`orelse` that handles the failure
+(`catch |err| { self.name = null; return err; }`), or perhaps reset by a
+call between that is handed what holds it (`self.clear()`), when nothing
+that can fail comes before that call; a field of a `var` local not
+declared as a pointer, which holds a struct by value that the failing
+function throws away; and a bare local, which an `errdefer` of its own can
+cover.
 
 ## Rule six: owner
 
@@ -362,10 +368,11 @@ A call under `try` to one of the file's own functions that takes a
 parameter on failure, where the argument for that parameter is a name that
 an `errdefer` of the caller, declared before the call in a block around it,
 frees. A function takes a parameter on failure when an `errdefer` in it
-frees the parameter (`x.free(p)`, `x.destroy(p)` or `p.deinit(...)`) and
-something after it can fail: a `try` or a `return error.X`. The function is
-found by name, through its type (`Store.keep(s, b)`), or as a method of a
-binding whose type the file declares (`self.keep(b)`).
+frees the parameter (`x.free(p)`, `x.destroy(p)`, `x.rawFree(p, ...)` or
+`p.deinit(...)`) and something after it can fail: a `try` or a
+`return error.X`. The function is found by name, through its type
+(`Store.keep(s, b)`), or as a method of a binding whose type the file
+declares (`self.keep(b)`).
 
 Not reported: a call whose error is handled rather than returned with
 `try`, which only the caller can judge; an `errdefer` declared after the
