@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: fifteen rules. Escape, run over the 0.17.0 standard library and
+Status: sixteen rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive, which it now
 tells apart (below). Alias, run over the same standard library and seven
@@ -43,7 +43,13 @@ in Zig's own LLVM IR builder that keeps a `getOrPut` pointer across
 another `getOrPut` is correct because the second only inserts on a path
 that returns. Copy, over the same code and the public projects, reports
 nothing; the copies there of a field named `writer` are copies of a
-pointer, which copy fine.
+pointer, which copy fine. Flush, over the same code, reports one, real,
+in the compiler's build runner, which saves a fuzz crash input through a
+buffered writer it never flushes; over the public projects, four in a
+terminal emulator, three real (two commands whose error message is lost
+before they exit 1, and one whose plain output loses what is left in
+its 4 KB buffer at the end) and
+one a test that writes a file it only deletes.
 
 ## Rule one: escape
 
@@ -814,6 +820,44 @@ takes its address; a field read out of it; a field that is itself a
 pointer, as `Io.Terminal`'s `writer` is, which copies fine; and a type the
 file does not show.
 
+## Rule sixteen: flush
+
+A buffered file or stream writer, written to and never flushed.
+
+```zig
+var buf: [256]u8 = undefined;
+var fw = std.Io.File.stdout().writerStreaming(io, &buf);
+try fw.interface.print("hello from greet\n", .{});
+```
+
+The writer collects what it is given in `buf`, and only `flush` (or
+`end`, for a file) sends it on. Here the function returns, `fw` goes with
+it, and the line is never written. It compiles clean in every build mode,
+prints nothing and reports nothing. A command that prints why it failed to
+a buffered stderr and then returns 1 exits with the right status and no
+message; one that prints more than the buffer holds loses only the last
+part. Code in the shape of the old API, where `std.io.getStdOut().writer()`
+wrote straight through, reads the same.
+
+The fix is `try fw.interface.flush();` after the last write, or
+`try fw.end();` for a file.
+
+### What flush reports
+
+A `var` local made by a call to a method named `writer` or
+`writerStreaming`, or by `File.Writer.init` or `.initStreaming`, whose last
+argument, the buffer, is not `&.{}`, and written through its `interface`
+later: a call on `fw.interface`, or on a local made with `&fw.interface`,
+other than `flush`. It is reported at the declaration when nothing after
+it in its block flushes it (`fw.interface.flush()`, `w.flush()` through
+such a local, or the writer's own `fw.flush()` or `fw.end()`, in a `defer`
+or not) or hands it on: `&fw`, `&fw.interface` or such a local passed to a
+call, stored, or returned.
+
+Not reported: an unbuffered writer (`&.{}`), which writes straight
+through; `Allocating` and `fixed` writers, whose buffer is the result; a
+reader; and a writer handed to a call, which only the callee can judge.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -1021,7 +1065,7 @@ how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
 for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill`,
 `owner`, `kept`, `torn`, `twice`, `sweep`, `unlock`, `wipe`, `freed`,
-`grow` and `copy` so far.
+`grow`, `copy` and `flush` so far.
 
 ## Tests
 
