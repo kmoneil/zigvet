@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -53,6 +53,7 @@ pub const Finding = struct {
         unlock: Unlock,
         wipe: Wipe,
         freed: Freed,
+        grow: Grow,
         allow: Allow,
     };
 
@@ -169,6 +170,15 @@ pub const Finding = struct {
         release: []const u8,
     };
 
+    pub const Grow = struct {
+        /// The call that can move the memory, as written: `list.append`.
+        call: []const u8,
+        /// What it can move, quoted: "`list.items`", or "`map`'s entries".
+        moved: []const u8,
+        /// The local that points into it, or empty for a `for` over it.
+        pointer: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -197,6 +207,7 @@ pub const Finding = struct {
             .unlock => .unlock,
             .wipe => .wipe,
             .freed => .freed,
+            .grow => .grow,
             .allow => null,
         };
     }
@@ -273,6 +284,14 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .freed => |f| try w.print("returns `{s}`, which `defer {s}` above frees before the caller gets it", .{
             f.returned, f.release,
         }),
+        .grow => |g| if (g.pointer.len == 0)
+            try w.print("`{s}` can move {s}, and the `for` around it walks on through the old memory on its next turn", .{
+                g.call, g.moved,
+            })
+        else
+            try w.print("`{s}` can move {s}, and '{s}', taken before it, still points at the old memory where it is used after", .{
+                g.call, g.moved, g.pointer,
+            }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
