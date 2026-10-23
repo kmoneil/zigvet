@@ -1294,7 +1294,7 @@ const std_comptime_result_fns: std.StaticStringMap(void) = .initComptime(.{
 
 /// `std` functions whose result points into one of their arguments: the
 /// namespace they are called through, and which argument.
-const std_view_fns: std.StaticStringMap(ViewFn) = .initComptime(.{
+pub const std_view_fns: std.StaticStringMap(ViewFn) = .initComptime(.{
     .{ "bufPrint", ViewFn{ .namespace = "fmt", .argument = 0 } },
     .{ "bufPrintSentinel", ViewFn{ .namespace = "fmt", .argument = 0 } },
     // What 0.17.0 deprecates bufPrint in favor of.
@@ -1313,7 +1313,7 @@ const std_view_fns: std.StaticStringMap(ViewFn) = .initComptime(.{
     .{ "bytesAsValue", ViewFn{ .namespace = "mem", .argument = 1 } },
 });
 
-const ViewFn = struct {
+pub const ViewFn = struct {
     namespace: []const u8,
     argument: usize,
     /// Known by its name alone, `bufPrint(...)`, in a file that declares no
