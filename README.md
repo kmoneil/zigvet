@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: seven rules. Escape, run over the 0.17.0 standard library and
+Status: eight rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive, which it now
 tells apart (below). Alias, run over the same standard library and seven
@@ -24,7 +24,9 @@ reports three, all real: two in two application repos, and a copy of one
 of them another keeps. Kept, over the same code, reports four, all real,
 in one application repo's fake storage server; over fourteen public Zig
 projects, 23, of which 22 are real and one leaves a freed argument in a
-list its caller throws away.
+list its caller throws away. Torn, over the same code, reports nothing;
+over the fourteen public projects, four, all real, in a terminal
+emulator, a compiler and a browser.
 
 ## Rule one: escape
 
@@ -442,8 +444,10 @@ itself: handed to `append`, `appendAssumeCapacity`, `insert`, `put`,
 `putAssumeCapacity` or `putNoClobber`, as an argument or a field of one
 (`.{ .name = name }`), or assigned to a field or what a pointer points at
 (`self.pty = name`, or in a field initializer), where what holds it is
-reached through a parameter, or a local pointer made from one
-(`const self: *T = @ptrCast(@alignCast(ctx));`). It is reported when,
+reached through a parameter, a local pointer made from one
+(`const self: *T = @ptrCast(@alignCast(ctx));`), or what an `if` or
+`while` captures from one, or is a container-level `var`. It is reported
+when,
 after the store and on its path, before the errdefer's block ends,
 something makes the function fail: a `try`, a `return error.X`, or a
 handler that returns the error it caught.
@@ -459,6 +463,56 @@ names what holds it (`errdefer _ = self.names.pop();`,
 to a call that does not free it (`errdefer self.disown(conn);`); and a
 failure on a branch the store is not on, or after a `return`, `break` or
 `continue` that ends its path.
+
+## Rule eight: torn
+
+An optional or union built in place by an initializer that can fail, which
+`deinit` frees.
+
+```zig
+self.pending = .{
+    .start = target.start,
+    .removed = removed,
+    .selections_before = try self.gpa.dupe(Selection, self.selections.items),
+};
+```
+
+Zig 0.17.0 builds an initializer straight in the place it is assigned to,
+a field at a time, as alias explains, and an optional reads as set, or a
+union as tagged, before any of its fields is made. When the `try` fails,
+`self.pending` is left set over what was never made, and `self` goes back
+to a caller that still owns it, so `deinit`, which frees what `pending`
+holds, frees whatever `selections_before` happens to hold. It compiles
+clean in every build mode and reads as one step. An agent wrote this in a
+UI framework's text editor, where it stood until a scan found it and a
+test that refused each allocation in turn confirmed the double free.
+
+The fix is to make what can fail first, then assign:
+
+```zig
+const before = try self.gpa.dupe(Selection, self.selections.items);
+self.pending = .{ .start = target.start, .removed = removed, .selections_before = before };
+```
+
+### What torn reports
+
+An assignment of a struct or array initializer, through parentheses and
+`@as`, with a `try`, or a `catch` or `orelse` that returns, in one of its
+fields or elements, as deep as initializers nest, to a field whose type
+the file declares as an optional or a union, reached as kept's stores are
+(through a parameter, a local pointer made from one, or what an `if` or
+`while` captures from one, or a container-level `var`), where a function
+of the file named `deinit` names that field.
+
+Not reported: a place left half-written, the fields before what failed new
+and the rest as they were, which is wrong only if something reads it after
+the error, which the syntax cannot see (over the public projects these
+were mostly a result the caller drops on the error); a place whose type
+the file does not show, or that no `deinit` names; a local, or memory the
+function makes; a place an `errdefer` declared before it resets
+(`errdefer self.pending = null;`); an assignment in a function named
+`init...`, whose caller deinits nothing if it fails; and a `catch` that
+falls back (`f() catch 0`), which cannot fail.
 
 ## Install
 
@@ -665,8 +719,8 @@ is not a zigvet rule. Code that is right but larger or slower than it could
 be is out of scope as well: what it costs depends on the build mode and on
 how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
-for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill`, `owner`
-and `kept` so far.
+for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill`,
+`owner`, `kept` and `torn` so far.
 
 ## Tests
 

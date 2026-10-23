@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -47,6 +47,7 @@ pub const Finding = struct {
         refill: Refill,
         owner: Owner,
         kept: Kept,
+        torn: Torn,
         allow: Allow,
     };
 
@@ -118,6 +119,14 @@ pub const Finding = struct {
         fails: []const u8,
     };
 
+    pub const Torn = struct {
+        /// The optional or union the initializer is built in, as written:
+        /// `self.pending`.
+        place: []const u8,
+        /// What can fail inside it, as written: `self.gpa.dupe`.
+        fails: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -140,6 +149,7 @@ pub const Finding = struct {
             .refill => .refill,
             .owner => .owner,
             .kept => .kept,
+            .torn => .torn,
             .allow => null,
         };
     }
@@ -199,6 +209,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .kept => |k| try w.print("`{s}` freed here if {s}, but {s} already holds it", .{
             k.name, k.fails, k.holder,
+        }),
+        .torn => |t| try w.print("{s} is built in place, so if {s} fails it is left set over what was never made, and deinit frees it", .{
+            t.place, t.fails,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
