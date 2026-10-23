@@ -79,6 +79,32 @@ pub const Types = struct {
         return null;
     }
 
+    /// The file's own function a call's `fn_expr` names, and 1 when it is
+    /// called as a method, whose receiver is its first argument, else 0:
+    /// by name (`keep(b)`), through its type (`Store.keep(s, b)`), or as a
+    /// method of a binding whose type the file declares (`self.keep(b)`).
+    pub fn callee(t: Types, fn_expr: Node.Index) ?struct { Node.Index, usize } {
+        const tree = t.tree;
+        switch (tree.nodeTag(fn_expr)) {
+            .identifier => {
+                const fn_decl = t.declaredFn(fn_expr, tree.tokenSlice(tree.nodeMainToken(fn_expr))) orelse return null;
+                return .{ fn_decl, 0 };
+            },
+            .field_access => {
+                const receiver, const name_token = tree.nodeData(fn_expr).node_and_token;
+                const name = tree.tokenSlice(name_token);
+                // `Store.keep(s, b)`, through the type.
+                if (t.containerOf(receiver, 0)) |container| {
+                    return .{ memberFn(tree, container, name) orelse return null, 0 };
+                }
+                const of = t.typeOf(receiver, 0) orelse return null;
+                const container = t.containerOf(pointee(tree, of) orelse of, 0) orelse return null;
+                return .{ memberFn(tree, container, name) orelse return null, 1 };
+            },
+            else => return null,
+        }
+    }
+
     /// The type of `node` as the file writes it: a binding's, or a field's
     /// reached from one through structs the file declares.
     pub fn typeOf(t: Types, node: Node.Index, depth: u8) ?Node.Index {

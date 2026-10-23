@@ -22,8 +22,9 @@
 //! says nothing.
 //!
 //! A function takes a parameter on failure when its body has
-//! `errdefer x.free(p)`, `errdefer x.destroy(p)` or `errdefer p.deinit(...)`
-//! for the parameter `p`, and something after it can fail: a `try` or a
+//! `errdefer x.free(p)`, `errdefer x.destroy(p)`,
+//! `errdefer x.rawFree(p, ...)` or `errdefer p.deinit(...)` for the
+//! parameter `p`, and something after it can fail: a `try` or a
 //! `return error.X`. A call to it under `try` is reported when the argument
 //! for that parameter is a name that an `errdefer` of the caller, declared
 //! before the call in a block around it, frees the same way. The function
@@ -124,7 +125,7 @@ const Rule = struct {
     /// failure.
     fn call(r: *Rule, try_node: Node.Index, operand: Node.Index, full: Ast.full.Call) Allocator.Error!void {
         const tree = r.tree;
-        const fn_decl, const receiver = r.callee(full.ast.fn_expr) orelse return;
+        const fn_decl, const receiver = r.types.callee(full.ast.fn_expr) orelse return;
         for (try r.takes(fn_decl)) |param| {
             // A method's receiver is its first parameter.
             if (param < receiver) continue;
@@ -143,30 +144,6 @@ const Rule = struct {
                     .argument = name,
                 } },
             });
-        }
-    }
-
-    /// The file's own function `fn_expr` calls, and 1 when it is called as
-    /// a method, whose receiver is its first argument, else 0.
-    fn callee(r: *Rule, fn_expr: Node.Index) ?struct { Node.Index, usize } {
-        const tree = r.tree;
-        switch (tree.nodeTag(fn_expr)) {
-            .identifier => {
-                const fn_decl = r.types.declaredFn(fn_expr, tree.tokenSlice(tree.nodeMainToken(fn_expr))) orelse return null;
-                return .{ fn_decl, 0 };
-            },
-            .field_access => {
-                const receiver, const name_token = tree.nodeData(fn_expr).node_and_token;
-                const name = tree.tokenSlice(name_token);
-                // `Store.keep(s, b)`, through the type.
-                if (r.types.containerOf(receiver, 0)) |container| {
-                    return .{ types.memberFn(tree, container, name) orelse return null, 0 };
-                }
-                const of = r.types.typeOf(receiver, 0) orelse return null;
-                const container = r.types.containerOf(types.pointee(tree, of) orelse of, 0) orelse return null;
-                return .{ types.memberFn(tree, container, name) orelse return null, 1 };
-            },
-            else => return null,
         }
     }
 
@@ -313,11 +290,14 @@ test "an allocation freed by the caller's errdefer and the callee's (#40)" {
         \\fn make(gpa: Allocator) !void { const node = try gpa.create(Node); errdefer gpa.destroy(node); try adopt(gpa, node); }
         \\fn hold(list: List) !void { errdefer { log(); list.deinit(); } try check(); }
         \\fn give(gpa: Allocator) !void { var list: List = .empty; errdefer list.deinit(); try hold(list); _ = gpa; }
+        \\fn adoptRaw(gpa: Allocator, buf: []u8) !void { errdefer gpa.rawFree(buf, .@"1", 0); if (buf.len == 0) return error.Empty; }
+        \\fn makeRaw(gpa: Allocator) !void { const buf = (gpa.rawAlloc(4, .@"1", 0) orelse return error.OutOfMemory)[0..4]; errdefer gpa.rawFree(buf, .@"1", 0); try adoptRaw(gpa, buf); }
     ,
         \\4:131 self.keep bytes
         \\5:87 Store.keep b
         \\8:100 adopt node
         \\10:86 hold list
+        \\12:156 adoptRaw buf
         \\
     );
 }

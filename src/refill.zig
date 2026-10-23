@@ -13,21 +13,26 @@
 //! allocator says "double free" when a test makes it fail, and a release
 //! build corrupts the heap and says nothing.
 //!
-//! What frees is `x.free(place)`, `x.destroy(place)` or
-//! `place.deinit(...)`, as a statement or the body of an `if`, or
+//! What frees is `x.free(place)`, `x.destroy(place)`,
+//! `x.rawFree(place, ...)` or `place.deinit(...)`, or a call to one of the
+//! file's own functions that frees the parameter the place is passed to
+//! (`self.destroyLocal(self.one)`, where a statement of `destroyLocal` frees
+//! `local` or a field of it), as a statement or the body of an `if`, or
 //! `if (place) |old| x.free(old)`. The place has to be a field or what a
 //! pointer points at (`self.items`, `a.*`). It is reported when a later
 //! statement of the same block stores to it, or to what holds it written
-//! whole (`history.* = .{ ... }`), and something can fail first: a `try`, or
-//! a `catch` that returns, in the stored value or a statement between.
+//! whole (`history.* = .{ ... }`), and something can fail first: a `try`,
+//! or a `catch` or `orelse` that returns (`orelse return
+//! error.OutOfMemory`), in the stored value or a statement between.
 //!
 //! Not reported: a place reset first (`self.items = &.{}`, or any store
-//! into it), by an `errdefer` or by the `catch` that handles the failure,
-//! or perhaps by a call between that is handed what holds it
-//! (`self.clear()`); a field of a `var` local, which holds a struct by
-//! value that the failing function throws away (Zig rejects a `var` that
-//! is never changed, and a store to a field changes no pointer); and a
-//! bare local, which an `errdefer` of its own can cover.
+//! into it), by an `errdefer` or by the `catch` or `orelse` that handles
+//! the failure, or perhaps by a call between that is handed what holds it
+//! (`self.clear()`), when nothing has failed before that call; a field of
+//! a `var` local, which holds a struct by value that the failing function
+//! throws away (Zig rejects a `var` that is never changed, and a store to a
+//! field changes no pointer); and a bare local, which an `errdefer` of its
+//! own can cover.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -107,16 +112,21 @@ const Rule = struct {
     arena: Allocator,
     tree: *const Ast,
     findings: *std.ArrayList(Finding),
-    /// Every node's parent, made for the first place found refilled.
+    /// What the file shows of its types, made for the first place found
+    /// refilled or the first call to a function that frees a parameter.
+    types: ?types.Types = null,
+    /// Every node's parent, made with `types`.
     parents: []const Node.OptionalIndex = &.{},
+    /// The names of the file's functions that free one of their
+    /// parameters, found at the first call that frees nothing itself.
+    freeing: ?std.StringHashMapUnmanaged(void) = null,
 
-    /// The place `statement` frees: `x.free(place)`, `x.destroy(place)` or
-    /// `place.deinit(...)`, alone or as the body of an `if` with no `else`,
-    /// or `if (place) |old| x.free(old)`.
+    /// The place `statement` frees, as `releaseOf` finds it, alone or as
+    /// the body of an `if` with no `else`, or `if (place) |old| x.free(old)`.
     fn release(r: *Rule, statement: Node.Index) Allocator.Error!?Release {
         const t = r.tree;
         const full = t.fullIf(statement) orelse {
-            const call, const operand = releaseCall(t, statement) orelse return null;
+            const call, const operand = try r.releaseOf(statement) orelse return null;
             return r.placed(call, operand);
         };
         if (full.ast.else_expr != .none) return null;
@@ -126,13 +136,49 @@ const Rule = struct {
             if (statements.len != 1) return null;
             body = statements[0];
         }
-        const call, const operand = releaseCall(t, body) orelse return null;
+        const call, const operand = try r.releaseOf(body) orelse return null;
         const token = full.payload_token orelse return r.placed(call, operand);
         // `if (place) |old| x.free(old)` frees the place.
         const name = if (t.tokenTag(token) == .asterisk) token + 1 else token;
         if (t.nodeTag(operand) != .identifier) return null;
         if (!std.mem.eql(u8, t.tokenSlice(t.nodeMainToken(operand)), t.tokenSlice(name))) return null;
         return r.placed(call, full.ast.cond_expr);
+    }
+
+    /// `releaseCall`, or a call to one of the file's own functions that
+    /// frees the parameter its argument is passed to: the call and the
+    /// argument.
+    fn releaseOf(r: *Rule, node: Node.Index) Allocator.Error!?struct { Node.Index, Node.Index } {
+        const t = r.tree;
+        if (releaseCall(t, node)) |found| return .{ found[0], found[1] };
+        var buffer: [1]Node.Index = undefined;
+        const call = t.fullCall(&buffer, node) orelse return null;
+        if (call.ast.params.len == 0) return null;
+        const name = switch (t.nodeTag(call.ast.fn_expr)) {
+            .identifier => t.tokenSlice(t.nodeMainToken(call.ast.fn_expr)),
+            .field_access => t.tokenSlice(t.nodeData(call.ast.fn_expr).node_and_token[1]),
+            else => return null,
+        };
+        if (r.freeing == null) r.freeing = try freeingNames(r.arena, t);
+        if (!r.freeing.?.contains(name)) return null;
+        const fn_decl, const receiver = (try r.typesOf()).callee(call.ast.fn_expr) orelse return null;
+        for (try freedParams(r.arena, t, fn_decl)) |param| {
+            // A method's receiver is its first parameter.
+            if (param < receiver) continue;
+            const at = param - receiver;
+            if (at < call.ast.params.len) return .{ node, call.ast.params[at] };
+        }
+        return null;
+    }
+
+    /// What the file shows of its types, and every node's parent, made
+    /// once.
+    fn typesOf(r: *Rule) Allocator.Error!types.Types {
+        if (r.types == null) {
+            r.types = try .init(r.arena, r.tree);
+            r.parents = r.types.?.parents;
+        }
+        return r.types.?;
     }
 
     /// A release of `place` by `call`, if `place` is a field or what a
@@ -166,7 +212,7 @@ const Rule = struct {
             if (refill) |store| {
                 const end = t.lastToken(store);
                 const point = fails orelse try r.failing(nodes.items, end, freed.path) orelse return;
-                if (r.parents.len == 0) r.parents = (try types.Types.init(r.arena, t)).parents;
+                _ = try r.typesOf();
                 if (r.heldByValue(freed.call, freed.path.root)) return;
                 if (try r.resetOnError(freed, point)) return;
                 return r.findings.append(r.arena, .{
@@ -178,8 +224,14 @@ const Rule = struct {
                     } },
                 });
             }
-            if (other or try r.handsOver(nodes.items, freed.path)) return;
-            if (fails == null) fails = try r.failing(nodes.items, std.math.maxInt(Ast.TokenIndex), freed.path);
+            if (other) return;
+            // A call that could reset the place excuses only what fails
+            // after it: what fails before it leaves the place holding what
+            // was freed.
+            if (fails == null) {
+                if (try r.handsOver(nodes.items, freed.path)) return;
+                fails = try r.failing(nodes.items, std.math.maxInt(Ast.TokenIndex), freed.path);
+            }
         }
     }
 
@@ -271,7 +323,7 @@ const Rule = struct {
 
     /// The first of `nodes`, before token `end`, that can make the function
     /// fail while `place` still holds what was freed: a `try`, or a `catch`
-    /// whose handler returns without storing to the place first
+    /// or `orelse` whose handler returns without storing to the place first
     /// (`catch |err| { place = null; return err; }` leaves nothing freed).
     fn failing(r: *Rule, nodes: []const Node.Index, end: Ast.TokenIndex, place: Path) Allocator.Error!?Node.Index {
         const t = r.tree;
@@ -280,7 +332,7 @@ const Rule = struct {
             if (t.nodeMainToken(node) >= end) continue;
             const fails = switch (t.nodeTag(node)) {
                 .@"try" => true,
-                .@"catch" => fails: {
+                .@"catch", .@"orelse" => fails: {
                     const handler = t.nodeData(node).node_and_node[1];
                     if (!returns(t, handler)) break :fails false;
                     var handled: std.ArrayList(Node.Index) = .empty;
@@ -354,8 +406,8 @@ const Rule = struct {
     }
 };
 
-/// `x.free(operand)` or `x.destroy(operand)`, or `operand.deinit(...)`:
-/// the call and what it frees.
+/// `x.free(operand)`, `x.destroy(operand)` or `x.rawFree(operand, ...)`, or
+/// `operand.deinit(...)`: the call and what it frees.
 pub fn releaseCall(t: *const Ast, node: Node.Index) ?struct { Node.Index, Node.Index } {
     var buffer: [1]Node.Index = undefined;
     const call = t.fullCall(&buffer, node) orelse return null;
@@ -363,9 +415,73 @@ pub fn releaseCall(t: *const Ast, node: Node.Index) ?struct { Node.Index, Node.I
     const receiver, const name_token = t.nodeData(call.ast.fn_expr).node_and_token;
     const name = t.tokenSlice(name_token);
     if (std.mem.eql(u8, name, "deinit")) return .{ node, receiver };
+    // `rawFree(memory, alignment, return_address)`, an allocator's own.
+    if (std.mem.eql(u8, name, "rawFree") and call.ast.params.len == 3) return .{ node, call.ast.params[0] };
     if (call.ast.params.len != 1) return null;
     if (std.mem.eql(u8, name, "free") or std.mem.eql(u8, name, "destroy")) return .{ node, call.ast.params[0] };
     return null;
+}
+
+/// The names of the file's functions that free one of their parameters, as
+/// `freedParams` finds them.
+fn freeingNames(arena: Allocator, t: *const Ast) Allocator.Error!std.StringHashMapUnmanaged(void) {
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    for (t.nodes.items(.tag), 0..) |tag, i| {
+        if (tag != .fn_decl) continue;
+        const fn_decl: Node.Index = @fromBackingInt(@intCast(i));
+        if ((try freedParams(arena, t, fn_decl)).len == 0) continue;
+        var buffer: [1]Node.Index = undefined;
+        const proto = t.fullFnProto(&buffer, t.nodeData(fn_decl).node_and_node[0]).?;
+        try names.put(arena, t.tokenSlice(proto.name_token orelse continue), {});
+    }
+    return names;
+}
+
+/// The parameters `fn_decl` frees, by index: each one a statement of its
+/// body releases, or a field of it, alone or as the body of an `if` with no
+/// `else` (`self.gpa.free(local.bytes)` frees `local`).
+fn freedParams(arena: Allocator, t: *const Ast, fn_decl: Node.Index) Allocator.Error![]const usize {
+    var buffer: [1]Node.Index = undefined;
+    const proto = t.fullFnProto(&buffer, t.nodeData(fn_decl).node_and_node[0]).?;
+    var block: [2]Node.Index = undefined;
+    const statements = t.blockStatements(&block, t.nodeData(fn_decl).node_and_node[1]) orelse return &.{};
+    var found: std.ArrayList(usize) = .empty;
+    var params = proto.iterate(t);
+    var index: usize = 0;
+    while (params.next()) |param| : (index += 1) {
+        const name = t.tokenSlice(param.name_token orelse continue);
+        for (statements) |statement| {
+            var body = statement;
+            if (t.fullIf(statement)) |full| {
+                if (full.ast.else_expr != .none or full.payload_token != null) continue;
+                body = full.ast.then_expr;
+                var inner: [2]Node.Index = undefined;
+                if (t.blockStatements(&inner, body)) |one| {
+                    if (one.len != 1) continue;
+                    body = one[0];
+                }
+            }
+            _, const operand = releaseCall(t, body) orelse continue;
+            if (std.mem.eql(u8, rootName(t, operand) orelse continue, name)) {
+                try found.append(arena, index);
+                break;
+            }
+        }
+    }
+    return found.items;
+}
+
+/// The variable `node` is reached from: `local` of `local.bytes` or
+/// `local.*`.
+fn rootName(t: *const Ast, node: Node.Index) ?[]const u8 {
+    var n = node;
+    while (true) switch (t.nodeTag(n)) {
+        .identifier => return t.tokenSlice(t.nodeMainToken(n)),
+        .field_access, .unwrap_optional, .grouped_expression => n = t.nodeData(n).node_and_token[0],
+        .array_access => n = t.nodeData(n).node_and_node[0],
+        .deref => n = t.nodeData(n).node,
+        else => return null,
+    };
 }
 
 /// Whether `node` is or holds a `return`.
@@ -379,8 +495,8 @@ fn returns(t: *const Ast, node: Node.Index) bool {
     return false;
 }
 
-/// What fails at `point`, as written: the function a `try` or `catch`
-/// calls, or the expression.
+/// What fails at `point`, as written: the function a `try`, `catch` or
+/// `orelse` calls, or the expression.
 fn what(t: *const Ast, point: Node.Index) []const u8 {
     var operand = switch (t.nodeTag(point)) {
         .@"try" => t.nodeData(point).node,
@@ -431,6 +547,10 @@ test "a place freed, then refilled by something that can fail first (#39)" {
         \\fn pointerLocal(self: *Editor) !void { const top = &self.undo[0]; self.gpa.free(top.after); top.after = try self.gpa.dupe(u8, self.now); }
         \\fn pointerVar(gpa: Allocator, list: *List) !void { var node: *Node = list.first; gpa.free(node.name); node.name = try gpa.dupe(u8, "x"); node = node.next; }
         \\fn captureLoop(gpa: Allocator, rows: []Row) !void { for (rows) |*row| { gpa.free(row.cells); row.cells = try gpa.alloc(u8, 4); } }
+        \\fn early(self: *Rows, n: usize) !void { self.gpa.free(self.items); const names = try self.gpa.alloc(u8, 1); _ = self.width(); self.items = try self.gpa.alloc(u32, n); _ = names; }
+        \\fn orelsed(gpa: Allocator, s: *S) !void { gpa.free(s.bytes); const b = gpa.rawAlloc(16, .@"16", 0) orelse return error.OutOfMemory; s.bytes = b[0..16]; }
+        \\fn orelseBlock(gpa: Allocator, s: *S) !void { gpa.free(s.bytes); const b = s.pool.take() orelse { log(); return error.OutOfMemory; }; s.bytes = b; }
+        \\fn rawFreed(gpa: Allocator, s: *S, n: usize) !void { gpa.rawFree(s.bytes, .@"1", 0); s.bytes = try gpa.alloc(u8, n); }
     ,
         \\1:42 self.items <- self.gpa.alloc
         \\2:63 history.ends <- gpa.alloc
@@ -443,6 +563,10 @@ test "a place freed, then refilled by something that can fail first (#39)" {
         \\9:67 top.after <- self.gpa.dupe
         \\10:82 node.name <- gpa.dupe
         \\11:73 row.cells <- gpa.alloc
+        \\12:41 self.items <- self.gpa.alloc
+        \\13:43 s.bytes <- gpa.rawAlloc
+        \\14:47 s.bytes <- s.pool.take
+        \\15:54 s.bytes <- gpa.alloc
         \\
     );
 }
@@ -464,5 +588,48 @@ test "not reported: reset first, made first, by value, a bare local, or nothing 
         \\fn caughtHere(gpa: Allocator, s: *S) void { gpa.destroy(s.node); s.node = gpa.create(Node) catch unreachable; }
         \\fn withElse(gpa: Allocator, s: *S, n: usize) !void { if (n > 0) gpa.free(s.items) else log(); s.items = try gpa.alloc(u8, n); }
         \\fn resetInCatch(gpa: Allocator, s: *S, name: []const u8) void { if (s.name) |old| gpa.free(old); s.name = gpa.dupe(u8, name) catch |err| { s.name = null; log(err); return; }; }
+        \\fn callFirst(self: *Rows, n: usize) !void { self.gpa.free(self.items); _ = self.width(); self.items = try self.gpa.alloc(u32, n); }
+        \\fn orelseHere(gpa: Allocator, s: *S) void { gpa.free(s.bytes); s.bytes = s.pool.take() orelse &.{}; }
+        \\fn orelseReset(gpa: Allocator, s: *S) !void { gpa.free(s.bytes); s.bytes = s.pool.take() orelse { s.bytes = &.{}; return error.OutOfMemory; }; }
+    , "");
+}
+
+test "a place freed through the file's own function (#64)" {
+    try expectRefills(
+        \\const S = struct {
+        \\    gpa: Allocator,
+        \\    fn destroyLocal(self: *S, local: Local) void { self.gpa.free(local.bytes); }
+        \\    fn helped(self: *S) !void { self.destroyLocal(self.one); self.one = .{ .bytes = try self.gpa.alloc(u8, 16) }; }
+        \\    fn typed(self: *S) !void { S.destroyLocal(self, self.one); self.one = .{ .bytes = try self.gpa.alloc(u8, 16) }; }
+        \\    fn entry(self: *S, key: u64) !void { const e = try self.map.getOrPut(self.gpa, key); if (e.found_existing) self.destroyLocal(e.value_ptr.*); const b = self.gpa.rawAlloc(16, .@"16", 0) orelse { return error.OutOfMemory; }; e.value_ptr.* = .{ .bytes = b[0..16] }; }
+        \\};
+        \\fn drop(gpa: Allocator, node: *Node) void { gpa.destroy(node); }
+        \\fn swap(gpa: Allocator, t: *T) !void { drop(gpa, t.node); t.node = try gpa.create(Node); }
+        \\fn maybeDrop(gpa: Allocator, local: Local) void { if (local.owned) gpa.free(local.bytes); }
+        \\fn maybe(gpa: Allocator, t: *T) !void { maybeDrop(gpa, t.one); t.one = .{ .bytes = try gpa.alloc(u8, 4) }; }
+    ,
+        \\4:33 self.one <- self.gpa.alloc
+        \\5:32 self.one <- self.gpa.alloc
+        \\6:112 e.value_ptr.* <- self.gpa.rawAlloc
+        \\9:40 t.node <- gpa.create
+        \\11:41 t.one <- gpa.alloc
+        \\
+    );
+}
+
+test "not reported: a function that frees nothing, or what the place points at, or the new value made first" {
+    try expectRefills(
+        \\const S = struct {
+        \\    gpa: Allocator,
+        \\    fn destroyLocal(self: *S, local: Local) void { self.gpa.free(local.bytes); }
+        \\    fn note(self: *S, local: Local) void { self.log(local.bytes.len); }
+        \\    fn noted(self: *S) !void { self.note(self.one); self.one = .{ .bytes = try self.gpa.alloc(u8, 16) }; }
+        \\    fn destroyAt(self: *S, local: *Local) void { self.gpa.free(local.bytes); local.* = .{ .bytes = &.{} }; }
+        \\    fn pointed(self: *S) !void { self.destroyAt(&self.one); self.one = .{ .bytes = try self.gpa.alloc(u8, 16) }; }
+        \\    fn madeFirst(self: *S) !void { const b = try self.gpa.alloc(u8, 16); self.destroyLocal(self.one); self.one = .{ .bytes = b }; }
+        \\    fn reset(self: *S) void { self.gpa.free(self.items); }
+        \\    fn receiverOnly(self: *S) !void { self.reset(); self.items = try self.gpa.alloc(u8, 4); }
+        \\};
+        \\fn elsewhere(t: *T) !void { other.drop(t.node); t.node = try make(); }
     , "");
 }
