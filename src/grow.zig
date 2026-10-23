@@ -161,7 +161,7 @@ const Rule = struct {
         const text = if (t.typeOf(place, 0)) |of|
             r.tree.getNodeSource(of)
         else if (r.tree.nodeTag(place) == .identifier)
-            r.tree.getNodeSource(localInit(t, place) orelse return false)
+            r.tree.getNodeSource(t.localInit(place) orelse return false)
         else
             return false;
         // The type's own name, before its arguments: not `List(HashMap(..))`.
@@ -406,28 +406,6 @@ fn isPlace(tree: *const Ast, node: Node.Index) bool {
     var n = node;
     while (tree.nodeTag(n) == .field_access) n = tree.nodeData(n).node_and_token[0];
     return tree.nodeTag(n) == .identifier;
-}
-
-/// The initializer of the local `use` names, when it has one.
-fn localInit(t: types.Types, use: Node.Index) ?Node.Index {
-    const tree = t.tree;
-    const name = tree.tokenSlice(tree.nodeMainToken(use));
-    var child = use;
-    var up = t.parents[@backingInt(use)].unwrap();
-    while (up) |parent| : ({
-        child = parent;
-        up = t.parents[@backingInt(parent)].unwrap();
-    }) {
-        if (tree.nodeTag(parent) == .fn_decl) return null;
-        var buffer: [2]Node.Index = undefined;
-        const statements = tree.blockStatements(&buffer, parent) orelse continue;
-        for (statements) |statement| {
-            if (statement == child) break;
-            const decl = tree.fullVarDecl(statement) orelse continue;
-            if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) return decl.ast.init_node.unwrap();
-        }
-    }
-    return null;
 }
 
 /// Whether `child` is the body of `loop`, or its continue expression,
