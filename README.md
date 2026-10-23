@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: six rules. Escape, run over the 0.17.0 standard library and
+Status: seven rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive, which it now
 tells apart (below). Alias, run over the same standard library and seven
@@ -21,7 +21,10 @@ file. Refill, over the same code, reports eleven, all real: two in the
 standard library, four in three application repos, and five in third-party
 UI code one of them keeps for reference. Owner, over the same code,
 reports three, all real: two in two application repos, and a copy of one
-of them another keeps.
+of them another keeps. Kept, over the same code, reports four, all real,
+in one application repo's fake storage server; over fourteen public Zig
+projects, 23, of which 22 are real and one leaves a freed argument in a
+list its caller throws away.
 
 ## Rule one: escape
 
@@ -391,6 +394,72 @@ Not reported: a call whose error is handled rather than returned with
 call; an argument that is not a plain name; and a function declared in
 another file.
 
+## Rule seven: kept
+
+An `errdefer` that frees what the function has already stored where its
+caller keeps it, and then something fails.
+
+```zig
+fn put(self: *Store, name: []const u8) !void {
+    const owned = try self.gpa.dupe(u8, name);
+    errdefer self.gpa.free(owned);
+    try self.names.append(self.gpa, owned);
+    try self.sizes.append(self.gpa, name.len);
+}
+```
+
+When the second `append` fails, the errdefer frees `owned`, but
+`self.names` already holds it, and `self` goes back to a caller that still
+owns it. Its `deinit` frees `owned` again, and anything that reads `names`
+first reads freed memory. It compiles clean in every build mode, each line
+reads correctly, and it goes wrong only when the step after the store
+fails, the path tests seldom take: the debugging allocator says "double
+free" when a test makes it fail, and a release build corrupts the heap and
+says nothing. It is the third shape of one mistake, after refill and owner:
+a failure that leaves what the caller owns holding freed memory. Agents
+wrote it in two of the application repos, where tests that refused each
+allocation in turn found it, and it is in a compiler, an editor, a browser
+and a terminal emulator among the public projects.
+
+The fix is to make the store the last step that can fail:
+
+```zig
+const owned = try self.gpa.dupe(u8, name);
+errdefer self.gpa.free(owned);
+try self.names.ensureUnusedCapacity(self.gpa, 1);
+try self.sizes.append(self.gpa, name.len);
+self.names.appendAssumeCapacity(owned);
+```
+
+or to undo the store in an `errdefer` after it
+(`errdefer _ = self.names.pop();`).
+
+### What kept reports
+
+An `errdefer` of `x.free(name)`, `x.destroy(name)`, `x.rawFree(name, ...)`
+or `name.deinit(...)`, alone or in a block, and after it a store of `name`
+itself: handed to `append`, `appendAssumeCapacity`, `insert`, `put`,
+`putAssumeCapacity` or `putNoClobber`, as an argument or a field of one
+(`.{ .name = name }`), or assigned to a field or what a pointer points at
+(`self.pty = name`, or in a field initializer), where what holds it is
+reached through a parameter, or a local pointer made from one
+(`const self: *T = @ptrCast(@alignCast(ctx));`). It is reported when,
+after the store and on its path, before the errdefer's block ends,
+something makes the function fail: a `try`, a `return error.X`, or a
+handler that returns the error it caught.
+
+Not reported: a store into a local, which the failing function throws
+away; a value made from `name` (`name.toOwnedSlice(...)`, `name.len`),
+which is not what the errdefer frees; a store in a function that makes
+what holds it, one named `init...` or one that writes it whole
+(`self.* = .{ ... }`), whose caller holds nothing of it if it fails; a
+store a `defer` or `errdefer` armed before the failure can undo, one that
+names what holds it (`errdefer _ = self.names.pop();`,
+`defer self.pending = null;`) or, declared after the store, hands `name`
+to a call that does not free it (`errdefer self.disown(conn);`); and a
+failure on a branch the store is not on, or after a `return`, `break` or
+`continue` that ends its path.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -596,8 +665,8 @@ is not a zigvet rule. Code that is right but larger or slower than it could
 be is out of scope as well: what it costs depends on the build mode and on
 how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
-for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill` and
-`owner` so far.
+for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill`, `owner`
+and `kept` so far.
 
 ## Tests
 
