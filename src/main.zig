@@ -331,6 +331,7 @@ test {
     _ = @import("owner.zig");
     _ = @import("refill.zig");
     _ = @import("report.zig");
+    _ = @import("sweep.zig");
     _ = @import("torn.zig");
     _ = @import("twice.zig");
     _ = @import("types.zig");

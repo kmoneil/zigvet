@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -49,6 +49,7 @@ pub const Finding = struct {
         kept: Kept,
         torn: Torn,
         twice: Twice,
+        sweep: Sweep,
         allow: Allow,
     };
 
@@ -136,6 +137,15 @@ pub const Finding = struct {
         fails: []const u8,
     };
 
+    pub const Sweep = struct {
+        /// The list the loop walks, as written: `self.queue`.
+        list: []const u8,
+        /// What can fail in the loop, as written: `self.send`.
+        fails: []const u8,
+        /// What empties the list after the loop, as written.
+        reset: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -160,6 +170,7 @@ pub const Finding = struct {
             .kept => .kept,
             .torn => .torn,
             .twice => .twice,
+            .sweep => .sweep,
             .allow => null,
         };
     }
@@ -225,6 +236,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .twice => |t| try w.print("`{s}` here, and the errdefer above it does the same again if {s}", .{
             t.call, t.fails,
+        }),
+        .sweep => |s| try w.print("freed here, but if {s} fails on a later turn, {s} still holds what earlier turns freed, since only `{s}` after the loop empties it", .{
+            s.fails, s.list, s.reset,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
