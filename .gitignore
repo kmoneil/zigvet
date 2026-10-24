@@ -18,7 +18,8 @@ _issues/
 .idea/
 .vscode/
 
-# AI Files (CLAUDE.md is tracked — it is project law, not scratch)
+# AI files, local only. CLAUDE.md is how we work on this machine (karte,
+# issues) and is never committed; .karte/project, the board's pointer, is.
 CLAUDE.md
 .claude/
 
