@@ -57,6 +57,9 @@ pub fn build(b: *std.Build) void {
     const test_options = b.addOptions();
     test_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
     test_options.addOptionPath("zigvet_exe", exe.getEmittedBin());
+    // `zig build test -Dupdate`: a rule test or case whose findings moved
+    // has its expectation rewritten to them (src/expect.zig).
+    test_options.addOption(bool, "update", b.option(bool, "update", "Rewrite the expected findings that moved to what the rules report") orelse false);
     const test_module = zigvetModule(b, target, optimize, options);
     test_module.addOptions("test_options", test_options);
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));

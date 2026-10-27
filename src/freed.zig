@@ -37,6 +37,7 @@ const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
 const escape = @import("escape.zig");
+const expect = @import("expect.zig");
 const kept = @import("kept.zig");
 const refill = @import("refill.zig");
 const report = @import("report.zig");
@@ -243,7 +244,7 @@ fn expectFreed(source: [:0]const u8, expected: []const u8) !void {
         const errdefer_only = std.mem.eql(u8, finding.hint, hint_free);
         try out.writer.print("{d}:{d} {s} <- {s}{s}\n", .{ loc.line + 1, loc.column + 1, f.returned, f.release, if (errdefer_only) " (errdefer)" else "" });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a function returns what its own defer frees (#54)" {

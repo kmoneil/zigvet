@@ -37,6 +37,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const kept = @import("kept.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
@@ -185,7 +186,7 @@ fn expectCached(source: [:0]const u8, expected: []const u8) !void {
         const c = finding.detail.cached;
         try out.writer.print("{d}:{d} {s}{s}\n", .{ loc.line + 1, loc.column + 1, c.path, if (c.walked) " walked" else "" });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a directory of the build root listed with nothing told to the configure cache (#94)" {

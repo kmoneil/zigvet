@@ -1196,6 +1196,14 @@ every case with the Zig compiler and fails if it rejects one, so each case
 is checked to be code Zig accepts. If a later Zig release starts catching a
 shape, its case fails and the rule should drop it.
 
+When a change moves where findings point, or rewords them,
+`zig build test -Dupdate` rewrites each expectation that no longer
+matches, in the rule tests and in the cases, to what the rules report, and
+prints each one it rewrote with its file and line. Read the diff before it
+is committed: an expectation is only as right as its reading. A test that
+expected nothing and now finds something, or the other way round, still
+fails, as that is a rule gaining or losing a finding, not one moving.
+
 `scripts/corpus-diff.sh` runs two builds of zigvet over the same
 directories, by default the latest tag and the working tree, and prints
 only the reports that differ, with each build's time. Run it before a rule

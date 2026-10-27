@@ -48,6 +48,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const kept = @import("kept.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
@@ -550,7 +551,7 @@ fn expectGrow(source: [:0]const u8, expected: []const u8) !void {
         const g = finding.detail.grow;
         try out.writer.print("{d}:{d} {s} {s} {s}\n", .{ loc.line + 1, loc.column + 1, g.call, g.moved, if (g.pointer.len == 0) "(for)" else g.pointer });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a pointer into a list's items kept across a call that can move them (#55)" {

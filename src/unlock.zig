@@ -31,6 +31,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const kept = @import("kept.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
@@ -237,7 +238,7 @@ fn expectUnlock(source: [:0]const u8, expected: []const u8) !void {
         const u = finding.detail.unlock;
         try out.writer.print("{d}:{d} {s} <- {s}\n", .{ loc.line + 1, loc.column + 1, u.lock, u.fails });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a lock left held by a failure before its unlock (#57)" {

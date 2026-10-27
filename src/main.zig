@@ -328,6 +328,7 @@ test {
     _ = @import("clobber.zig");
     _ = @import("copy.zig");
     _ = @import("escape.zig");
+    _ = @import("expect.zig");
     _ = @import("fit.zig");
     _ = @import("flush.zig");
     _ = @import("freed.zig");

@@ -34,6 +34,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const kept = @import("kept.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
@@ -213,7 +214,7 @@ fn expectFlush(source: [:0]const u8, expected: []const u8) !void {
         const f = finding.detail.flush;
         try out.writer.print("{d}:{d} {s} {s}\n", .{ loc.line + 1, loc.column + 1, f.writer, f.buffer });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a buffered file or stream writer written to and never flushed (#58)" {

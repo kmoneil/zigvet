@@ -42,6 +42,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 
@@ -381,7 +382,7 @@ fn expectDropped(source: [:0]const u8, expected: []const u8) !void {
         const c = finding.detail.cancel;
         try out.writer.print("{d}:{d} {s} {s}\n", .{ loc.line + 1, loc.column + 1, c.callee, c.handler });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "in a task's loop, an Io call whose error is dropped" {

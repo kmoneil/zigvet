@@ -43,6 +43,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const kept = @import("kept.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
@@ -370,7 +371,7 @@ fn expectTwice(source: [:0]const u8, expected: []const u8) !void {
         const t = finding.detail.twice;
         try out.writer.print("{d}:{d} {s} <- {s}\n", .{ loc.line + 1, loc.column + 1, t.call, t.fails });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "an errdefer's free written out by hand on a path that then fails (#61)" {

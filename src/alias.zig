@@ -37,6 +37,7 @@ const Writer = std.Io.Writer;
 
 const children = @import("children.zig");
 const escape = @import("escape.zig");
+const expect = @import("expect.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 
@@ -307,7 +308,7 @@ fn expectAliases(source: [:0]const u8, expected: []const u8) !void {
         const a = finding.detail.alias;
         try out.writer.print("{d}:{d} {s} -> {s}, {s}\n", .{ loc.line + 1, loc.column + 1, a.read, a.target, a.stored });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "the measured shapes that read what the initializer already stored" {
