@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -56,6 +56,7 @@ pub const Finding = struct {
         grow: Grow,
         copy: Copy,
         flush: Flush,
+        cached: Cached,
         allow: Allow,
     };
 
@@ -195,6 +196,13 @@ pub const Finding = struct {
         buffer: []const u8,
     };
 
+    pub const Cached = struct {
+        /// The directory listed, as written: `"test"`.
+        path: []const u8,
+        /// Walked, with a dependency on it but on none under it.
+        walked: bool,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -226,6 +234,7 @@ pub const Finding = struct {
             .grow => .grow,
             .copy => .copy,
             .flush => .flush,
+            .cached => .cached,
             .allow => null,
         };
     }
@@ -316,6 +325,10 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .flush => |f| try w.print("'{s}' keeps what is written through it in `{s}` until it is flushed, and nothing here flushes it or hands it on, so the last of it is never written", .{
             f.writer, f.buffer,
         }),
+        .cached => |c| if (c.walked)
+            try w.print("walks `{s}`, and `dependOnDirectoryContents` is not recursive, so a file added to a directory under it is not seen until something else changes the build", .{c.path})
+        else
+            try w.print("lists `{s}` to decide what to build, and nothing here tells Zig's configure cache, so a file added there is not seen until something else changes the build", .{c.path}),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
