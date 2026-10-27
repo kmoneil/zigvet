@@ -31,13 +31,16 @@
 //! Not reported: the `AssumeCapacity` calls, which cannot move anything; a
 //! use in another branch of the `if` or another prong of the `switch` the
 //! call is in, or after a `continue` to a loop the local is declared in,
-//! which takes it again; a pointer taken again before the use; a length,
-//! or `found_existing` or `index`, read out of it, which are copies; a
-//! `getOrPut` that makes a new entry only on a path that leaves at once,
-//! when a `getOrPut` made the pointer and so left a free slot; a list or
-//! map handed to a call (`try fill(&list)`), which only the callee can
-//! judge; and a type the file does not show, such as `std.SegmentedList`,
-//! whose elements never move.
+//! which takes it again; a call that comes, on every path from the
+//! pointer, after the list or map, or what holds it, is stored again
+//! (`s.list = saved;`, `list.* = .empty;`), which grows what was stored; a
+//! pointer taken again before the use; a length, or `found_existing` or
+//! `index`, read out of it, which are copies; a `getOrPut` that makes a new
+//! entry only on a path that leaves at once, when a `getOrPut` made the
+//! pointer and so left a free slot; a list or map handed to a call
+//! (`try fill(&list)`), which only the callee can judge; and a type the
+//! file does not show, such as `std.SegmentedList`, whose elements never
+//! move.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -178,6 +181,7 @@ const Rule = struct {
         for (after) |statement| try within(r.arena, r.tree, statement, &nodes);
         for (nodes.items) |node| {
             if (!r.moves(node, into)) continue;
+            if (try r.replaced(node, block, after, into)) continue;
             if (into.slot_left and try r.insertsOnlyToLeave(node)) continue;
             if (!try r.reached(node, .{ .name = name, .scope = block, .loop = false })) continue;
             return r.add(node, into, name);
@@ -257,6 +261,7 @@ const Rule = struct {
             try within(r.arena, tree, full.ast.then_expr, &nodes);
             for (nodes.items) |inner| {
                 if (!r.moves(inner, into)) continue;
+                if (try r.replaced(inner, node, &.{}, into)) continue;
                 // A pointer capture, `|*item|`, is a pointer kept as well.
                 const watch: Watch = .{ .name = if (by_pointer) capture_name else "", .scope = node, .loop = true };
                 if (!try r.reached(inner, watch)) continue;
@@ -278,6 +283,29 @@ const Rule = struct {
             .list => &list_moves,
             .map => &map_moves,
         });
+    }
+
+    /// Whether `call`, a call that moves, comes after a statement that
+    /// stores another list or map in `into`'s owner, or in what holds it
+    /// (`s.list = saved;`), on every path to it from the pointer: before it
+    /// in a block around it, inside `scope`, and in `scope` itself among
+    /// `after`, the statements after the pointer was taken. The call then
+    /// grows what was stored, and the pointer's memory stays where it is
+    /// (#95). A copy stored back that holds the pointer's memory, taken
+    /// after it, is missed.
+    fn replaced(r: *Rule, call: Node.Index, scope: Node.Index, after: []const Node.Index, into: Into) Allocator.Error!bool {
+        const tree = r.tree;
+        const parents = (try r.lazyTypes()).parents;
+        const owner = tree.getNodeSource(into.owner);
+        var child = call;
+        while (parents[@backingInt(child)].unwrap()) |parent| : (child = parent) {
+            var buffer: [2]Node.Index = undefined;
+            const statements = if (parent == scope) after else tree.blockStatements(&buffer, parent) orelse continue;
+            const at = std.mem.findScalar(Node.Index, statements, child) orelse return false;
+            for (statements[0..at]) |before| if (replaces(tree, before, owner)) return true;
+            if (parent == scope) return false;
+        }
+        return false;
     }
 
     /// Whether a path from `call`, a call that moves, reaches what `watch`
@@ -440,6 +468,17 @@ fn assigns(tree: *const Ast, node: Node.Index, name: []const u8) bool {
     return tree.nodeTag(target) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(target)), name);
 }
 
+/// Whether `node` stores a new value in `place`, as written, or in what
+/// holds it: `s.list = saved`, `s.* = .{}` or `s = other` for `s.list`.
+fn replaces(tree: *const Ast, node: Node.Index, place: []const u8) bool {
+    if (tree.nodeTag(node) != .assign) return false;
+    var target = tree.nodeData(node).node_and_node[0];
+    if (tree.nodeTag(target) == .deref) target = tree.nodeData(target).node;
+    const text = tree.getNodeSource(target);
+    if (!std.mem.startsWith(u8, place, text)) return false;
+    return place.len == text.len or place[text.len] == '.';
+}
+
 /// The loop a `break` or `continue` leaves or turns again, or the block a
 /// labeled `break` leaves. Null for a labeled `continue` of a `switch`.
 fn jumpTarget(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) ?Node.Index {
@@ -572,4 +611,29 @@ test "not reported: AssumeCapacity, another branch, a continue, taken again, a c
         \\fn notlist(gpa: Allocator, pool: *Pool) !void { const p = pool.getPtr(1); try pool.put(2); p.* = 1; }
         \\fn unique(map: *std.AutoHashMap(u32, u32), k: u32) !u32 { const gop = try map.getOrPut(k); if (!gop.found_existing) { gop.value_ptr.* = 0; return k; } while (true) { gop.value_ptr.* += 1; const next = try map.getOrPut(k + gop.value_ptr.*); if (!next.found_existing) { next.value_ptr.* = 0; return k + gop.value_ptr.*; } } }
     , "");
+}
+
+test "not reported: the list stored again before the call that grows it (#95)" {
+    try expectGrow(
+        \\fn swapped(gpa: Allocator, s: *S) ![]const u32 { const saved = s.list; s.list = .empty; try s.list.append(gpa, 1); const found = s.list.items; s.list = saved; try s.list.append(gpa, 2); return found; }
+        \\fn reset(gpa: Allocator, list: *List) !void { const p = &list.items[0]; list.* = .empty; try list.append(gpa, 1); p.* = 7; }
+        \\fn holder(gpa: Allocator, first: *S, other: *S) !void { var s = first; const p = &s.list.items[0]; s = other; try s.list.append(gpa, 1); p.* = 7; }
+        \\fn nested(gpa: Allocator, s: *S, c: bool, other: List) !void { const p = &s.list.items[0]; s.list = other; if (c) { try s.list.append(gpa, 1); } p.* = 7; }
+        \\fn turned(gpa: Allocator, s: *S, other: List) !void { for (s.list.items) |x| { s.list = other; try s.list.append(gpa, x); } }
+    , "");
+}
+
+test "reported: the list stored again on some paths only, after the call, or another place (#95)" {
+    try expectGrow(
+        \\fn branch(gpa: Allocator, s: *S, c: bool, other: List) !void { const p = &s.list.items[0]; if (c) s.list = other; try s.list.append(gpa, 1); p.* = 7; }
+        \\fn later(gpa: Allocator, s: *S, other: List) !void { const p = &s.list.items[0]; try s.list.append(gpa, 1); s.list = other; p.* = 7; }
+        \\fn sibling(gpa: Allocator, s: *S, other: List) !void { const p = &s.list.items[0]; s.l = other; try s.list.append(gpa, 1); p.* = 7; }
+        \\fn items(gpa: Allocator, s: *S) !void { const p = &s.list.items[0]; s.list.items.len = 0; try s.list.append(gpa, 1); p.* = 7; }
+    ,
+        \\1:119 s.list.append `s.list.items` p
+        \\2:86 s.list.append `s.list.items` p
+        \\3:101 s.list.append `s.list.items` p
+        \\4:95 s.list.append `s.list.items` p
+        \\
+    );
 }

@@ -825,12 +825,14 @@ loop around the call that the pointer was declared outside of.
 Not reported: the `AssumeCapacity` calls; a use in another branch of the
 `if` or another prong of the `switch` the call is in, or after a
 `continue` to a loop the pointer is declared in, which takes it again; a
-pointer taken again before the use; a length, `found_existing` or `index`
-read out of it, which are copies; a `getOrPut` that makes a new entry only
-on a path that leaves at once, when a `getOrPut` made the pointer and so
-left a free slot; a list or map handed to a call, which only the callee
-can judge; and a type the file does not show, such as
-`std.SegmentedList`, whose elements never move.
+call that comes, on every path from the pointer, after the list or map, or
+what holds it, is stored again (`s.list = saved;`, `list.* = .empty;`),
+which grows what was stored; a pointer taken again before the use; a
+length, `found_existing` or `index` read out of it, which are copies; a
+`getOrPut` that makes a new entry only on a path that leaves at once, when
+a `getOrPut` made the pointer and so left a free slot; a list or map
+handed to a call, which only the callee can judge; and a type the file
+does not show, such as `std.SegmentedList`, whose elements never move.
 
 ## Rule fifteen: copy
 
