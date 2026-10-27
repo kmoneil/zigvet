@@ -10,9 +10,10 @@
 //! initializer, the `std` calls that return a view of an argument
 //! (`std.fmt.bufPrint`, `std.mem.sliceTo`, ...) and the file's own functions
 //! that return part of what a pointer parameter points at, or whose result
-//! holds a copy of an argument (`ctx.render(.{ .errors = &errs })`), and
-//! reports a value that is the address or a slice of stack memory whose
-//! contents are not comptime-known.
+//! holds a copy of an argument or of the receiver
+//! (`ctx.render(.{ .errors = &errs })`, `buffer.reader()`), and reports a
+//! value that is the address or a slice of stack memory whose contents are
+//! not comptime-known.
 //!
 //! A struct's field is known to be an array when the file declares the
 //! struct: a type is resolved by name through the containers around where it
@@ -897,17 +898,39 @@ const Rule = struct {
                     if (r.isComptimeBinding(p.binding)) break :viewed null;
                     break :viewed try r.storageSource(tree.nodeMainToken(p.root), if (p.field) "address of a field of" else "address of", p.binding);
                 } else null;
-                return viewed orelse r.carriedSource(fn_decl, arguments, 1, depth);
+                if (viewed) |source| return source;
+                if (try r.carriedSource(fn_decl, arguments, 1, depth)) |source| return source;
+                return r.receiverSource(fn_decl, p, receiver, depth);
             },
             else => return null,
         }
+    }
+
+    /// A method of the file's own called on `receiver`, the place `p`, when
+    /// its result holds a copy of its receiver (`carriedOf`, #100), as
+    /// `buffer.reader()` with `fn reader(self: *const Buffer) Reader {
+    /// return .{ .buffer = self }; }`. Taken by pointer, the receiver is the
+    /// address of a binding held by value, or where a pointer binding
+    /// points; taken by value, what its value holds leaves.
+    fn receiverSource(r: *Rule, fn_decl: Node.Index, p: Place, receiver: Node.Index, depth: u8) Allocator.Error!?Source {
+        if (!(try r.carriedOf(fn_decl)).isSet(0)) return null;
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
+        var params = proto.iterate(tree);
+        const self_type = (params.next() orelse return null).type_expr orelse return null;
+        if (pointee(tree, self_type) == null) return if (p.storage == .value) r.leafSource(receiver, depth + 1) else null;
+        // A pointer field points where nothing here shows.
+        if (p.storage == .pointer) return if (p.field) null else r.stackSource(receiver, depth);
+        if (r.isComptimeBinding(p.binding)) return null;
+        return try r.storageSource(tree.nodeMainToken(p.root), if (p.field) "address of a field of" else "address of", p.binding);
     }
 
     /// What points into an argument of a call to `fn_decl`, one of the
     /// file's own, when its result holds a copy of that parameter
     /// (`carriedOf`): `&errs` of `ctx.render(.{ .errors = &errs })`.
     /// `skip` is 1 for a method called on a receiver, its first parameter,
-    /// which is not looked at.
+    /// which `receiverSource` looks at.
     fn carriedSource(r: *Rule, fn_decl: Node.Index, arguments: []const Node.Index, skip: usize, depth: u8) Allocator.Error!?Source {
         const carried = try r.carriedOf(fn_decl);
         for (arguments, skip..) |argument, param| {
@@ -2124,6 +2147,55 @@ test "not reported: an argument returned whole, a field read out of it, a receiv
         \\fn constant() Holder { return wrap(.{ .errors = &.{} }); }
         \\fn named(out: *Holder) void { var errs: Errors = .{}; out.* = wrap(.{ .errors = &errs }); }
         \\fn unused() u32 { var errs: Errors = .{}; return wrap(.{ .errors = &errs }).n; }
+    , "");
+}
+
+test "a receiver held in what its method returns (#100)" {
+    try expectEscapes(
+        \\const Buffer = struct {
+        \\    bytes: [64]u8 = undefined,
+        \\    const Reader = struct { buffer: *const Buffer, at: usize = 0 };
+        \\    fn reader(self: *const Buffer) Reader { return .{ .buffer = self }; }
+        \\};
+        \\const Config = struct { name: []const u8, fn held(self: Config) Holder { return .{ .config = self }; } };
+        \\const Holder = struct { config: Config };
+        \\const Pair = struct { buf: Buffer = .{}, n: u8 = 0 };
+        \\fn local() Buffer.Reader { var buffer: Buffer = .{}; buffer.bytes[0] = 1; return buffer.reader(); }
+        \\fn param(buffer: Buffer) Buffer.Reader { return buffer.reader(); }
+        \\fn field() Buffer.Reader { var pair: Pair = .{}; pair.n = 1; return pair.buf.reader(); }
+        \\fn pointed() Buffer.Reader { var buffer: Buffer = .{}; buffer.bytes[0] = 1; const p: *const Buffer = &buffer; return p.reader(); }
+        \\fn byValue() Holder { var name: [4]u8 = undefined; name[0] = 'a'; const config: Config = .{ .name = &name }; return config.held(); }
+    ,
+        \\9:82 address of local 'buffer' -> local through return
+        \\10:49 address of parameter 'buffer' -> param through return
+        \\11:69 address of a field of local 'pair' -> field through return
+        \\12:102 address of local 'buffer' -> pointed through return
+        \\13:101 address of local 'name' -> byValue through return
+        \\
+    );
+}
+
+test "not reported: a pointer receiver, the receiver returned whole, a field read out, nothing on the stack (#100)" {
+    try expectEscapes(
+        \\const Buffer = struct {
+        \\    bytes: [64]u8 = undefined,
+        \\    len: usize = 0,
+        \\    const Reader = struct { buffer: *const Buffer, at: usize = 0 };
+        \\    const Info = struct { len: usize };
+        \\    fn reader(self: *const Buffer) Reader { return .{ .buffer = self }; }
+        \\    fn same(self: *const Buffer) *const Buffer { return self; }
+        \\    fn info(self: *const Buffer) Info { return .{ .len = self.len }; }
+        \\};
+        \\const Config = struct { name: []const u8, fn held(self: Config) Holder { return .{ .config = self }; } };
+        \\const Holder = struct { config: Config };
+        \\const Outer = struct { inner: *Buffer };
+        \\fn borrowed(buffer: *const Buffer) Buffer.Reader { return buffer.reader(); }
+        \\fn whole() *const Buffer { var buffer: Buffer = .{}; buffer.len = 1; return buffer.same(); }
+        \\fn read() Buffer.Info { var buffer: Buffer = .{}; buffer.len = 1; return buffer.info(); }
+        \\fn literal() Holder { const config: Config = .{ .name = "a" }; return config.held(); }
+        \\fn through(outer: Outer) Buffer.Reader { return outer.inner.reader(); }
+        \\fn used() usize { var buffer: Buffer = .{}; buffer.len = 1; return buffer.reader().at; }
+        \\fn stored(out: *Buffer.Reader) void { var buffer: Buffer = .{}; buffer.len = 1; out.* = buffer.reader(); }
     , "");
 }
 
