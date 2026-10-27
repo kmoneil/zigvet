@@ -321,6 +321,7 @@ test "findings land where stdout's file is, not over its start" {
 test {
     _ = @import("alias.zig");
     _ = @import("allow.zig");
+    _ = @import("cached.zig");
     _ = @import("cancel.zig");
     _ = @import("cases.zig");
     _ = @import("children.zig");
