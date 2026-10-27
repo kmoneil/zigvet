@@ -112,7 +112,10 @@ Leaving the function:
   a `std` call that returns part of its argument
   (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`), or one of
   the file's own that does, such as `return id.slice();` with `id` held by
-  value and `fn slice(self: *const Id) []const u8 { return self.bytes[0..self.len]; }`;
+  value and `fn slice(self: *const Id) []const u8 { return self.bytes[0..self.len]; }`,
+  or one of the file's own whose result holds a copy of the argument, such
+  as `return ctx.render(.{ .errors = &errs });` with a `render` that copies
+  its `params` into memory its result points at;
 - stored through a parameter (`self.items = ...`, `out.* = ...`), through a
   pointer capture of what one points at (`for (into) |*out| out.* = ...`),
   or to a container-level variable. Stores report temporaries and loop
@@ -151,7 +154,13 @@ part of an argument, `std.fmt`'s `bufPrint` and `bufPrintSentinel` and
 `printSentinel` only through their namespace, `mem.print`).
 One of the file's own functions returns part of an argument when it
 returns, directly, a slice of an array that a pointer parameter points at
-or the address of one of its fields. A type is known only when the file
+or the address of one of its fields. Its result holds a copy of an
+argument when it holds the parameter in a field or element of what it
+returns (`return .{ .config = config };`), or in a local it returns or
+holds so, at the local's declaration, in a field of it, or through it
+(`p.* = params;`). Not followed: a parameter returned whole, maybe through
+a cast, whose argument may be a function's address; a method's receiver;
+and a function declared in another file. A type is known only when the file
 declares it, by name or as `@This()`, and a method only through its
 receiver's written type: `const p = &id; return p.slice();` is not
 followed, `const p: *const Id = &id;` is. A function whose

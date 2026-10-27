@@ -9,9 +9,10 @@
 //! blocks, locals, the elements and fields of a local made with an
 //! initializer, the `std` calls that return a view of an argument
 //! (`std.fmt.bufPrint`, `std.mem.sliceTo`, ...) and the file's own functions
-//! that return part of what a pointer parameter points at, and reports a
-//! value that is the address or a slice of stack memory whose contents are
-//! not comptime-known.
+//! that return part of what a pointer parameter points at, or whose result
+//! holds a copy of an argument (`ctx.render(.{ .errors = &errs })`), and
+//! reports a value that is the address or a slice of stack memory whose
+//! contents are not comptime-known.
 //!
 //! A struct's field is known to be an array when the file declares the
 //! struct: a type is resolved by name through the containers around where it
@@ -104,6 +105,9 @@ fn countsAtComptime(arena: Allocator, tree: *const Ast, body: Node.Index) Alloca
     return false;
 }
 
+/// A set of a function's parameters, by index, of the first 32.
+const Carried = std.bit_set.IntegerBitSet(32);
+
 const hint_literal = "make it comptime-known (`comptime` on the runtime elements) or a container-level const";
 const hint_storage = "return the value itself, have the caller pass in the memory, or allocate it";
 const hint_storage_comptime = hint_storage ++ "; if it only runs at compile time, say so with `return comptime blk: { ... }`";
@@ -137,6 +141,9 @@ const Rule = struct {
     /// The file's functions looked at so far, to which parameter their
     /// result points into (`viewOf`).
     views: std.AutoHashMapUnmanaged(Node.Index, ?u32) = .empty,
+    /// The file's functions looked at so far, to which parameters their
+    /// result holds a copy of (`carriedOf`).
+    carried: std.AutoHashMapUnmanaged(Node.Index, Carried) = .empty,
 
     /// The function being checked.
     function_name: []const u8 = "",
@@ -657,28 +664,34 @@ const Rule = struct {
 
     /// Appends the expressions `node` can evaluate to.
     fn leaves(r: *Rule, node: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
+        return r.leavesOf(node, .opened, out);
+    }
+
+    /// `leaves`, with a struct or array initializer appended whole when
+    /// `inits` is `.kept`, rather than the values it holds.
+    fn leavesOf(r: *Rule, node: Node.Index, inits: enum { opened, kept }, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
         const tree = r.tree;
         switch (tree.nodeTag(node)) {
-            .grouped_expression => try r.leaves(tree.nodeData(node).node_and_token[0], out),
-            .@"try" => try r.leaves(tree.nodeData(node).node, out),
+            .grouped_expression => try r.leavesOf(tree.nodeData(node).node_and_token[0], inits, out),
+            .@"try" => try r.leavesOf(tree.nodeData(node).node, inits, out),
             .@"orelse", .@"catch" => {
                 const lhs, const rhs = tree.nodeData(node).node_and_node;
-                try r.leaves(lhs, out);
-                try r.leaves(rhs, out);
+                try r.leavesOf(lhs, inits, out);
+                try r.leavesOf(rhs, inits, out);
             },
             .if_simple, .@"if" => {
                 const full = tree.fullIf(node).?;
-                try r.leaves(full.ast.then_expr, out);
-                if (full.ast.else_expr.unwrap()) |else_expr| try r.leaves(else_expr, out);
+                try r.leavesOf(full.ast.then_expr, inits, out);
+                if (full.ast.else_expr.unwrap()) |else_expr| try r.leavesOf(else_expr, inits, out);
             },
             .@"switch", .switch_comma => for (tree.fullSwitch(node).?.ast.cases) |case| {
-                try r.leaves(tree.fullSwitchCase(case).?.ast.target_expr, out);
+                try r.leavesOf(tree.fullSwitchCase(case).?.ast.target_expr, inits, out);
             },
             .block, .block_semicolon, .block_two, .block_two_semicolon => {
                 const label = blockLabel(tree, node) orelse return;
                 var breaks: std.ArrayList(Node.Index) = .empty;
                 try r.breaksTo(node, label, &breaks);
-                for (breaks.items) |value| try r.leaves(value, out);
+                for (breaks.items) |value| try r.leavesOf(value, inits, out);
             },
             // A struct or array returned or stored by value carries its
             // fields out with it.
@@ -699,11 +712,12 @@ const Rule = struct {
             .struct_init,
             .struct_init_comma,
             => {
+                if (inits == .kept) return out.append(r.arena, node);
                 var buffer: [2]Node.Index = undefined;
-                for (initValues(tree, &buffer, node)) |value| try r.leaves(value, out);
+                for (initValues(tree, &buffer, node)) |value| try r.leavesOf(value, inits, out);
             },
             .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => {
-                if (pointerPreservingOperand(tree, node)) |operand| try r.leaves(operand, out) else try out.append(r.arena, node);
+                if (pointerPreservingOperand(tree, node)) |operand| try r.leavesOf(operand, inits, out) else try out.append(r.arena, node);
             },
             .@"comptime" => {},
             else => try out.append(r.arena, node),
@@ -837,7 +851,8 @@ const Rule = struct {
     /// comes from. A method called on a binding is given the binding's
     /// address when it takes a pointer, so `id.slice()` points into `id`
     /// when `id` is held by value, and wherever `id` points when it is a
-    /// pointer.
+    /// pointer. Else, or when that finds nothing, what points into an
+    /// argument the result holds a copy of (`carriedSource`).
     fn ownViewSource(r: *Rule, node: Node.Index, depth: u8) Allocator.Error!?Source {
         const tree = r.tree;
         var buffer: [1]Node.Index = undefined;
@@ -848,8 +863,10 @@ const Rule = struct {
             .identifier => {
                 if (r.resolved.contains(callee)) return null;
                 const fn_decl = r.types.declaredFn(callee, tree.tokenSlice(tree.nodeMainToken(callee))) orelse return null;
-                const view = try r.viewOf(fn_decl) orelse return null;
-                return if (view < arguments.len) r.stackSource(arguments[view], depth) else null;
+                if (try r.viewOf(fn_decl)) |view| if (view < arguments.len) {
+                    if (try r.stackSource(arguments[view], depth)) |source| return source;
+                };
+                return r.carriedSource(fn_decl, arguments, 0, depth);
             },
             .field_access => {
                 const receiver, const name_token = tree.nodeData(callee).node_and_token;
@@ -860,8 +877,10 @@ const Rule = struct {
                     // `Id.slice(&id)`, through the type's namespace.
                     const container = r.types.containerOf(receiver, 0) orelse return null;
                     const fn_decl = memberFn(tree, container, name) orelse return null;
-                    const view = try r.viewOf(fn_decl) orelse return null;
-                    return if (view < arguments.len) r.stackSource(arguments[view], depth) else null;
+                    if (try r.viewOf(fn_decl)) |view| if (view < arguments.len) {
+                        if (try r.stackSource(arguments[view], depth)) |source| return source;
+                    };
+                    return r.carriedSource(fn_decl, arguments, 0, depth);
                 };
                 const type_expr = p.type_expr.unwrap() orelse return null;
                 const value_type = switch (p.storage) {
@@ -871,14 +890,96 @@ const Rule = struct {
                 };
                 const container = r.types.containerOf(value_type, 0) orelse return null;
                 const fn_decl = memberFn(tree, container, name) orelse return null;
-                const view = try r.viewOf(fn_decl) orelse return null;
-                if (view > 0) return if (view - 1 < arguments.len) r.stackSource(arguments[view - 1], depth) else null;
-                // A pointer field points where nothing here shows.
-                if (p.storage == .pointer) return if (p.field) null else r.stackSource(receiver, depth);
-                if (r.isComptimeBinding(p.binding)) return null;
-                return try r.storageSource(tree.nodeMainToken(p.root), if (p.field) "address of a field of" else "address of", p.binding);
+                const viewed: ?Source = if (try r.viewOf(fn_decl)) |view| viewed: {
+                    if (view > 0) break :viewed if (view - 1 < arguments.len) try r.stackSource(arguments[view - 1], depth) else null;
+                    // A pointer field points where nothing here shows.
+                    if (p.storage == .pointer) break :viewed if (p.field) null else try r.stackSource(receiver, depth);
+                    if (r.isComptimeBinding(p.binding)) break :viewed null;
+                    break :viewed try r.storageSource(tree.nodeMainToken(p.root), if (p.field) "address of a field of" else "address of", p.binding);
+                } else null;
+                return viewed orelse r.carriedSource(fn_decl, arguments, 1, depth);
             },
             else => return null,
+        }
+    }
+
+    /// What points into an argument of a call to `fn_decl`, one of the
+    /// file's own, when its result holds a copy of that parameter
+    /// (`carriedOf`): `&errs` of `ctx.render(.{ .errors = &errs })`.
+    /// `skip` is 1 for a method called on a receiver, its first parameter,
+    /// which is not looked at.
+    fn carriedSource(r: *Rule, fn_decl: Node.Index, arguments: []const Node.Index, skip: usize, depth: u8) Allocator.Error!?Source {
+        const carried = try r.carriedOf(fn_decl);
+        for (arguments, skip..) |argument, param| {
+            if (param >= Carried.bit_length or !carried.isSet(param)) continue;
+            if (try r.leafSource(argument, depth + 1)) |source| return source;
+        }
+        return null;
+    }
+
+    /// Which parameters of `fn_decl`, one of the file's own, its result
+    /// holds a copy of, so that what points into the argument leaves with
+    /// it (#96): one held in a field or element of what it returns
+    /// (`return .{ .config = config };`), or of a local it returns or holds
+    /// so, at the local's declaration or stored later, or stored into a
+    /// field of the local or through it (`const p = try
+    /// arena.create(Params); p.* = params; return .{ .state = p };`). Only
+    /// the parameter as a name is followed, not a field read out of it, nor
+    /// the function's own calls. One returned whole, maybe through a cast,
+    /// is not taken: the result is then the argument, which may be a
+    /// function's address (`castPtr(T, &target)` for a `target` that is a
+    /// function, in std's C translation helpers).
+    fn carriedOf(r: *Rule, fn_decl: Node.Index) Allocator.Error!Carried {
+        if (r.carried.get(fn_decl)) |known| return known;
+        const tree = r.tree;
+        const proto_node, const body = tree.nodeData(fn_decl).node_and_node;
+        var buffer: [1]Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, proto_node).?;
+        var returned: std.ArrayList(Node.Index) = .empty;
+        try returnValues(r.arena, tree, body, &returned);
+        var carried: Carried = .empty;
+        var locals: std.ArrayList([]const u8) = .empty;
+        for (returned.items) |value| try r.heldIn(proto, value, &carried, &locals);
+        if (locals.items.len > 0) {
+            var whole: std.ArrayList(Node.Index) = .empty;
+            var into: std.ArrayList(Node.Index) = .empty;
+            try storedIn(r.arena, tree, body, locals.items, &whole, &into);
+            for (whole.items) |value| try r.heldIn(proto, value, &carried, null);
+            var values: std.ArrayList(Node.Index) = .empty;
+            for (into.items) |value| try r.leaves(value, &values);
+            for (values.items) |value| {
+                if (tree.nodeTag(value) != .identifier) continue;
+                if (paramIndex(tree, proto, tree.tokenSlice(tree.nodeMainToken(value)))) |param| carried.set(param);
+            }
+        }
+        try r.carried.put(r.arena, fn_decl, carried);
+        return carried;
+    }
+
+    /// For `carriedOf`, what `value`, a function's result or a local's,
+    /// holds: the parameters of `proto` in a field or element of it, into
+    /// `carried`, and the locals it is, or holds so, into `locals`, when
+    /// it is given.
+    fn heldIn(r: *Rule, proto: Ast.full.FnProto, value: Node.Index, carried: *Carried, locals: ?*std.ArrayList([]const u8)) Allocator.Error!void {
+        const tree = r.tree;
+        var wholes: std.ArrayList(Node.Index) = .empty;
+        try r.leavesOf(value, .kept, &wholes);
+        for (wholes.items) |whole| {
+            if (isInit(tree.nodeTag(whole))) {
+                var parts: std.ArrayList(Node.Index) = .empty;
+                try r.leaves(whole, &parts);
+                for (parts.items) |part| {
+                    if (tree.nodeTag(part) != .identifier) continue;
+                    const name = tree.tokenSlice(tree.nodeMainToken(part));
+                    if (paramIndex(tree, proto, name)) |param| {
+                        carried.set(param);
+                    } else if (locals) |list| try list.append(r.arena, name);
+                }
+            } else if (tree.nodeTag(whole) == .identifier) {
+                const name = tree.tokenSlice(tree.nodeMainToken(whole));
+                if (paramIndex(tree, proto, name) != null) continue;
+                if (locals) |list| try list.append(r.arena, name);
+            }
         }
     }
 
@@ -1511,6 +1612,50 @@ fn pointerParam(tree: *const Ast, proto: Ast.full.FnProto, node: Node.Index) ?st
     return null;
 }
 
+/// The index of the parameter of `proto` named `name`, of the first
+/// `Carried.bit_length`.
+fn paramIndex(tree: *const Ast, proto: Ast.full.FnProto, name: []const u8) ?usize {
+    var params = proto.iterate(tree);
+    var index: usize = 0;
+    while (params.next()) |param| : (index += 1) {
+        if (index == Carried.bit_length) return null;
+        const name_token = param.name_token orelse continue;
+        if (std.mem.eql(u8, tree.tokenSlice(name_token), name)) return index;
+    }
+    return null;
+}
+
+/// Appends what `body`, a function's, stores in one of `locals`: to
+/// `whole`, a declaration's initializer and the value of an assignment to
+/// the local; to `into`, the value of an assignment to a field or element
+/// of it, or to what it points at (`p.* = v`). Not in the functions and
+/// types declared in it.
+fn storedIn(gpa: Allocator, tree: *const Ast, body: Node.Index, locals: []const []const u8, whole: *std.ArrayList(Node.Index), into: *std.ArrayList(Node.Index)) Allocator.Error!void {
+    var stack: std.ArrayList(Node.Index) = .empty;
+    try children.append(gpa, tree, body, &stack);
+    while (stack.pop()) |node| {
+        var buffer: [2]Node.Index = undefined;
+        if (tree.nodeTag(node) == .fn_decl or tree.fullContainerDecl(&buffer, node) != null) continue;
+        if (tree.fullVarDecl(node)) |decl| {
+            if (isOneOf(tree.tokenSlice(decl.ast.mut_token + 1), locals)) {
+                if (decl.ast.init_node.unwrap()) |init| try whole.append(gpa, init);
+            }
+        } else if (tree.nodeTag(node) == .assign) {
+            const target, const value = tree.nodeData(node).node_and_node;
+            const root, _ = rootOf(tree, target);
+            if (tree.nodeTag(root) == .identifier and isOneOf(tree.tokenSlice(tree.nodeMainToken(root)), locals)) {
+                try (if (root == target) whole else into).append(gpa, value);
+            }
+        }
+        try children.append(gpa, tree, node, &stack);
+    }
+}
+
+fn isOneOf(name: []const u8, names: []const []const u8) bool {
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
 /// Whether `container` has a field `name` declared as an array.
 fn fieldIsArray(tree: *const Ast, container: Node.Index, name: []const u8) bool {
     const type_expr = fieldType(tree, container, name) orelse return false;
@@ -1929,6 +2074,57 @@ test "an array field of a struct held by value, sliced or through the file's own
         \\21:79 address of local 'buf' -> freeCall through return
         \\
     );
+}
+
+test "through a file's own function whose result holds a copy of an argument (#96)" {
+    try expectEscapes(
+        \\const Errors = struct { n: u32 = 0 };
+        \\const Params = struct { errors: ?*const Errors = null };
+        \\const Response = struct { state: *const Params };
+        \\const Ctx = struct {
+        \\    arena: Allocator,
+        \\    fn render(ctx: *Ctx, params: Params) !Response { const p = try ctx.arena.create(Params); p.* = params; return .{ .state = p }; }
+        \\};
+        \\const Holder = struct { params: Params, len: usize = 0 };
+        \\fn wrap(params: Params) Holder { return .{ .params = params }; }
+        \\fn local(params: Params) Holder { const h = Holder{ .params = params }; return h; }
+        \\fn field(params: Params) Holder { var h: Holder = undefined; h.params = params; return h; }
+        \\fn method(ctx: *Ctx) !Response { var errs: Errors = .{ .n = 1 }; return ctx.render(.{ .errors = &errs }); }
+        \\fn tried(ctx: *Ctx) !Response { var errs: Errors = .{}; return try ctx.render(.{ .errors = &errs }); }
+        \\fn namespaced(ctx: *Ctx) !Response { var errs: Errors = .{}; return Ctx.render(ctx, .{ .errors = &errs }); }
+        \\fn free() Holder { var errs: Errors = .{}; return wrap(.{ .errors = &errs }); }
+        \\fn viaLocal() Holder { var errs: Errors = .{}; return local(.{ .errors = &errs }); }
+        \\fn viaField() Holder { var errs: Errors = .{}; return field(.{ .errors = &errs }); }
+        \\fn stored(out: *Holder, n: u32) void { out.* = wrap(.{ .errors = &.{ .n = n } }); }
+    ,
+        \\12:97 address of local 'errs' -> method through return
+        \\13:92 address of local 'errs' -> tried through return
+        \\14:98 address of local 'errs' -> namespaced through return
+        \\15:69 address of local 'errs' -> free through return
+        \\16:74 address of local 'errs' -> viaLocal through return
+        \\17:74 address of local 'errs' -> viaField through return
+        \\18:66 anonymous struct -> stored through out param
+        \\
+    );
+}
+
+test "not reported: an argument returned whole, a field read out of it, a receiver, nothing on the stack (#96)" {
+    try expectEscapes(
+        \\const Errors = struct { n: u32 = 0 };
+        \\const Params = struct { errors: ?*const Errors = null, n: u32 = 0 };
+        \\const Holder = struct { params: Params, n: u32 = 0 };
+        \\const Keeper = struct { errs: Errors = .{}, fn keep(self: *const Keeper) Holder { return .{ .params = .{ .errors = &self.errs } }; } };
+        \\fn same(p: *const Errors) *const Errors { return p; }
+        \\fn cast(p: *const Errors) *const anyopaque { return @ptrCast(p); }
+        \\fn count(params: Params) Holder { return .{ .params = .{}, .n = params.n }; }
+        \\fn wrap(params: Params) Holder { return .{ .params = params }; }
+        \\fn whole() *const Errors { var errs: Errors = .{}; return same(&errs); }
+        \\fn casted() *const anyopaque { var errs: Errors = .{}; return cast(&errs); }
+        \\fn counted() Holder { var errs: Errors = .{}; return count(.{ .errors = &errs }); }
+        \\fn constant() Holder { return wrap(.{ .errors = &.{} }); }
+        \\fn named(out: *Holder) void { var errs: Errors = .{}; out.* = wrap(.{ .errors = &errs }); }
+        \\fn unused() u32 { var errs: Errors = .{}; return wrap(.{ .errors = &errs }).n; }
+    , "");
 }
 
 test "a capture held by value in a loop is a copy made for one turn (#34)" {
