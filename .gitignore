@@ -18,7 +18,7 @@ _issues/
 .idea/
 .vscode/
 
-# AI Files (CLAUDE.md is tracked — it is project law, not scratch)
+# AI files, local only, never committed.
 CLAUDE.md
 .claude/
 
