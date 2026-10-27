@@ -32,6 +32,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 const types = @import("types.zig");
@@ -464,7 +465,7 @@ fn expectFits(source: [:0]const u8, expected: []const u8) !void {
         const f = finding.detail.fit;
         try out.writer.print("{d}:{d} {s} of {s} {s}: {d} > {d}\n", .{ loc.line + 1, loc.column + 1, f.placeholder, f.float, f.value, f.need, f.capacity });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a float printed in full into a buffer too small for it (#35)" {

@@ -51,6 +51,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 const Sink = report.Sink;
@@ -1772,7 +1773,7 @@ fn expectEscapes(source: [:0]const u8, expected: []const u8) !void {
             try out.writer.print("{d}:{d} {s} -> {s} through {s}\n", .{ loc.line + 1, loc.column + 1, e.what, e.function, e.sink.text() });
         }
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "the measured shapes Zig 0.17.0 compiles without a diagnostic" {

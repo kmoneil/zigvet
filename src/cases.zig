@@ -72,8 +72,57 @@ fn reportsAsExpected(arena: Allocator, path: []const u8, source: [:0]const u8) !
         try out.writer.writeByte('\n');
     }
     if (std.mem.eql(u8, expected, out.written())) return true;
+    // `-Dupdate`, as for the rule tests (expect.zig): only a case whose
+    // findings moved or changed their words, not one that gained or lost
+    // them all.
+    if (test_options.update and expected.len > 0 and out.written().len > 0) {
+        const full_path = try std.fs.path.join(arena, &.{ cases_dir, path });
+        try Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = full_path, .data = try rewriteCase(arena, source, out.written()) });
+        std.debug.print("{s}: -Dupdate rewrote the expected findings to:\n{s}\n", .{ full_path, out.written() });
+        return true;
+    }
     std.debug.print("{s}: expected\n{s}found\n{s}\n", .{ path, expected, out.written() });
     return false;
+}
+
+/// `source`, a case that ends with `// error` and its findings, ending with
+/// `found`'s instead, one `// ` line each.
+fn rewriteCase(arena: Allocator, source: []const u8, found: []const u8) Allocator.Error![]const u8 {
+    var header: usize = 0;
+    var start: usize = 0;
+    while (start < source.len) {
+        const end = std.mem.findScalarPos(u8, source, start, '\n') orelse source.len;
+        if (std.mem.eql(u8, std.mem.trimEnd(u8, source[start..end], "\r"), "// error")) header = start;
+        start = end + 1;
+    }
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, source[0..header]);
+    try out.appendSlice(arena, "// error\n//\n");
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, found, "\n"), '\n');
+    while (lines.next()) |line| try out.print(arena, "// {s}\n", .{line});
+    return out.items;
+}
+
+test "rewriteCase: the findings after the last `// error`, replaced" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const rewritten = try rewriteCase(arena_state.allocator(),
+        \\fn f() void {}
+        \\
+        \\// error
+        \\//
+        \\// :1:1: error: old
+        \\
+    , ":1:4: error: new\n:2:1: error: also\n");
+    try std.testing.expectEqualStrings(
+        \\fn f() void {}
+        \\
+        \\// error
+        \\//
+        \\// :1:4: error: new
+        \\// :2:1: error: also
+        \\
+    , rewritten);
 }
 
 /// The expected report lines, `// ` removed, one per line: everything

@@ -36,6 +36,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const kept = @import("kept.zig");
 const refill = @import("refill.zig");
 const report = @import("report.zig");
@@ -279,7 +280,7 @@ fn expectSweep(source: [:0]const u8, expected: []const u8) !void {
         const s = finding.detail.sweep;
         try out.writer.print("{d}:{d} {s} <- {s} ; {s}\n", .{ loc.line + 1, loc.column + 1, s.list, s.fails, s.reset });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a loop frees what a list holds, can fail part way, and empties the list only after it (#65)" {

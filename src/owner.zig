@@ -62,6 +62,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const refill = @import("refill.zig");
 const kept = @import("kept.zig");
 const report = @import("report.zig");
@@ -538,7 +539,7 @@ fn expectOwners(source: [:0]const u8, expected: []const u8) !void {
         const o = finding.detail.owner;
         try out.writer.print("{d}:{d} {s} {s}\n", .{ loc.line + 1, loc.column + 1, o.callee, o.argument });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "an allocation freed by the caller's errdefer and the callee's (#40)" {

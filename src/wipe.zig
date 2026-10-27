@@ -30,6 +30,7 @@ const Ast = std.zig.Ast;
 const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
+const expect = @import("expect.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 const types = @import("types.zig");
@@ -173,7 +174,7 @@ fn expectWipe(source: [:0]const u8, expected: []const u8) !void {
         const loc = report.location(source, finding.offset);
         try out.writer.print("{d}:{d} {s}\n", .{ loc.line + 1, loc.column + 1, finding.detail.wipe.local });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "a local wiped with @memset as the last thing done with it (#62)" {

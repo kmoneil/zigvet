@@ -66,6 +66,7 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 
 const children = @import("children.zig");
+const expect = @import("expect.zig");
 const refill = @import("refill.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
@@ -631,7 +632,7 @@ fn expectKept(source: [:0]const u8, expected: []const u8) !void {
         const k = finding.detail.kept;
         try out.writer.print("{d}:{d} {s} {s} <- {s}\n", .{ loc.line + 1, loc.column + 1, k.name, k.holder, k.fails });
     }
-    try std.testing.expectEqualStrings(expected, out.written());
+    try expect.findings(@src(), expected, out.written());
 }
 
 test "an errdefer frees what the function stored where its caller keeps it (#63)" {
