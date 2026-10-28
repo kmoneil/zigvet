@@ -1126,7 +1126,7 @@ excuse whatever is written there next.
 ## Use it in a build
 
 Add zigvet to `build.zig.zon`, pinned to a release tag, with `zig fetch
---save git+https://github.com/kmoneil/zigvet#v0.12.0`, then give `build.zig`
+--save git+https://github.com/kmoneil/zigvet#v0.12.1`, then give `build.zig`
 a lint step, the way `zig fmt --check` is used:
 
 ```zig
