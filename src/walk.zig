@@ -6,8 +6,9 @@ const Allocator = std.mem.Allocator;
 
 /// Appends what `arg`, relative to `base`, names to `files`: `arg` itself if
 /// it is a file, whatever its extension, or every `.zig` file under it if it
-/// is a directory, as `arg` joined with the path inside it. Directories that
-/// are hidden or hold build output or fetched packages are not walked into.
+/// is a directory, as `arg` joined with the path inside it. Hidden files
+/// under it are not listed, and directories that are hidden or hold build
+/// output or fetched packages are not walked into.
 ///
 /// Each path is cleaned the way `std.fs.path.resolveAlloc` does it, on the
 /// text alone: `.`, `..` and repeated separators collapse, and on Windows
@@ -41,7 +42,7 @@ pub fn collect(
             const path = try std.fs.path.resolveAlloc(arena, &.{ arg, entry.path });
             if (!excluded(path, excludes)) try walker.enter(io, entry);
         },
-        .file => if (std.mem.endsWith(u8, entry.basename, ".zig")) {
+        .file => if (entry.basename[0] != '.' and std.mem.endsWith(u8, entry.basename, ".zig")) {
             const path = try std.fs.path.resolveAlloc(arena, &.{ arg, entry.path });
             if (!excluded(path, excludes)) try files.append(arena, path);
         },
@@ -82,7 +83,7 @@ fn lessThan(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
 
-test "collect: .zig files under a directory, skipping build output and hidden dirs" {
+test "collect: .zig files under a directory, skipping build output and hidden files and dirs" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -92,9 +93,11 @@ test "collect: .zig files under a directory, skipping build output and hidden di
 
     for ([_][]const u8{
         "proj/a.zig",
+        "proj/._a.zig",
         "proj/notes.txt",
         "proj/build.zig.zon",
         "proj/sub/b.zig",
+        "proj/sub/.#b.zig",
         "proj/zig-out/c.zig",
         "proj/zig-pkg/d.zig",
         "proj/.zig-cache/e.zig",
@@ -107,9 +110,11 @@ test "collect: .zig files under a directory, skipping build output and hidden di
     var files: std.ArrayList([]const u8) = .empty;
     try collect(arena, io, tmp.dir, "proj", &.{}, &files);
     try collect(arena, io, tmp.dir, "proj/notes.txt", &.{}, &files);
+    // Named outright, a hidden file is still listed.
+    try collect(arena, io, tmp.dir, "proj/sub/.#b.zig", &.{}, &files);
     sortUnique(&files);
 
-    try expectPaths(arena, &.{ "proj/a.zig", "proj/notes.txt", "proj/sub/b.zig" }, files.items);
+    try expectPaths(arena, &.{ "proj/a.zig", "proj/notes.txt", "proj/sub/.#b.zig", "proj/sub/b.zig" }, files.items);
 }
 
 test "collect: one file reached several ways is listed once" {
