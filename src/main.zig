@@ -17,7 +17,7 @@ const usage =
     \\
     \\Checks each file named, and every .zig file under each directory named,
     \\for code the Zig compiler accepts that is almost certainly wrong.
-    \\Directories that are hidden, zig-out or zig-pkg are skipped.
+    \\Hidden files and directories, zig-out and zig-pkg are skipped.
     \\
     \\  --exclude <path>  Skip this file or directory, named as zigvet prints
     \\                    paths: relative to the current directory. May be
@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
         // Checking nothing would read exactly like a clean run (#13).
         if (files.items.len == before) {
-            std.debug.print("zigvet: {s}: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)\n", .{arg});
+            std.debug.print("zigvet: {s}: no .zig file to check (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)\n", .{arg});
             unreadable = true;
         }
     }
@@ -179,7 +179,7 @@ test "a named path that yields no file to check is an error, not a clean run" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "empty");
-    for ([_][]const u8{ "only-hidden/.cache/a.zig", "gen/a.zig", "notes.txt" }) |sub_path| {
+    for ([_][]const u8{ "only-hidden/.cache/a.zig", "only-hidden/._a.zig", "gen/a.zig", "notes.txt" }) |sub_path| {
         try tmp.dir.createDirPath(io, std.fs.path.dirname(sub_path) orelse ".");
         try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "" });
     }
@@ -197,9 +197,9 @@ test "a named path that yields no file to check is an error, not a clean run" {
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, result.term);
     try std.testing.expectEqualStrings("", result.stdout);
     try std.testing.expectEqualStrings(
-        \\zigvet: empty: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)
-        \\zigvet: only-hidden: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)
-        \\zigvet: gen: no .zig file to check (hidden directories, zig-out, zig-pkg and excluded paths are skipped)
+        \\zigvet: empty: no .zig file to check (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)
+        \\zigvet: only-hidden: no .zig file to check (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)
+        \\zigvet: gen: no .zig file to check (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)
         \\
     , result.stderr);
 }

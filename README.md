@@ -1040,10 +1040,10 @@ zigvet --version
 ```
 
 A file is checked whatever its extension. A directory is walked for `.zig`
-files, skipping hidden directories, `zig-out` and `zig-pkg`. Paths print
-cleaned (`./src/a.zig` as `src/a.zig`), and a file reached more than one
-way is checked once. A file that does not parse is reported with the error
-`zig ast-check` gives for it.
+files, skipping hidden files and directories, `zig-out` and `zig-pkg`.
+Paths print cleaned (`./src/a.zig` as `src/a.zig`), and a file reached
+more than one way is checked once. A file that does not parse is reported
+with the error `zig ast-check` gives for it.
 
 `--exclude <path>` skips a file or directory, and may be given more than
 once. It is matched against paths as zigvet prints them, so name it
