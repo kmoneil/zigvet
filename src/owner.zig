@@ -30,7 +30,7 @@
 //! one of those calls or a call whose name says it releases, handed it as
 //! its only argument or one after the first (`release(ctx, &pushed)`), and
 //! fails after that on its path: a `try`, a `return error.X`, or a
-//! `return` of what a `catch` caught, as in
+//! `return` of what a `catch` or an `else |err|` caught, as in
 //!
 //!     fn push(frames: *std.ArrayList(Frame), frame: Frame) !void {
 //!         var pushed = frame;
@@ -188,7 +188,7 @@ fn mentions(tree: *const Ast, node: Node.Index, freed: std.StringHashMapUnmanage
 /// The names of the functions that may free one of their parameters and
 /// then fail, found from the tokens before anything costlier is made: a
 /// release of a parameter, or of a copy of one, with a `try`, a
-/// `return error.X` or a `return` of what a `catch` caught after it. Most
+/// `return error.X` or a `return` of what a capture caught after it. Most
 /// files have functions that free a parameter (every `deinit`); few can
 /// fail after it.
 fn ownerNames(arena: Allocator, tree: *const Ast) Allocator.Error!std.StringHashMapUnmanaged(void) {
@@ -243,8 +243,8 @@ const Function = struct {
     /// Its parameters and the copies of them it makes, found at the first
     /// call in it.
     held: ?[]const []const u8 = null,
-    /// The names its `catch`es capture (`catch |err|`), found at the
-    /// first release in it.
+    /// The names its errors are caught as (`catch |err|`,
+    /// `else |err|`), found at the first release in it.
     caught: ?[]const []const u8 = null,
     /// Whether it is known to free one of them and then fail.
     taken: bool = false,
@@ -314,12 +314,17 @@ fn failsLater(tree: *const Ast, from: Ast.TokenIndex, function: Function) bool {
     return false;
 }
 
-/// The names `function`'s `catch`es capture: `name` of `catch |name|`.
+/// The names `function`'s errors are caught as: `name` of `catch |name|`,
+/// or of an `if`'s or a `while`'s `else |name|`.
 fn caughtTokens(arena: Allocator, tree: *const Ast, function: Function) Allocator.Error![]const []const u8 {
     var caught: std.ArrayList([]const u8) = .empty;
     var token = function.first;
     while (token + 2 <= function.last) : (token += 1) {
-        if (tree.tokenTag(token) != .keyword_catch or tree.tokenTag(token + 1) != .pipe) continue;
+        switch (tree.tokenTag(token)) {
+            .keyword_catch, .keyword_else => {},
+            else => continue,
+        }
+        if (tree.tokenTag(token + 1) != .pipe) continue;
         try caught.append(arena, tree.tokenSlice(token + 2));
     }
     return caught.items;
@@ -731,11 +736,14 @@ test "a function that frees what it is handed itself, or a copy of it, before it
         \\fn load(gpa: Allocator) !void { const bytes = try gpa.alloc(u8, 4); errdefer gpa.free(bytes); try check(gpa, bytes); }
         \\fn consume(gpa: Allocator, list: *List) !void { defer list.deinit(gpa); try flush(list); }
         \\fn run(gpa: Allocator) !void { var list: List = .empty; errdefer list.deinit(gpa); try consume(gpa, &list); }
+        \\fn parsed(gpa: Allocator, bytes: []u8) !void { if (parse(bytes)) |_| {} else |err| { gpa.free(bytes); return err; } }
+        \\fn read(gpa: Allocator) !void { const bytes = try gpa.alloc(u8, 4); errdefer gpa.free(bytes); try parsed(gpa, bytes); }
     ,
         \\3:106 push items
         \\5:116 keep bytes
         \\7:99 check bytes
         \\9:88 consume list
+        \\11:99 parsed bytes
         \\
     );
 }

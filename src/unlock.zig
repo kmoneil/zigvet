@@ -15,8 +15,8 @@
 //! what unlocks is `x.unlock(...)`, or `x.unlockShared(...)` for a shared
 //! lock, later in the same block, `x` the same as written. It is reported
 //! when a statement between can fail with an error: a `try`, a
-//! `return error.X`, or a `return` of what a `catch` caught, on a path that
-//! does not unlock first.
+//! `return error.X`, or a `return` of what a `catch` or an `else |err|`
+//! caught, on a path that does not unlock first.
 //!
 //! Not reported: a lock a `defer` or `errdefer` unlocks before the
 //! failure, however it is written (`defer if (!unlocked) m.unlock();`); a
@@ -115,7 +115,7 @@ fn deferUnlocks(tree: *const Ast, statements: []const Node.Index, holder: []cons
 
 /// The first error exit in `statements`, on a path that does not unlock
 /// `holder` first: a `try`, a `return error.X`, or a `return` of what a
-/// `catch` caught.
+/// capture caught.
 fn failure(arena: Allocator, tree: *const Ast, parents: []const Node.OptionalIndex, statements: []const Node.Index, holder: []const u8, method: []const u8) Allocator.Error!?Node.Index {
     for (statements) |statement| {
         var nodes: std.ArrayList(Node.Index) = .empty;
@@ -156,23 +156,38 @@ fn unlockedBefore(tree: *const Ast, parents: []const Node.OptionalIndex, node: N
     return false;
 }
 
-/// Whether `node`, a `return`, returns an error: `error.X`, or what the
-/// `catch |err|` around it caught.
+/// Whether `node`, a `return`, returns an error: `error.X`, or what a
+/// capture around it caught, a `catch |err|`'s, or the `else |err|` of an
+/// `if` or a `while` on an error union, when `node` is in that `else`.
+/// Every rule that asks this asks it here.
 pub fn returnsError(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) bool {
     const value = tree.nodeData(node).opt_node.unwrap() orelse return false;
     if (tree.nodeTag(value) == .error_value) return true;
     if (tree.nodeTag(value) != .identifier) return false;
     const name = tree.tokenSlice(tree.nodeMainToken(value));
+    var child = node;
     var up = parents[@backingInt(node)].unwrap();
-    while (up) |parent| : (up = parents[@backingInt(parent)].unwrap()) {
-        switch (tree.nodeTag(parent)) {
+    while (up) |parent| : ({
+        child = parent;
+        up = parents[@backingInt(parent)].unwrap();
+    }) {
+        const caught = switch (tree.nodeTag(parent)) {
             .fn_decl, .test_decl => return false,
-            .@"catch" => {
+            .@"catch" => caught: {
                 const token = tree.nodeMainToken(parent);
-                if (tree.tokenTag(token + 1) == .pipe and std.mem.eql(u8, tree.tokenSlice(token + 2), name)) return true;
+                break :caught if (tree.tokenTag(token + 1) == .pipe) token + 2 else null;
             },
-            else => {},
-        }
+            .@"if" => caught: {
+                const full = tree.fullIf(parent).?;
+                break :caught if ((full.ast.else_expr.unwrap() orelse break :caught null) == child) full.error_token else null;
+            },
+            .@"while" => caught: {
+                const full = tree.fullWhile(parent).?;
+                break :caught if ((full.ast.else_expr.unwrap() orelse break :caught null) == child) full.error_token else null;
+            },
+            else => null,
+        };
+        if (caught) |token| if (std.mem.eql(u8, tree.tokenSlice(token), name)) return true;
     }
     return false;
 }
@@ -270,4 +285,16 @@ test "not reported: defer, errdefer, unlocked on the way out, a plain return, th
         \\fn other(self: *S) !void { self.a.lock(); try self.flush(); self.b.unlock(); }
         \\test "held" { m.lock(); try expect(false); m.unlock(); }
     , "");
+}
+
+test "a lock left held by an error an else capture returns (#118)" {
+    try expectUnlock(
+        \\fn take(log: *Log, io: Io) !u32 { try log.mutex.lock(io); const v = if (log.next()) |v| v else |err| return err; log.mutex.unlock(io); return v; }
+        \\fn drain(self: *S) !void { self.mutex.lock(); while (self.it.next()) |x| use(x) else |err| return err; self.mutex.unlock(); }
+        \\fn payload(self: *S) !u32 { self.mutex.lock(); if (self.peek()) |err| return err else |err| log(err); self.mutex.unlock(); return 0; }
+    ,
+        \\1:35 log.mutex <- err
+        \\2:28 self.mutex <- err
+        \\
+    );
 }
