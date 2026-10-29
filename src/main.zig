@@ -8,6 +8,7 @@ const Io = std.Io;
 const build_options = @import("build_options");
 const test_options = @import("test_options");
 const report = @import("report.zig");
+const unrun = @import("unrun.zig");
 const vet = @import("vet.zig");
 const walk = @import("walk.zig");
 
@@ -88,12 +89,29 @@ pub fn main(init: std.process.Init) !u8 {
     }
     walk.sortUnique(&files);
 
+    // unrun asks which files the tests reach, so it reads them all before
+    // any is reported. One it cannot read or parse here may import
+    // anything, and is taken to be reached.
+    const summaries = try arena.alloc(unrun.Summary, files.items.len);
+    for (files.items, summaries) |path, *summary| {
+        summary.* = .{ .path = path, .unparsed = true };
+        const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => continue,
+        };
+        defer gpa.free(source);
+        var tree = try std.zig.Ast.parse(gpa, source, .{});
+        defer tree.deinit(gpa);
+        summary.* = try unrun.summarize(gpa, arena, path, &tree);
+    }
+    const unrun_found = try unrun.check(arena, summaries);
+
     var reports: report.Out = .init(gpa, out, run.format);
     defer reports.deinit();
     try reports.begin();
     var reported: usize = 0;
     var checked: usize = 0;
-    for (files.items) |path| {
+    for (files.items, unrun_found) |path, *found| {
         const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
@@ -103,7 +121,8 @@ pub fn main(init: std.process.Init) !u8 {
             },
         };
         defer gpa.free(source);
-        reported += try vet.vetSource(gpa, path, source, &reports);
+        const extra: []const report.Finding = if (found.*) |*f| f[0..1] else &.{};
+        reported += try vet.vetSource(gpa, path, source, extra, &reports);
         checked += 1;
     }
     try reports.end();
@@ -236,6 +255,34 @@ test "--summary says on stderr what was checked and reported, in every format" {
     }
 }
 
+test "unrun reads every file checked before it reports one, and an allow comment covers it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "storage");
+    const files = [_][2][]const u8{
+        .{ "root.zig", "pub const storage = @import(\"storage.zig\");\ntest { _ = storage; }\n" },
+        .{ "storage.zig", "pub const s3 = @import(\"storage/s3.zig\");\npub const disk = @import(\"storage/disk.zig\");\ntest \"storage\" {}\n" },
+        .{ "storage/s3.zig", "test \"s3\" {}\n" },
+        .{ "storage/disk.zig", "// zigvet: allow unrun its own build step runs it\ntest \"disk\" {}\n" },
+    };
+    for (files) |file| try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ exe, "." }, .cwd = .{ .dir = tmp.dir } });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqualStrings(
+        \\storage/s3.zig:1:1: unrun: nothing the tests reach refers to this file, so its test never runs
+        \\    hint: add `_ = s3;` to a test block in storage.zig
+        \\
+    , result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
 test "parseArgs: paths and excludes, in any order" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -342,6 +389,7 @@ test {
     _ = @import("twice.zig");
     _ = @import("types.zig");
     _ = @import("unlock.zig");
+    _ = @import("unrun.zig");
     _ = @import("vet.zig");
     _ = @import("walk.zig");
     _ = @import("wipe.zig");

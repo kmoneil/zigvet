@@ -1,5 +1,6 @@
 //! Checks one file: parse it, run every rule, print what is left after the
-//! allow comments.
+//! allow comments. One rule, unrun, reads every file checked; main finds
+//! its reports first and hands each file its own.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -31,8 +32,9 @@ const Finding = report.Finding;
 pub const Error = Allocator.Error || Writer.Error;
 
 /// Writes `source`'s parse errors or, if it parses, its findings to `out`,
-/// naming the file `path`. Returns how many it wrote.
-pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, out: *report.Out) Error!usize {
+/// naming the file `path`, with `extra`, what the rules that read every
+/// file found in it. Returns how many it wrote.
+pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, extra: []const Finding, out: *report.Out) Error!usize {
     var tree = try Ast.parse(gpa, source, .{});
     defer tree.deinit(gpa);
 
@@ -46,7 +48,7 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, out: *r
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
 
-    const kept = try findings(arena_state.allocator(), &tree);
+    const kept = try findings(arena_state.allocator(), &tree, extra);
     for (kept) |finding| try out.finding(path, report.location(source, finding.offset), finding);
     return kept.len;
 }
@@ -55,14 +57,15 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, out: *r
 fn vetText(path: []const u8, source: [:0]const u8, w: *Writer) Error!usize {
     var out: report.Out = .init(std.testing.allocator, w, .text);
     defer out.deinit();
-    return vetSource(std.testing.allocator, path, source, &out);
+    return vetSource(std.testing.allocator, path, source, &.{}, &out);
 }
 
 /// Runs every rule over `tree` and returns the findings no allow comment
-/// covers, and a report for each allow comment that covers none, in source
-/// order. Allocated with `arena`.
-pub fn findings(arena: Allocator, tree: *const Ast) Allocator.Error![]Finding {
+/// covers, of those and `extra`, and a report for each allow comment that
+/// covers none, in source order. Allocated with `arena`.
+pub fn findings(arena: Allocator, tree: *const Ast, extra: []const Finding) Allocator.Error![]Finding {
     var all: std.ArrayList(Finding) = .empty;
+    try all.appendSlice(arena, extra);
     try escape.check(arena, tree, &all);
     try alias.check(arena, tree, &all);
     try cancel.check(arena, tree, &all);
@@ -185,7 +188,7 @@ test "an allow comment that suppresses nothing is reported, with why" {
     try std.testing.expectEqualStrings(
         \\a.zig:2:5: allow: suppresses nothing: no escape finding on the line below it
         \\    hint: delete it, or move it directly above the line it excuses
-        \\a.zig:6:5: allow: no rule named 'escpae' (rules: escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached)
+        \\a.zig:6:5: allow: no rule named 'escpae' (rules: escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun)
         \\    hint: write it as `// zigvet: allow <rule> <reason>`
         \\a.zig:7:12: escape: anonymous array made here leaves typo through return
         \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const

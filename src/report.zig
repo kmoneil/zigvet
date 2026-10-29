@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -57,6 +57,7 @@ pub const Finding = struct {
         copy: Copy,
         flush: Flush,
         cached: Cached,
+        unrun: Unrun,
         allow: Allow,
     };
 
@@ -203,6 +204,11 @@ pub const Finding = struct {
         walked: bool,
     };
 
+    pub const Unrun = struct {
+        /// How many tests the file has at the top level.
+        tests: usize,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -235,6 +241,7 @@ pub const Finding = struct {
             .copy => .copy,
             .flush => .flush,
             .cached => .cached,
+            .unrun => .unrun,
             .allow => null,
         };
     }
@@ -329,6 +336,10 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
             try w.print("walks `{s}`, and `dependOnDirectoryContents` is not recursive, so a file added to a directory under it is not seen until something else changes the build", .{c.path})
         else
             try w.print("lists `{s}` to decide what to build, and nothing here tells Zig's configure cache, so a file added there is not seen until something else changes the build", .{c.path}),
+        .unrun => |u| if (u.tests == 1)
+            try w.writeAll("nothing the tests reach refers to this file, so its test never runs")
+        else
+            try w.print("nothing the tests reach refers to this file, so its {d} tests never run", .{u.tests}),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
