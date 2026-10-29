@@ -275,8 +275,9 @@ test "unrun reads every file checked before it reports one, and an allow comment
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
-    try std.testing.expectEqualStrings(
-        \\storage/s3.zig:1:1: unrun: nothing the tests reach refers to this file, so its test never runs
+    // The path as zigvet prints it, with Windows's separator there.
+    try std.testing.expectEqualStrings("storage" ++ std.fs.path.sep_str ++
+        \\s3.zig:1:1: unrun: nothing the tests reach refers to this file, so its test never runs
         \\    hint: add `_ = s3;` to a test block in storage.zig
         \\
     , result.stdout);

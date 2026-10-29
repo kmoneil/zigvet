@@ -755,6 +755,8 @@ fn sccs(arena: Allocator, imports: []const std.ArrayList(usize)) Allocator.Error
 
 /// Runs the rule over `sources`, each a path and its source, and compares
 /// one line per finding, `path:line:col tests | hint`, in their order.
+/// The paths are cleaned as walk cleans them, which on Windows makes every
+/// separator `\`, and are compared with `/`.
 fn expectUnrun(sources: []const [2][:0]const u8, expected: []const u8) !void {
     const gpa = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -765,7 +767,7 @@ fn expectUnrun(sources: []const [2][:0]const u8, expected: []const u8) !void {
         var tree = try Ast.parse(gpa, file[1], .{});
         defer tree.deinit(gpa);
         try std.testing.expectEqual(0, tree.errors.len);
-        summary.* = try summarize(gpa, arena, file[0], &tree);
+        summary.* = try summarize(gpa, arena, try std.fs.path.resolveAlloc(arena, &.{file[0]}), &tree);
     }
     const found = try check(arena, summaries);
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -775,6 +777,7 @@ fn expectUnrun(sources: []const [2][:0]const u8, expected: []const u8) !void {
         const loc = report.location(file[1], finding.offset);
         try out.writer.print("{s}:{d}:{d} {d} | {s}\n", .{ file[0], loc.line + 1, loc.column + 1, finding.detail.unrun.tests, finding.hint });
     }
+    std.mem.replaceScalar(u8, out.written(), std.fs.path.sep, '/');
     try expect.findings(@src(), expected, out.written());
 }
 
