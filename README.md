@@ -435,10 +435,13 @@ callee leave the allocation to its caller when it fails.
 ### What owner reports
 
 A call under `try` to one of the file's own functions that takes a
-parameter on failure, where the argument for that parameter is a name that
-an `errdefer` of the caller, declared before the call in a block around it,
-frees, or carries one: its address (`&list`), or a field of an
-initializer, as deep as they nest (`.{ .state = .{ .items = items } }`).
+parameter on failure, or one returned as it is (`return f(...)`, which runs
+the caller's errdefers just as `try` does), where the argument for that
+parameter (the receiver, for a method's first) is a name that an
+`errdefer` of the caller, declared before the call in a block around it,
+frees, or carries one: its address (`&list`), a field of an initializer,
+as deep as they nest (`.{ .state = .{ .items = items } }`), or a local
+made from one of those that nothing assigns to before the call.
 A function takes a parameter on failure when an `errdefer` in it frees
 the parameter (`x.free(p)`, `x.destroy(p)`, `x.rawFree(p, ...)` or
 `p.deinit(...)`) and something after it can fail: a `try` or a
@@ -458,19 +461,44 @@ fn push(frames: *std.ArrayList(Frame), frame: Frame) !void {
 ```
 
 A caller that frees the components in an errdefer and hands them to
-`push` in a frame frees them twice when the append fails. The function is
-found by name, through its type (`Store.keep(s, b)`), or as a method of a
-binding whose type the file declares (`self.keep(b)`).
+`push` in a frame frees them twice when the append fails. A function may
+take a field of the parameter instead, and then the argument has to carry
+the freed name in that field:
+
+```zig
+const Image = struct {
+    pixels: []u8,
+
+    /// Turned; the old pixels are freed.
+    fn turned(img: Image, gpa: Allocator) !Image {
+        defer gpa.free(img.pixels);
+        const out = try gpa.alloc(u8, img.pixels.len);
+        @memcpy(out, img.pixels);
+        return .{ .pixels = out };
+    }
+};
+
+fn decode(gpa: Allocator, n: usize) !Image {
+    const pixels = try gpa.alloc(u8, n);
+    errdefer gpa.free(pixels);
+    const img: Image = .{ .pixels = pixels };
+    return img.turned(gpa); // when the alloc in turned fails, pixels is freed twice
+}
+```
+
+The function is found by name, through its type (`Store.keep(s, b)`), or
+as a method of a binding whose type the file declares (`self.keep(b)`).
 
 Not reported: a call whose error is handled rather than returned with
-`try`, which only the caller can judge; an `errdefer` declared after the
-call; an argument that neither is a name nor carries one; a release of
-something reached through the parameter (`self.list.deinit()`), which is
-not what the caller frees; a method's receiver, or the first of several
-arguments, for a call recognized only by its name
-(`releasePages(pool, pages)` releases into `pool`); a release that leaves
-the value empty (`clearAndFree`), or one followed by an assignment to it;
-and a function declared in another file.
+`try` or `return`, which only the caller can judge; an `errdefer` declared
+after the call; an argument that neither is a name nor carries one; a
+field the callee frees of a name the caller's errdefer frees whole
+(`gpa.destroy(frame)` against `frame.list.deinit()`), which is not what
+the caller frees; a method's receiver, or the first of several arguments,
+for a call recognized only by its name (`releasePages(pool, pages)`
+releases into `pool`); a release that leaves the value empty
+(`clearAndFree`), or one followed by an assignment to it; and a function
+declared in another file.
 
 ## Rule seven: kept
 

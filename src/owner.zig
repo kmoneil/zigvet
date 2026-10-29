@@ -40,19 +40,28 @@
 //!         };
 //!     }
 //!
-//! A call to it under `try` is reported when the argument for that
-//! parameter is a name that an `errdefer` of the caller, declared before
-//! the call in a block around it, frees the same way, or carries one: its
-//! address (`&list`), or a field of an initializer, as deep as they nest
-//! (`.{ .state = .{ .items = items } }`). The function has to be the
-//! file's own, called by name, through its type (`Store.keep(s, b)`), or as
-//! a method of a binding whose type the file declares (`self.keep(b)`).
+//! Either way it may take a field of `p` instead (`gpa.free(img.pixels)`).
+//!
+//! A call to it under `try`, or returned as it is (`return f(...)`, which
+//! runs the caller's errdefers just as `try` does), is reported when the
+//! argument for that parameter, the receiver for a method's first, is a
+//! name that an `errdefer` of the caller, declared before the call in a
+//! block around it, frees the same way, or carries one: its address
+//! (`&list`), a field of an initializer, as deep as they nest
+//! (`.{ .state = .{ .items = items } }`), or a local made from one of
+//! those that nothing assigns to before the call
+//! (`const img: Image = .{ .pixels = pixels };`). For a field the callee
+//! takes, the argument has to carry the name in that field. The function
+//! has to be the file's own, called by name, through its type
+//! (`Store.keep(s, b)`), or as a method of a binding whose type the file
+//! declares (`self.keep(b)`).
 //!
 //! Not reported: a call whose error is handled rather than returned with
-//! `try`, which only the caller can judge; an `errdefer` declared after the
-//! call; an argument that is neither a name nor carries one; a release of
-//! something reached through the parameter (`self.list.deinit()`), which
-//! is not what the caller frees; a release that leaves the value empty
+//! `try` or `return`, which only the caller can judge; an `errdefer`
+//! declared after the call; an argument that is neither a name nor carries
+//! one; a field the callee frees of a name the caller's errdefer frees
+//! whole (`destroy(frame)` against `frame.list.deinit()`), which is not
+//! what the caller frees; a release that leaves the value empty
 //! (`clearAndFree`); and one followed, before the failure, by an
 //! assignment to what it released.
 
@@ -92,12 +101,34 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
         }
     }
     if (freed.count() == 0) return;
+    // And the locals made from one, which carry it
+    // (`const img: Image = .{ .pixels = pixels };`), or from those.
+    var grew = true;
+    while (grew) {
+        grew = false;
+        for (tree.nodes.items(.tag), 0..) |tag, i| {
+            switch (tag) {
+                .local_var_decl, .simple_var_decl, .aligned_var_decl => {},
+                else => continue,
+            }
+            const decl = tree.fullVarDecl(@fromBackingInt(@intCast(i))).?;
+            const name = tree.tokenSlice(decl.ast.mut_token + 1);
+            if (freed.contains(name)) continue;
+            const init = decl.ast.init_node.unwrap() orelse continue;
+            if (!carries(tree, init) or !mentions(tree, init, freed)) continue;
+            try freed.put(arena, name, {});
+            grew = true;
+        }
+    }
     var calls: std.ArrayList(Node.Index) = .empty;
     for (tree.nodes.items(.tag), 0..) |tag, i| {
-        if (tag != .@"try") continue;
+        switch (tag) {
+            .@"try", .@"return" => {},
+            else => continue,
+        }
         const node: Node.Index = @fromBackingInt(@intCast(i));
         var buffer: [1]Node.Index = undefined;
-        const call = tree.fullCall(&buffer, operandOf(tree, node)) orelse continue;
+        const call = tree.fullCall(&buffer, operandOf(tree, node) orelse continue) orelse continue;
         const name = switch (tree.nodeTag(call.ast.fn_expr)) {
             .identifier => tree.tokenSlice(tree.nodeMainToken(call.ast.fn_expr)),
             .field_access => tree.tokenSlice(tree.nodeData(call.ast.fn_expr).node_and_token[1]),
@@ -106,23 +137,44 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
         if (!owners.contains(name)) continue;
         for (call.ast.params) |param| {
             if (mentions(tree, param, freed)) break;
-        } else continue;
+        } else {
+            // A method's receiver is an argument too.
+            if (tree.nodeTag(call.ast.fn_expr) != .field_access) continue;
+            if (!mentions(tree, tree.nodeData(call.ast.fn_expr).node_and_token[0], freed)) continue;
+        }
         try calls.append(arena, node);
     }
     if (calls.items.len == 0) return;
     var rule: Rule = .{ .arena = arena, .tree = tree, .findings = findings, .types = try .init(arena, tree) };
     for (calls.items) |node| {
-        const operand = operandOf(tree, node);
+        const operand = operandOf(tree, node).?;
         var buffer: [1]Node.Index = undefined;
         try rule.call(node, operand, tree.fullCall(&buffer, operand).?);
     }
 }
 
-/// What a `try` tries, through parentheses.
-fn operandOf(tree: *const Ast, try_node: Node.Index) Node.Index {
-    var operand = tree.nodeData(try_node).node;
+/// What a `try` tries, or what a `return` returns, through parentheses:
+/// an error union returned as it is runs the caller's errdefers just as
+/// `try` does.
+fn operandOf(tree: *const Ast, node: Node.Index) ?Node.Index {
+    var operand = switch (tree.nodeTag(node)) {
+        .@"try" => tree.nodeData(node).node,
+        .@"return" => tree.nodeData(node).opt_node.unwrap() orelse return null,
+        else => return null,
+    };
     while (tree.nodeTag(operand) == .grouped_expression) operand = tree.nodeData(operand).node_and_token[0];
     return operand;
+}
+
+/// Whether `init`, a local's initializer, is one `Rule.carried` follows:
+/// a name, an address, or an initializer.
+fn carries(tree: *const Ast, init: Node.Index) bool {
+    switch (tree.nodeTag(init)) {
+        .identifier, .address_of, .grouped_expression => return true,
+        else => {},
+    }
+    var buffer: [2]Node.Index = undefined;
+    return tree.fullStructInit(&buffer, init) != null;
 }
 
 /// Whether a token of `node` is a name among `freed`.
@@ -171,7 +223,7 @@ fn ownerNames(arena: Allocator, tree: *const Ast) Allocator.Error!std.StringHash
         const function = innermost(functions.items, tree.nodeMainToken(node)) orelse continue;
         if (function.taken) continue;
         if (function.held == null) function.held = try heldTokens(arena, tree, function.*);
-        if (!releasesAny(tree, node, function.held.?)) continue;
+        if (releasesAny(tree, node, function.held.?) == null) continue;
         if (function.caught == null) function.caught = try caughtTokens(arena, tree, function.*);
         if (!failsLater(tree, tree.lastToken(node), function.*)) continue;
         function.taken = true;
@@ -306,63 +358,95 @@ fn isIn(names: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-/// Whether `node` is a call that releases one of `names` itself, not
-/// something reached through it: `gpa.free(p)` or `p.deinit()`, or a call
+/// What `node` releases, if it is a call that releases one of `names` or a
+/// field of one (`img.pixels`): `gpa.free(p)` or `p.deinit()`, or a call
 /// whose name says it releases (`release(ctx, &p)`) handed it as its only
 /// argument or one after the first, which is most often what it releases
 /// into (`releasePages(pool, pages)`). A method's receiver is not taken as
 /// released that way: `build_env.freeReports(reports)` frees `reports`.
-fn releasesAny(tree: *const Ast, node: Node.Index, names: []const []const u8) bool {
+fn releasesAny(tree: *const Ast, node: Node.Index, names: []const []const u8) ?Node.Index {
     var buffer: [1]Node.Index = undefined;
-    const call = tree.fullCall(&buffer, node) orelse return false;
-    if (refill.releaseCall(tree, node)) |found| return isHeld(tree, found[1], names);
-    const released = if (call.ast.params.len > 1) call.ast.params[1..] else call.ast.params;
-    for (released) |param| {
-        if (isHeld(tree, param, names)) break;
-    } else return false;
-    if (!twice.releases(tree, call.ast.fn_expr)) return false;
+    const call = tree.fullCall(&buffer, node) orelse return null;
+    if (refill.releaseCall(tree, node)) |found| return if (isHeld(tree, found[1], names)) found[1] else null;
+    const params = if (call.ast.params.len > 1) call.ast.params[1..] else call.ast.params;
+    const released = for (params) |param| {
+        if (isHeld(tree, param, names)) break param;
+    } else return null;
+    if (!twice.releases(tree, call.ast.fn_expr)) return null;
     // `clearAndFree` and the like leave the value empty, safe to free again.
     const name = switch (tree.nodeTag(call.ast.fn_expr)) {
         .identifier => tree.tokenSlice(tree.nodeMainToken(call.ast.fn_expr)),
         .field_access => tree.tokenSlice(tree.nodeData(call.ast.fn_expr).node_and_token[1]),
-        else => return false,
+        else => return null,
     };
-    return !std.mem.startsWith(u8, name, "clear");
+    return if (std.mem.startsWith(u8, name, "clear")) null else released;
 }
 
-/// Whether `node` is one of `names`, through `&`, `.*` and parentheses.
+/// Whether `node` is one of `names`, or a field of one, through `&`, `.*`
+/// and parentheses.
 fn isHeld(tree: *const Ast, node: Node.Index, names: []const []const u8) bool {
     var n = node;
     while (true) switch (tree.nodeTag(n)) {
         .address_of, .deref => n = tree.nodeData(n).node,
-        .grouped_expression => n = tree.nodeData(n).node_and_token[0],
+        .grouped_expression, .field_access => n = tree.nodeData(n).node_and_token[0],
         .identifier => break,
         else => return false,
     };
     return isIn(names, tree.tokenSlice(tree.nodeMainToken(n)));
 }
 
+/// The fields from the name `node` is reached from to `node`, one
+/// `isHeld` took: none for the name itself, `pixels` for `img.pixels`.
+fn fieldsTo(arena: Allocator, tree: *const Ast, node: Node.Index) Allocator.Error!Path {
+    var fields: std.ArrayList([]const u8) = .empty;
+    var n = node;
+    while (true) switch (tree.nodeTag(n)) {
+        .address_of, .deref => n = tree.nodeData(n).node,
+        .grouped_expression => n = tree.nodeData(n).node_and_token[0],
+        .field_access => {
+            const lhs, const field = tree.nodeData(n).node_and_token;
+            try fields.append(arena, tree.tokenSlice(field));
+            n = lhs;
+        },
+        else => break,
+    };
+    std.mem.reverse([]const u8, fields.items);
+    return fields.items;
+}
+
+/// Field names, outermost first: what a function releases of a parameter.
+const Path = []const []const u8;
+
+/// A parameter a function frees when it fails, by index, and the field of
+/// it that it frees, if not the whole of it.
+const Taken = struct {
+    param: usize,
+    path: Path,
+};
+
 const Rule = struct {
     arena: Allocator,
     tree: *const Ast,
     findings: *std.ArrayList(Finding),
     types: Types,
-    /// The parameters each function frees when it fails, by index, found
-    /// once per function.
-    taken: std.AutoHashMapUnmanaged(Node.Index, []const usize) = .empty,
+    /// What each function frees when it fails, found once per function.
+    taken: std.AutoHashMapUnmanaged(Node.Index, []const Taken) = .empty,
 
-    /// Checks `try f(...)`, with `operand` the call and `full` its parts,
-    /// when `f` is the file's own function and takes a parameter on
-    /// failure.
-    fn call(r: *Rule, try_node: Node.Index, operand: Node.Index, full: Ast.full.Call) Allocator.Error!void {
+    /// Checks `try f(...)` or `return f(...)`, with `operand` the call and
+    /// `full` its parts, when `f` is the file's own function and takes a
+    /// parameter on failure.
+    fn call(r: *Rule, node: Node.Index, operand: Node.Index, full: Ast.full.Call) Allocator.Error!void {
         const tree = r.tree;
         const fn_decl, const receiver = r.types.callee(full.ast.fn_expr) orelse return;
-        for (try r.takes(fn_decl)) |param| {
+        for (try r.takes(fn_decl)) |taken| {
             // A method's receiver is its first parameter.
-            if (param < receiver) continue;
-            const at = param - receiver;
-            if (at >= full.ast.params.len) continue;
-            const name = r.carried(try_node, full.ast.params[at]) orelse continue;
+            const argument = if (taken.param < receiver)
+                tree.nodeData(full.ast.fn_expr).node_and_token[0]
+            else if (taken.param - receiver < full.ast.params.len)
+                full.ast.params[taken.param - receiver]
+            else
+                continue;
+            const name = r.carried(node, argument, taken.path, 0) orelse continue;
             const function = fnName(tree, fn_decl);
             return r.findings.append(r.arena, .{
                 .offset = tree.tokenStart(tree.firstToken(operand)),
@@ -375,35 +459,78 @@ const Rule = struct {
         }
     }
 
-    /// The first name `argument` carries that an `errdefer` declared before
-    /// `node` frees: the argument itself, what its address is taken of
-    /// (`&list`), or a field of an initializer, as deep as they nest
-    /// (`.{ .state = .{ .items = items } }`).
-    fn carried(r: *Rule, node: Node.Index, argument: Node.Index) ?[]const u8 {
+    /// The first name `argument` carries, at `path` in it, that an
+    /// `errdefer` declared before `node` frees. For the whole of it: the
+    /// argument itself, what its address is taken of (`&list`), or a field
+    /// of an initializer, as deep as they nest
+    /// (`.{ .state = .{ .items = items } }`). For a field: that field of an
+    /// initializer. Through a local made from either, too, that nothing
+    /// assigns to before `node` (`const img: Image = .{ .pixels = pixels };`).
+    fn carried(r: *Rule, node: Node.Index, argument: Node.Index, path: Path, depth: u8) ?[]const u8 {
         const tree = r.tree;
+        if (depth > 8) return null;
         switch (tree.nodeTag(argument)) {
             .identifier => {
                 const name = tree.tokenSlice(tree.nodeMainToken(argument));
-                return if (r.freedOnError(node, name)) name else null;
+                // Freed whole by the caller, a field of it by the callee:
+                // `destroy(frame)` does not free what `frame.list` holds.
+                if (r.freedOnError(node, name)) return if (path.len == 0) name else null;
+                const init = r.localMade(node, argument) orelse return null;
+                return r.carried(node, init, path, depth + 1);
             },
-            .address_of => return r.carried(node, tree.nodeData(argument).node),
-            .grouped_expression => return r.carried(node, tree.nodeData(argument).node_and_token[0]),
+            .address_of => return r.carried(node, tree.nodeData(argument).node, path, depth + 1),
+            .grouped_expression => return r.carried(node, tree.nodeData(argument).node_and_token[0], path, depth + 1),
             else => {},
         }
         var buffer: [2]Node.Index = undefined;
         const init = tree.fullStructInit(&buffer, argument) orelse return null;
-        for (init.ast.fields) |field| if (r.carried(node, field)) |name| return name;
+        for (init.ast.fields) |field| {
+            if (path.len == 0) {
+                if (r.carried(node, field, path, depth + 1)) |name| return name;
+                continue;
+            }
+            // `.pixels = value`: the field's name is two tokens before it.
+            if (!std.mem.eql(u8, tree.tokenSlice(tree.firstToken(field) - 2), path[0])) continue;
+            return r.carried(node, field, path[1..], depth + 1);
+        }
         return null;
     }
 
-    /// The parameters `fn_decl` frees when it fails: each one an `errdefer`
-    /// in its body frees, with something after it in its block that can
-    /// fail, or one it releases otherwise, itself, a field of it or a copy
-    /// of it, before a failure on its path.
-    fn takes(r: *Rule, fn_decl: Node.Index) Allocator.Error![]const usize {
+    /// The initializer of the local `use` names, if it is one `carried`
+    /// follows and nothing assigns to the local between it and `node`.
+    fn localMade(r: *Rule, node: Node.Index, use: Node.Index) ?Node.Index {
+        const tree = r.tree;
+        const init = r.types.localInit(use) orelse return null;
+        if (!carries(tree, init)) return null;
+        const decl_node = r.types.parents[@backingInt(init)].unwrap() orelse return null;
+        const decl = tree.fullVarDecl(decl_node) orelse return null;
+        if (tree.tokenTag(decl.ast.mut_token) == .keyword_const) return init;
+        // A `var`: no assignment to it, or to a field of it, in between.
+        const name = tree.tokenSlice(decl.ast.mut_token + 1);
+        const from = tree.lastToken(decl_node);
+        const to = tree.firstToken(node);
+        for (tree.nodes.items(.tag), 0..) |tag, i| {
+            switch (tag) {
+                .assign => {},
+                else => continue,
+            }
+            const assign: Node.Index = @fromBackingInt(@intCast(i));
+            const at = tree.nodeMainToken(assign);
+            if (at <= from or at >= to) continue;
+            const root = kept.rootOf(tree, tree.nodeData(assign).node_and_node[0]) orelse continue;
+            if (std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(root)), name)) return null;
+        }
+        return init;
+    }
+
+    /// What `fn_decl` frees when it fails: each parameter, or field of
+    /// one, that an `errdefer` in its body frees, with something after it
+    /// in its block that can fail, or that it releases otherwise, itself
+    /// or through a copy, before a failure on its path.
+    fn takes(r: *Rule, fn_decl: Node.Index) Allocator.Error![]const Taken {
         if (r.taken.get(fn_decl)) |known| return known;
         const tree = r.tree;
-        var found: std.ArrayList(usize) = .empty;
+        var found: std.ArrayList(Taken) = .empty;
         var buffer: [1]Node.Index = undefined;
         const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
         const body = tree.nodeData(fn_decl).node_and_node[1];
@@ -413,25 +540,33 @@ const Rule = struct {
         var index: usize = 0;
         while (params.next()) |param| : (index += 1) {
             const name_token = param.name_token orelse continue;
-            if (try r.takesParam(body, nodes.items, tree.tokenSlice(name_token))) try found.append(r.arena, index);
+            try r.takesParam(body, nodes.items, index, tree.tokenSlice(name_token), &found);
         }
         try r.taken.put(r.arena, fn_decl, found.items);
         return found.items;
     }
 
-    /// Whether the function whose body is `body`, with `nodes` in it, frees
-    /// the parameter `name` when it fails.
-    fn takesParam(r: *Rule, body: Node.Index, nodes: []const Node.Index, name: []const u8) Allocator.Error!bool {
+    /// Appends to `found` what the function whose body is `body`, with
+    /// `nodes` in it, frees of its parameter `name`, the `index`th, when
+    /// it fails.
+    fn takesParam(r: *Rule, body: Node.Index, nodes: []const Node.Index, index: usize, name: []const u8, found: *std.ArrayList(Taken)) Allocator.Error!void {
         const tree = r.tree;
         for (nodes) |node| {
             if (tree.nodeTag(node) != .@"errdefer") continue;
-            if (frees(tree, tree.nodeData(node).node, name) and try r.failsAfter(node)) return true;
+            const deferred = tree.nodeData(node).node;
+            var buffer: [2]Node.Index = undefined;
+            const statements = tree.blockStatements(&buffer, deferred) orelse (&deferred)[0..1];
+            for (statements) |statement| {
+                _, const operand = refill.releaseCall(tree, statement) orelse continue;
+                if (!isHeld(tree, operand, &.{name}) or !try r.failsAfter(node)) continue;
+                try found.append(r.arena, .{ .param = index, .path = try fieldsTo(r.arena, tree, operand) });
+            }
         }
         var held: std.ArrayList([]const u8) = .empty;
         try held.append(r.arena, name);
         try copies(r.arena, tree, nodes, &held);
         for (nodes) |node| {
-            if (!releasesAny(tree, node, held.items)) continue;
+            const released = releasesAny(tree, node, held.items) orelse continue;
             // What the release is handed: a statement after it that assigns
             // to one of them leaves it something else to free.
             var call_buffer: [1]Node.Index = undefined;
@@ -439,9 +574,9 @@ const Rule = struct {
             var handed: std.ArrayList(Node.Index) = .empty;
             try handed.appendSlice(r.arena, release.ast.params);
             if (tree.nodeTag(release.ast.fn_expr) == .field_access) try handed.append(r.arena, tree.nodeData(release.ast.fn_expr).node_and_token[0]);
-            if (try twice.failsAfter(r.arena, tree, r.types.parents, node, body, handed.items) != null) return true;
+            if (try twice.failsAfter(r.arena, tree, r.types.parents, node, body, handed.items) == null) continue;
+            try found.append(r.arena, .{ .param = index, .path = try fieldsTo(r.arena, tree, released) });
         }
-        return false;
     }
 
     /// Whether a statement after `statement` in its block can make the
@@ -623,5 +758,49 @@ test "not reported: a release that leaves it empty, assigned after, not failed a
         \\fn g(gpa: Allocator) !void { var pool = try Pool.init(gpa); errdefer pool.deinit(); try pooled(&pool, &.{}); }
         \\fn drained(env: *Env, reports: []u8) !void { defer env.freeReports(reports); try more(); }
         \\fn h(gpa: Allocator) !void { var env = try Env.init(gpa); errdefer env.deinit(); try drained(&env, &.{}); }
+    , "");
+}
+
+test "a call returned as it is, the receiver that carries it, a field the callee frees (#111)" {
+    try expectOwners(
+        \\const Image = struct {
+        \\    pixels: []u8,
+        \\    other: []u8,
+        \\    fn turned(img: Image, gpa: Allocator) !Image { defer gpa.free(img.pixels); const out = try gpa.alloc(u8, 4); return .{ .pixels = out }; }
+        \\    fn drop(img: Image, gpa: Allocator) !void { defer img.deinit(gpa); try more(); }
+        \\    fn swap(img: *Image, gpa: Allocator) !void { errdefer gpa.free(img.pixels); try more(); }
+        \\};
+        \\fn keep(list: *List, bytes: []u8) !void { errdefer gpa.free(bytes); try list.append(gpa, bytes); }
+        \\fn eat(gpa: Allocator, frame: Frame) !void { defer gpa.free(frame.state.items); try more(); }
+        \\fn a(gpa: Allocator, n: usize) !Image { const pixels = try gpa.alloc(u8, n); errdefer gpa.free(pixels); const img: Image = .{ .pixels = pixels }; return img.turned(gpa); }
+        \\fn b(gpa: Allocator, list: *List) !void { const bytes = try gpa.alloc(u8, 4); errdefer gpa.free(bytes); return (keep(list, bytes)); }
+        \\fn c(gpa: Allocator) !void { const pixels = try gpa.alloc(u8, 4); errdefer gpa.free(pixels); const img: Image = .{ .pixels = pixels }; try img.drop(gpa); }
+        \\fn d(gpa: Allocator) !void { const pixels = try gpa.alloc(u8, 4); errdefer gpa.free(pixels); var img: Image = .{ .pixels = pixels }; try img.swap(gpa); }
+        \\fn e(gpa: Allocator) !void { const items = try gpa.alloc(u8, 4); errdefer gpa.free(items); const state = .{ .items = items }; try eat(gpa, .{ .state = state }); }
+    ,
+        \\10:154 img.turned pixels
+        \\11:113 keep bytes
+        \\12:140 img.drop pixels
+        \\13:138 img.swap pixels
+        \\14:131 eat items
+        \\
+    );
+}
+
+test "not reported: another field, a field of what the caller frees whole, a local assigned before, an error handled" {
+    try expectOwners(
+        \\const Image = struct {
+        \\    pixels: []u8,
+        \\    other: []u8,
+        \\    fn turned(img: Image, gpa: Allocator) !Image { defer gpa.free(img.other); const out = try gpa.alloc(u8, 4); return .{ .pixels = out }; }
+        \\    fn swap(img: *Image, gpa: Allocator) !void { errdefer gpa.free(img.pixels); try more(); }
+        \\};
+        \\fn keep(list: *List, bytes: []u8) !void { errdefer gpa.free(bytes); try list.append(gpa, bytes); }
+        \\fn a(gpa: Allocator) !Image { const pixels = try gpa.alloc(u8, 4); errdefer gpa.free(pixels); const img: Image = .{ .pixels = pixels, .other = &.{} }; return img.turned(gpa); }
+        \\fn b(gpa: Allocator) !void { const img: *Image = try gpa.create(Image); errdefer gpa.destroy(img); try img.swap(gpa); }
+        \\fn c(gpa: Allocator, spare: []u8) !void { const pixels = try gpa.alloc(u8, 4); errdefer gpa.free(pixels); var img: Image = .{ .pixels = pixels }; img.pixels = spare; try img.swap(gpa); }
+        \\fn d(gpa: Allocator, spare: []u8) !void { const pixels = try gpa.alloc(u8, 4); errdefer gpa.free(pixels); var img: Image = .{ .pixels = pixels }; img = .{ .pixels = spare }; try img.swap(gpa); }
+        \\fn e(gpa: Allocator, list: *List) !void { const bytes = try gpa.alloc(u8, 4); errdefer gpa.free(bytes); return keep(list, bytes) catch |err| log(err); }
+        \\fn f(gpa: Allocator, list: *List) !void { const bytes = try gpa.alloc(u8, 4); errdefer gpa.free(bytes); { const img: Image = .{ .pixels = bytes }; _ = img; } return; }
     , "");
 }
