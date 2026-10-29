@@ -1,0 +1,81 @@
+# leak's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/leak.zig
+
+== a defer or errdefer that names the local covers what follows
+-                if (mentions(tree, later, name)) {
++                if (false) {
+
+== a local assigned to between
+-            if (try assigns(arena, tree, between, name)) continue;
++            if (false and try assigns(arena, tree, between, name)) continue;
+
+== an empty value holds nothing until its first use
+-                between = between[first + 1 ..];
++                between = between[first..];
+
+== code in a test block
+-            if (unlock.inTest(tree, parents, statement)) continue;
++            _ = parents;
+
+== a call under orelse is a lookup, not something made
+-        .@"catch" => {
+-            fallible = true;
+-            node = tree.nodeData(node).node_and_node[0];
+-        },
++        .@"catch", .@"orelse" => {
++            fallible = true;
++            node = tree.nodeData(node).node_and_node[0];
++        },
+
+== a call that cannot fail is a view, not something made
+-    if (!fallible) return if (std.mem.eql(u8, callee, "init")) .{ .empty = true } else null;
++    if (!fallible and std.mem.eql(u8, callee, "init")) return .{ .empty = true };
+
+== made with an arena
+-    if (madeInArena(tree, call)) return null;
++    if (false and madeInArena(tree, call)) return null;
+
+== released into an arena
+-        if (intoArena(tree, call)) return false;
++        if (false and intoArena(tree, call)) return false;
+
+== what an allocator's create made only destroy releases
+-        if (r.paired) |paired| if (!std.mem.eql(u8, callee, paired)) return false;
++        _ = r.paired;
+
+== a release under try is a step that can fail
+-            .@"catch" => node = tree.nodeData(node).node_and_node[0],
+-            .assign => {
++            .@"catch" => node = tree.nodeData(node).node_and_node[0],
++            .@"try" => node = tree.nodeData(node).node,
++            .assign => {
+
+== a value's method with a release word in a longer name
+-            if (!try r.isNamespace(receiver)) return false;
++            if (word == .whole and !try r.isNamespace(receiver)) return false;
+
+== a value's method named a release word releases the value, not its argument
+-            if (!try r.isNamespace(receiver)) return false;
++            if (word == .part and !try r.isNamespace(receiver)) return false;
+
+== a release word is a whole word of the name
+-            if (std.ascii.eqlIgnoreCase(name[start..stop], word)) return if (start == 0 and stop == name.len) .whole else .part;
++            if (std.ascii.startsWithIgnoreCase(name[start..], word)) return if (start == 0 and stop == name.len) .whole else .part;
+
+== a failed expect ends the test it is in
+-                    .@"try" => !std.mem.startsWith(u8, unlock.what(tree, node), "expect") and
++                    .@"try" => true or !std.mem.startsWith(u8, unlock.what(tree, node), "expect") and
+
+== a return that hands the local on
+-                if (r.returned(node) and mentions(tree, node, name)) continue;
++                if (false and r.returned(node)) continue;
+
+== released on the failing path first
+-                    if (try r.releaseIn(s, name) != null or try stores(r.arena, tree, s, name)) return true;
++                    if (try stores(r.arena, tree, s, name)) return true;
+
+== stored on the failing path
+-                    if (try r.releaseIn(s, name) != null or try stores(r.arena, tree, s, name)) return true;
++                    if (try r.releaseIn(s, name) != null) return true;
