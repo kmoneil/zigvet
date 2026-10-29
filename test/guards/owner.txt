@@ -1,0 +1,16 @@
+# owner's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/owner.zig
+
+== a field the callee frees, of a name the caller frees whole
+-                if (r.freedOnError(node, name)) return if (path.len == 0) name else null;
++                if (r.freedOnError(node, name)) return name;
+
+== the field the callee frees is the one the initializer sets
+-            if (!std.mem.eql(u8, tree.tokenSlice(tree.firstToken(field) - 2), path[0])) continue;
++            if (false) continue;
+
+== a var local assigned to before the call
+-            if (std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(root)), name)) return null;
++            if (false and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(root)), name)) return null;

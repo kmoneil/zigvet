@@ -1378,6 +1378,16 @@ also measured on code nobody here wrote:
 already there is used as it is; `--update` fetches each project's latest
 commit.
 
+`scripts/guardcheck.sh test/guards/leak.txt` takes away each of a rule's
+guards in turn, what keeps a report out, and runs `zig build test`, so a
+rule change shows that a test holds to every guard it has: with the guard
+gone, a test must fail. It prints the tests that fail and the findings
+that change, and exits 1 for a guard no test notices, an edit that does
+not apply, or one that does not build. A guards file in `test/guards/`
+lists a rule's guards, each a label and the edit that removes it as exact
+lines, `-` for what is there and `+` for what replaces it, so when a guard
+is rewritten its edit fails to apply rather than passing unchecked.
+
 ## License
 
 Apache-2.0; see [LICENSE](LICENSE).
