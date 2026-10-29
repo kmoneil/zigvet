@@ -158,7 +158,7 @@ fn unlockedBefore(tree: *const Ast, parents: []const Node.OptionalIndex, node: N
 
 /// Whether `node`, a `return`, returns an error: `error.X`, or what the
 /// `catch |err|` around it caught.
-fn returnsError(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) bool {
+pub fn returnsError(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) bool {
     const value = tree.nodeData(node).opt_node.unwrap() orelse return false;
     if (tree.nodeTag(value) == .error_value) return true;
     if (tree.nodeTag(value) != .identifier) return false;
@@ -178,7 +178,7 @@ fn returnsError(tree: *const Ast, parents: []const Node.OptionalIndex, node: Nod
 }
 
 /// Whether `node` is in a `test` block, where a failure ends the test.
-fn inTest(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) bool {
+pub fn inTest(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) bool {
     var up = parents[@backingInt(node)].unwrap();
     while (up) |parent| : (up = parents[@backingInt(parent)].unwrap()) {
         switch (tree.nodeTag(parent)) {
@@ -192,7 +192,7 @@ fn inTest(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Inde
 
 /// What fails at `point`, as written: the function a `try` calls, or what
 /// a `return` returns.
-fn what(tree: *const Ast, point: Node.Index) []const u8 {
+pub fn what(tree: *const Ast, point: Node.Index) []const u8 {
     if (tree.nodeTag(point) == .@"return") return tree.getNodeSource(tree.nodeData(point).opt_node.unwrap().?);
     var operand = tree.nodeData(point).node;
     while (tree.nodeTag(operand) == .grouped_expression) operand = tree.nodeData(operand).node_and_token[0];
@@ -203,7 +203,7 @@ fn what(tree: *const Ast, point: Node.Index) []const u8 {
 
 /// Appends `node` and every node under it, but not what nested functions
 /// and types hold, or what a `defer` or `errdefer` runs.
-fn within(arena: Allocator, tree: *const Ast, node: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
+pub fn within(arena: Allocator, tree: *const Ast, node: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
     if (kept.isNested(tree.nodeTag(node))) return;
     switch (tree.nodeTag(node)) {
         .@"defer", .@"errdefer" => return,

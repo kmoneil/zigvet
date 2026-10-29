@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -58,6 +58,7 @@ pub const Finding = struct {
         flush: Flush,
         cached: Cached,
         unrun: Unrun,
+        leak: Leak,
         allow: Allow,
     };
 
@@ -209,6 +210,16 @@ pub const Finding = struct {
         tests: usize,
     };
 
+    pub const Leak = struct {
+        /// The local left unreleased: `stmt`.
+        local: []const u8,
+        /// Its release by hand, as written: `stmt.finalize()`.
+        release: []const u8,
+        /// What can fail before it, as written: `stmt.bind`, or
+        /// `error.Closed`.
+        fails: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -242,6 +253,7 @@ pub const Finding = struct {
             .flush => .flush,
             .cached => .cached,
             .unrun => .unrun,
+            .leak => .leak,
             .allow => null,
         };
     }
@@ -340,6 +352,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
             try w.writeAll("nothing the tests reach refers to this file, so its test never runs")
         else
             try w.print("nothing the tests reach refers to this file, so its {d} tests never run", .{u.tests}),
+        .leak => |l| try w.print("if {s} fails here, the function returns before `{s}` below, and '{s}' is never released", .{
+            l.fails, l.release, l.local,
+        }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),

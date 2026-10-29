@@ -7,7 +7,7 @@ compiler's own parser, and reports code the compiler accepts in every build
 mode that is almost certainly a bug. `go vet` is the closest analog: not
 style, which the existing linters cover, but silent wrongness.
 
-Status: eighteen rules. Escape, run over the 0.17.0 standard library and
+Status: nineteen rules. Escape, run over the 0.17.0 standard library and
 compiler sources (650,000 lines) and four application repos, found two real
 defects and three of its one accepted kind of false positive, which it now
 tells apart (below). Alias, run over the same standard library and seven
@@ -66,7 +66,14 @@ tests never reach, and an application repo's benchmark helper, with the
 copy another keeps; over that repo as it was before a fix found by hand,
 the two files the fix names. Over the public projects, four, all real, in
 a terminal UI library: 20 tests of its widgets, which neither its tests
-nor its C API's run.
+nor its C API's run. Leak, over the same code, reports nothing in the
+standard library; over the application repos, 16, all real: the two
+prepared statements of the batched insert above, a file a tool leaves
+open when its write fails, and allocations check programs and scratch
+copies leave behind when a step fails. Over the public projects, ten, all
+real: seven in a compiler, an allocation or a canonicalizer left behind
+when the next step runs out of memory, two in a database's tools, and a
+directory an editor leaves open when it cannot change into it.
 
 ## Rule one: escape
 
@@ -1070,6 +1077,64 @@ another way, such as `zig test` in a script, and a module that names
 itself, `@import("mylib")` inside mylib, which only the build maps to a
 file; an allow comment above the reported `test` covers one of those.
 
+## Rule nineteen: leak
+
+A local released by hand later in its block, with something between that
+can fail and no `defer` to release it.
+
+```zig
+var stmt = try r.conn.prepare(sql);
+for (rows) |row| try bindRow(&stmt, row); // fails: the function returns without finalizing stmt
+stmt.finalize();
+```
+
+When a `bindRow` fails, the error leaves the function before the
+`finalize`, and the prepared statement is never released. It compiles
+clean in every build mode and goes wrong only when the step between
+fails, the path tests seldom take; the debugging allocator says "leaked"
+only in a test that makes it fail. It is unlock's shape, with a resource
+for the lock. A web framework's batched insert has this exact code.
+
+The fix is `defer stmt.finalize();` straight after the `prepare`, in
+place of the one by hand, or an `errdefer` where the function returns
+the local on some path.
+
+### What leak reports
+
+A local made by a call that can fail, under `try` or `catch`
+(`try prepare(gpa)`, `try gpa.alloc(u8, n)`), or made empty (`.empty`,
+`.{}`, an `init` that cannot fail), then released later in the same
+block by a statement: a call on it whose name is a release word
+(`stmt.finalize()`, `file.close(io)`, `list.deinit(gpa)`), or one handed
+it, as its only argument or one after the first, whose name is or has
+one: an allocator's (`gpa.free(buf)`), a namespace's (`posix.close(fd)`,
+`c.sqlite3_finalize(stmt)`) or a function's. The release words are
+`deinit`, `finalize`, `close`, `destroy`, `free`, `release` and `unmap`,
+as a word of the name (`sqlite3_finalize`, not `closest`). What an
+allocator's `create(T)` made is released by `destroy`, and what its
+`alloc` or `dupe` made by `free`, not by a `deinit` of what an `init`
+made in it. Reported at the first statement between that fails with an
+error, a `try`, a `return error.X`, or a `return` of what a `catch`
+caught, on a path that does not release it first; for an empty value,
+after the first statement that uses it, since one that fails while
+filling it leaves nothing to release.
+
+Not reported: a local a `defer` or `errdefer` names before the failure,
+whether it releases it or hands it back
+(`errdefer self.defs.restore(&snapshot);`); one assigned to between, or
+stored on the failing path (`self.stmt = stmt;`); a failure in a `return`
+that hands the local on (`return try wrap(face);`); one made from
+something else, a name, a field, a call that cannot fail
+(`self.allocatedSlice()`) or one under `orelse` (`map.get(key) orelse`),
+which is a view more often than something new; one made with an arena or
+released into one (`cells.deinit(p.arena)`), which frees it with the
+rest; a release under `try`, a step that can fail rather than a release
+(a builder's `try scope.finalize()`); a value's method with a release
+word in a longer name, which releases what the value keeps
+(`self.codegen.freeGeneral(reg)` hands a register back to a pool); a
+failed `expect`, and code in a `test` block, where a failure ends the
+test.
+
 ## Install
 
 With Homebrew, on macOS or Linux:
@@ -1277,7 +1342,7 @@ how many times it is instantiated, which the syntax does not show and a
 profiler of the built program does (#30). Each rule is one lowercase word
 for what it catches: `escape`, `alias`, `cancel`, `fit`, `refill`,
 `owner`, `kept`, `torn`, `twice`, `sweep`, `unlock`, `wipe`, `freed`,
-`grow`, `copy`, `flush`, `cached` and `unrun` so far.
+`grow`, `copy`, `flush`, `cached`, `unrun` and `leak` so far.
 
 ## Tests
 
