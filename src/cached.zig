@@ -62,7 +62,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
 }
 
 /// The name of `proto`'s `*std.Build` parameter: `b` of `b: *std.Build`.
-fn buildParam(tree: *const Ast, proto: Ast.full.FnProto) ?[]const u8 {
+pub fn buildParam(tree: *const Ast, proto: Ast.full.FnProto) ?[]const u8 {
     var params = proto.iterate(tree);
     while (params.next()) |param| {
         const name = param.name_token orelse continue;

@@ -65,7 +65,7 @@ fn reportsAsExpected(arena: Allocator, path: []const u8, source: [:0]const u8) !
     if (tree.errors.len > 0) {
         // An empty path gives the case form, `:line:col: error: ...`.
         for (tree.errors) |parse_error| try report.writeParseError(&out.writer, "", tree, parse_error);
-    } else for (try vet.findings(arena, &tree)) |finding| {
+    } else for (try vet.findings(arena, &tree, &.{})) |finding| {
         const loc = report.location(source, finding.offset);
         try out.writer.print(":{d}:{d}: error: ", .{ loc.line + 1, loc.column + 1 });
         try report.writeMessage(&out.writer, finding);
