@@ -1116,7 +1116,10 @@ one: an allocator's (`gpa.free(buf)`), a namespace's (`posix.close(fd)`,
 as a word of the name (`sqlite3_finalize`, not `closest`). What an
 allocator's `create(T)` made is released by `destroy`, and what its
 `alloc` or `dupe` made by `free`, not by a `deinit` of what an `init`
-made in it. Reported at the first statement between that fails with an
+made in it. The release may be in each branch of a statement there, an
+`if` with an `else` or a `switch`, when every branch releases it
+(`if (keep) file.close(io) else { file.close(io); try remove(); }`).
+Reported at the first statement between that fails with an
 error, a `try`, a `return error.X`, or a `return` of what a `catch` or
 an `else |err|` caught, on a path that does not release it first; for
 an empty value, after the first statement that uses it, since one that

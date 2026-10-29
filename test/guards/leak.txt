@@ -79,3 +79,14 @@ file src/leak.zig
 == stored on the failing path
 -                    if (try r.releaseIn(s, name) != null or try stores(r.arena, tree, s, name)) return true;
 +                    if (try r.releaseIn(s, name) != null) return true;
+
+== an if's then branch must release it too
+-                const first = try r.releasedInBranch(full.ast.then_expr, name) orelse return null;
++                const first = (try r.releasedInBranch(full.ast.then_expr, name)) orelse (try r.releasedInBranch(full.ast.else_expr.unwrap() orelse return null, name)) orelse return null;
+
+== an if's else branch must release it too
+-                _ = try r.releasedInBranch(full.ast.else_expr.unwrap() orelse return null, name) orelse return null;
+
+== every prong of a switch must release it
+-                    const found = try r.releasedInBranch(tree.fullSwitchCase(case).?.ast.target_expr, name) orelse return null;
++                    const found = try r.releasedInBranch(tree.fullSwitchCase(case).?.ast.target_expr, name) orelse continue;

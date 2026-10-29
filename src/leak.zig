@@ -23,6 +23,8 @@
 //! words are `deinit`, `finalize`, `close`, `destroy`, `free`, `release`
 //! and `unmap`, each a word of the name. What an allocator's `create(T)`
 //! made only `destroy` releases, and what its `alloc` made only `free`.
+//! The release may be in each branch of a statement there, an `if` with an
+//! `else` or a `switch`, when every branch releases it.
 //! It is reported at the first statement between that can fail with an
 //! error, a `try`, a `return error.X`, or a `return` of what a `catch` or
 //! an `else |err|` caught, on a path that does not release it first; for
@@ -64,9 +66,11 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
             const made = making(tree, decl.ast.init_node.unwrap() orelse continue) orelse continue;
             const name = tree.tokenSlice(decl.ast.mut_token + 1);
             rule.paired = made.release;
-            // Its release by hand, later in the block, and what lies between.
-            const end, const release = for (statements[at + 1 ..], at + 1..) |later, k| {
-                if (try rule.releaseIn(later, name)) |call| break .{ k, call };
+            // Its release by hand, later in the block, or in each branch of
+            // a statement there, and what lies between.
+            const end, const release, const branched = for (statements[at + 1 ..], at + 1..) |later, k| {
+                if (try rule.releaseIn(later, name)) |call| break .{ k, call, false };
+                if (try rule.releasedInEach(later, name)) |call| break .{ k, call, true };
             } else continue;
             var between = statements[at + 1 .. end];
             // A `defer` or `errdefer` that names it covers what follows,
@@ -99,7 +103,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
             const hint = if (try handedOut(arena, tree, statements[at + 1 ..], name))
                 try arena.print("release it in an `errdefer` right after it is made (`errdefer {s};`), so a failure cannot skip it", .{release_source})
             else
-                try arena.print("release it in a `defer` right after it is made (`defer {s};`, in place of the one below), so a failure cannot skip it", .{release_source});
+                try arena.print("release it in a `defer` right after it is made (`defer {s};`, in place of the {s} below), so a failure cannot skip it", .{ release_source, if (branched) "ones" else "one" });
             try findings.append(arena, .{
                 .offset = tree.tokenStart(tree.firstToken(point)),
                 .hint = hint,
@@ -219,6 +223,45 @@ const Rule = struct {
             else => break,
         };
         return if (try r.releases(node, name)) node else null;
+    }
+
+    /// The first release of the local `name` in `statement`, when it is an
+    /// `if` with an `else`, or a `switch`, every branch of which releases
+    /// it: `if (keep) file.close(io) else { file.close(io); try remove(); }`.
+    /// A branch that does not is a path where the function may mean to
+    /// keep it.
+    fn releasedInEach(r: *Rule, statement: Node.Index, name: []const u8) Allocator.Error!?Node.Index {
+        const tree = r.tree;
+        switch (tree.nodeTag(statement)) {
+            .@"if" => {
+                const full = tree.fullIf(statement).?;
+                const first = try r.releasedInBranch(full.ast.then_expr, name) orelse return null;
+                _ = try r.releasedInBranch(full.ast.else_expr.unwrap() orelse return null, name) orelse return null;
+                return first;
+            },
+            .@"switch", .switch_comma => {
+                var first: ?Node.Index = null;
+                for (tree.fullSwitch(statement).?.ast.cases) |case| {
+                    const found = try r.releasedInBranch(tree.fullSwitchCase(case).?.ast.target_expr, name) orelse return null;
+                    if (first == null) first = found;
+                }
+                return first;
+            },
+            else => return null,
+        }
+    }
+
+    /// The first release of the local `name` in `branch`: the branch
+    /// itself, or a statement of its block, or one in each branch of
+    /// either (`else if`).
+    fn releasedInBranch(r: *Rule, branch: Node.Index, name: []const u8) Allocator.Error!?Node.Index {
+        var buffer: [2]Node.Index = undefined;
+        const statements = r.tree.blockStatements(&buffer, branch) orelse (&branch)[0..1];
+        for (statements) |statement| {
+            if (try r.releaseIn(statement, name)) |call| return call;
+            if (try r.releasedInEach(statement, name)) |call| return call;
+        }
+        return null;
     }
 
     /// Whether `node` is a call that releases the local `name`: one whose
@@ -555,4 +598,26 @@ test "an error an else capture returns before the release (#118)" {
         \\1:118 stmt <- err, stmt.finalize()
         \\
     );
+}
+
+test "a release in each branch after the failure (#117)" {
+    try expectLeaks(
+        \\fn both(gpa: Allocator, v: u8, keep: bool) !void { const buf = try gpa.alloc(u8, 4); try fill(buf, v); if (keep) { gpa.free(buf); } else { gpa.free(buf); } }
+        \\fn chain(dir: Dir, io: Io, mode: u8) !void { var file = try dir.createFile(io, "out", .{}); try write(file); if (mode == 0) file.close(io) else if (mode == 1) { file.close(io); try publish(); } else { file.close(io); try dir.deleteFile(io, "out"); } }
+        \\fn prongs(gpa: Allocator, kind: Kind) !void { const buf = try gpa.alloc(u8, 4); try fill(buf, 1); switch (kind) { .a => gpa.free(buf), .b => { log(); gpa.free(buf); } } }
+    ,
+        \\1:86 buf <- fill, gpa.free(buf)
+        \\2:93 file <- write, file.close(io)
+        \\3:81 buf <- fill, gpa.free(buf)
+        \\
+    );
+}
+
+test "not reported: a branch that keeps it, either branch, an if with no else, a prong that returns it" {
+    try expectLeaks(
+        \\fn kept(self: *S, gpa: Allocator, keep: bool) !void { const buf = try gpa.alloc(u8, 4); try fill(buf, 1); if (keep) { self.buf = buf; } else { gpa.free(buf); } }
+        \\fn keptElse(self: *S, gpa: Allocator, keep: bool) !void { const buf = try gpa.alloc(u8, 4); try fill(buf, 1); if (!keep) { gpa.free(buf); } else { self.buf = buf; } }
+        \\fn noElse(gpa: Allocator, drop: bool) !void { const buf = try gpa.alloc(u8, 4); try fill(buf, 1); if (drop) gpa.free(buf); }
+        \\fn prongKept(gpa: Allocator, kind: Kind) ![]u8 { const buf = try gpa.alloc(u8, 4); try fill(buf, 1); switch (kind) { .a => gpa.free(buf), .b => return buf } return &.{}; }
+    , "");
 }
