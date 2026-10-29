@@ -24,9 +24,9 @@
 //! and `unmap`, each a word of the name. What an allocator's `create(T)`
 //! made only `destroy` releases, and what its `alloc` made only `free`.
 //! It is reported at the first statement between that can fail with an
-//! error, a `try`, a `return error.X`, or a `return` of what a `catch`
-//! caught, on a path that does not release it first; for an empty value,
-//! after the first statement that uses it.
+//! error, a `try`, a `return error.X`, or a `return` of what a `catch` or
+//! an `else |err|` caught, on a path that does not release it first; for
+//! an empty value, after the first statement that uses it.
 //!
 //! Not reported: a local a `defer` or `errdefer` names before the failure;
 //! one assigned to between, or stored on the failing path; a failure in a
@@ -271,7 +271,7 @@ const Rule = struct {
 
     /// The first error exit in `statements`, on a path that does not
     /// release the local `name` first: a `try`, a `return error.X`, or a
-    /// `return` of what a `catch` caught. A failed `expect` ends the test
+    /// `return` of what a capture caught. A failed `expect` ends the test
     /// it is in, and is not one.
     fn failure(r: *Rule, statements: []const Node.Index, name: []const u8) Allocator.Error!?Node.Index {
         const tree = r.tree;
@@ -546,4 +546,13 @@ test "not reported: covered, released on the way out, after, not made here, move
         \\fn handedIo(file: File) !void { const io = try makeIo(); try more(); file.close(io); }
         \\test "held" { var x = try make(std.testing.allocator); try more(); x.deinit(); }
     , "");
+}
+
+test "an error an else capture returns before the release (#118)" {
+    try expectLeaks(
+        \\fn run(gpa: Allocator, v: u8) !bool { var stmt = try prepare(gpa, v); const done = if (stmt.step()) |d| d else |err| return err; stmt.finalize(); return done; }
+    ,
+        \\1:118 stmt <- err, stmt.finalize()
+        \\
+    );
 }

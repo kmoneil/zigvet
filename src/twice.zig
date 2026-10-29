@@ -21,7 +21,8 @@
 //! after it in its block, the same text but for whitespace, not in a
 //! `defer` or `errdefer`. It is reported when, after that statement and on
 //! its path, the function fails before it leaves another way: a `try`, a
-//! `return error.X`, or a `return` of what a `catch` caught.
+//! `return error.X`, or a `return` of what a `catch` or an `else |err|`
+//! caught.
 //!
 //! Not reported: the same statement followed by a plain `return`, `break`
 //! or `continue`, which is correct, since the errdefer does not run; a
@@ -48,6 +49,7 @@ const kept = @import("kept.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 const types = @import("types.zig");
+const unlock = @import("unlock.zig");
 
 /// Appends a finding for every errdefer's call also written out by hand on
 /// a path that then fails. Everything is allocated with `arena`.
@@ -283,7 +285,7 @@ fn reassigns(arena: Allocator, tree: *const Ast, node: Node.Index, handed: []con
 }
 
 /// The first node of `statement` that makes the function fail: a `try`, a
-/// `return error.X`, or a `return` of what a `catch` around it caught.
+/// `return error.X`, or a `return` of what a capture around it caught.
 fn failing(arena: Allocator, tree: *const Ast, parents: []const Node.OptionalIndex, statement: Node.Index) Allocator.Error!?Node.Index {
     var nodes: std.ArrayList(Node.Index) = .empty;
     try within(arena, tree, statement, &nodes);
@@ -291,34 +293,13 @@ fn failing(arena: Allocator, tree: *const Ast, parents: []const Node.OptionalInd
     for (nodes.items) |node| {
         const fails = switch (tree.nodeTag(node)) {
             .@"try" => true,
-            .@"return" => returnsError(tree, parents, node),
+            .@"return" => unlock.returnsError(tree, parents, node),
             else => false,
         };
         if (!fails) continue;
         if (first == null or tree.nodeMainToken(node) < tree.nodeMainToken(first.?)) first = node;
     }
     return first;
-}
-
-/// Whether `node`, a `return`, returns an error: `error.X`, or what the
-/// `catch |err|` around it caught.
-fn returnsError(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) bool {
-    const value = tree.nodeData(node).opt_node.unwrap() orelse return false;
-    if (tree.nodeTag(value) == .error_value) return true;
-    if (tree.nodeTag(value) != .identifier) return false;
-    const name = tree.tokenSlice(tree.nodeMainToken(value));
-    var up = parents[@backingInt(node)].unwrap();
-    while (up) |parent| : (up = parents[@backingInt(parent)].unwrap()) {
-        switch (tree.nodeTag(parent)) {
-            .fn_decl, .test_decl => return false,
-            .@"catch" => {
-                const token = tree.nodeMainToken(parent);
-                if (tree.tokenTag(token + 1) == .pipe and std.mem.eql(u8, tree.tokenSlice(token + 2), name)) return true;
-            },
-            else => {},
-        }
-    }
-    return false;
 }
 
 /// What fails at `point`, as the message says it: `it returns error.Busy`,
@@ -382,6 +363,7 @@ test "an errdefer's free written out by hand on a path that then fails (#61)" {
         \\fn tried(gpa: Allocator) !void { const b = try gpa.alloc(u8, 4); errdefer gpa.free(b); if (b.len == 4) { gpa.free(b); try report(); } }
         \\fn spaced(gpa: Allocator) !void { const b = try gpa.alloc(u8, 4); errdefer gpa.free( b ); if (bad()) { gpa.free(b); return error.Bad; } }
         \\fn bare(gpa: Allocator) !void { const b = try gpa.alloc(u8, 4); errdefer gpa.free(b); if (bad()) gpa.free(b); try more(); }
+        \\fn opened(gpa: Allocator) !*Conn { const conn = try gpa.create(Conn); errdefer gpa.destroy(conn); if (open()) |fd| { conn.fd = fd; } else |err| { gpa.destroy(conn); return err; } return conn; }
     ,
         \\1:120 gpa.destroy(conn) <- it returns error.BadConfig
         \\2:196 platform.unmap(base, size) <- it returns error.OutOfMemory
@@ -390,6 +372,7 @@ test "an errdefer's free written out by hand on a path that then fails (#61)" {
         \\4:106 gpa.free(b) <- report fails
         \\5:104 gpa.free(b) <- it returns error.Bad
         \\6:98 gpa.free(b) <- more fails
+        \\7:147 gpa.destroy(conn) <- it returns err
         \\
     );
 }

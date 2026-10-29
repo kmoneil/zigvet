@@ -72,6 +72,7 @@ const report = @import("report.zig");
 const Finding = report.Finding;
 const torn = @import("torn.zig");
 const types = @import("types.zig");
+const unlock = @import("unlock.zig");
 
 /// Appends a finding for every errdefer that frees what its function has
 /// stored where the caller keeps it before something fails. Everything is
@@ -357,7 +358,7 @@ const Rule = struct {
 
     /// The first node of `statement`, after token `armed`, that makes the
     /// function fail: a `try`, a `return error.X`, or a `return` of what a
-    /// `catch` around it caught.
+    /// capture around it caught.
     fn failing(r: *Rule, statement: Node.Index, armed: Ast.TokenIndex) Allocator.Error!?Node.Index {
         const tree = r.tree;
         var nodes: std.ArrayList(Node.Index) = .empty;
@@ -367,35 +368,13 @@ const Rule = struct {
             if (tree.nodeMainToken(node) <= armed) continue;
             const fails = switch (tree.nodeTag(node)) {
                 .@"try" => true,
-                .@"return" => r.returnsError(node),
+                .@"return" => unlock.returnsError(r.tree, r.parents, node),
                 else => false,
             };
             if (!fails) continue;
             if (first == null or tree.nodeMainToken(node) < tree.nodeMainToken(first.?)) first = node;
         }
         return first;
-    }
-
-    /// Whether `node`, a `return`, returns an error: `error.X`, or what the
-    /// `catch |err|` around it caught.
-    fn returnsError(r: *Rule, node: Node.Index) bool {
-        const tree = r.tree;
-        const value = tree.nodeData(node).opt_node.unwrap() orelse return false;
-        if (tree.nodeTag(value) == .error_value) return true;
-        if (tree.nodeTag(value) != .identifier) return false;
-        const name = tree.tokenSlice(tree.nodeMainToken(value));
-        var up = r.parents[@backingInt(node)].unwrap();
-        while (up) |parent| : (up = r.parents[@backingInt(parent)].unwrap()) {
-            switch (tree.nodeTag(parent)) {
-                .fn_decl, .test_decl => return false,
-                .@"catch" => {
-                    const token = tree.nodeMainToken(parent);
-                    if (tree.tokenTag(token + 1) == .pipe and std.mem.eql(u8, tree.tokenSlice(token + 2), name)) return true;
-                },
-                else => {},
-            }
-        }
-        return false;
     }
 
     /// What fails at `point`, as the message says it: `gpa.alloc fails`,
@@ -644,6 +623,7 @@ test "an errdefer frees what the function stored where its caller keeps it (#63)
         \\fn write(ctx: ?*anyopaque, path: []const u8) !void { const self: *Rec = @ptrCast(@alignCast(ctx.?)); const recorded = try self.allocator.dupe(u8, path); errdefer self.allocator.free(recorded); try self.written.append(self.allocator, recorded); try self.put(path); }
         \\fn keyed(self: *Map, k: u32, v: []const u8) !void { const owned = try self.gpa.dupe(u8, v); errdefer self.gpa.free(owned); try self.map.put(self.gpa, k, .{ .text = owned, .at = 0 }); if (k == 0) return error.Zero; }
         \\fn caught(self: *Store, v: []const u8) !void { const owned = try self.gpa.dupe(u8, v); errdefer self.gpa.free(owned); self.last = owned; self.flush() catch |err| return err; }
+        \\fn elseCaught(self: *Store, v: []const u8) !void { const owned = try self.gpa.dupe(u8, v); errdefer self.gpa.free(owned); self.last = owned; if (self.flush()) |_| {} else |err| return err; }
     ,
         \\1:91 owned self.names <- self.sizes.append fails
         \\2:139 name self.names <- self.addSymbol fails
@@ -652,6 +632,7 @@ test "an errdefer frees what the function stored where its caller keeps it (#63)
         \\5:154 recorded self.written <- self.put fails
         \\6:93 owned self.map <- it returns error.Zero
         \\7:88 owned self.last <- it returns err
+        \\8:92 owned self.last <- it returns err
         \\
     );
 }

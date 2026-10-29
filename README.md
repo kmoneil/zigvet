@@ -679,7 +679,8 @@ An `errdefer` whose call releases by its name (a `free`, `destroy`,
 `closeHandle`, `deinitAll`), and the same call, but for whitespace,
 written as a statement after it in its block, not in a `defer` or
 `errdefer`, followed on its path by something that makes the function
-fail: a `try`, a `return error.X`, or a `return` of what a `catch` caught.
+fail: a `try`, a `return error.X`, or a `return` of what a `catch` or an
+`else |err|` caught.
 
 Not reported: the same statement followed by a plain `return`, `break` or
 `continue`, which is correct, since the errdefer does not run; a failure
@@ -760,8 +761,8 @@ The fix is `defer self.pool_mut.unlock(io);` straight after the lock.
 `x.lockSharedUncancelable(...)` as a statement, or under `try`, then
 `x.unlock(...)` (or `x.unlockShared(...)`) later in the same block, `x`
 the same as written, and between them something that fails with an error:
-a `try`, a `return error.X`, or a `return` of what a `catch` caught, on a
-path that does not unlock first.
+a `try`, a `return error.X`, or a `return` of what a `catch` or an
+`else |err|` caught, on a path that does not unlock first.
 
 Not reported: a lock a `defer` or `errdefer` unlocks before the failure,
 however it is written (`defer if (!unlocked) m.unlock();`); a plain
@@ -1114,10 +1115,10 @@ as a word of the name (`sqlite3_finalize`, not `closest`). What an
 allocator's `create(T)` made is released by `destroy`, and what its
 `alloc` or `dupe` made by `free`, not by a `deinit` of what an `init`
 made in it. Reported at the first statement between that fails with an
-error, a `try`, a `return error.X`, or a `return` of what a `catch`
-caught, on a path that does not release it first; for an empty value,
-after the first statement that uses it, since one that fails while
-filling it leaves nothing to release.
+error, a `try`, a `return error.X`, or a `return` of what a `catch` or
+an `else |err|` caught, on a path that does not release it first; for
+an empty value, after the first statement that uses it, since one that
+fails while filling it leaves nothing to release.
 
 Not reported: a local a `defer` or `errdefer` names before the failure,
 whether it releases it or hands it back
