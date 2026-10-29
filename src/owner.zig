@@ -42,8 +42,9 @@
 //!
 //! Either way it may take a field of `p` instead (`gpa.free(img.pixels)`).
 //!
-//! A call to it under `try`, or returned as it is (`return f(...)`, which
-//! runs the caller's errdefers just as `try` does), is reported when the
+//! A call to it under `try`, returned as it is (`return f(...)`, which
+//! runs the caller's errdefers just as `try` does), or with a `catch` that
+//! hands on what it caught (`catch |err| return err`), is reported when the
 //! argument for that parameter, the receiver for a method's first, is a
 //! name that an `errdefer` of the caller, declared before the call in a
 //! block around it, frees the same way, or carries one: its address
@@ -54,16 +55,15 @@
 //! takes, the argument has to carry the name in that field. The function
 //! has to be the file's own, called by name, through its type
 //! (`Store.keep(s, b)`), or as a method of a binding whose type the file
-//! declares (`self.keep(b)`).
+//! declares, in an annotation or its initializer (`self.keep(b)`).
 //!
-//! Not reported: a call whose error is handled rather than returned with
-//! `try` or `return`, which only the caller can judge; an `errdefer`
-//! declared after the call; an argument that is neither a name nor carries
-//! one; a field the callee frees of a name the caller's errdefer frees
-//! whole (`destroy(frame)` against `frame.list.deinit()`), which is not
-//! what the caller frees; a release that leaves the value empty
-//! (`clearAndFree`); and one followed, before the failure, by an
-//! assignment to what it released.
+//! Not reported: a call whose error is handled rather than handed on,
+//! which only the caller can judge; an `errdefer` declared after the call;
+//! an argument that is neither a name nor carries one; a field the callee
+//! frees of a name the caller's errdefer frees whole (`destroy(frame)`
+//! against `frame.list.deinit()`), which is not what the caller frees; a
+//! release that leaves the value empty (`clearAndFree`); and one followed,
+//! before the failure, by an assignment to what it released.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -123,7 +123,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
     var calls: std.ArrayList(Node.Index) = .empty;
     for (tree.nodes.items(.tag), 0..) |tag, i| {
         switch (tag) {
-            .@"try", .@"return" => {},
+            .@"try", .@"return", .@"catch" => {},
             else => continue,
         }
         const node: Node.Index = @fromBackingInt(@intCast(i));
@@ -153,17 +153,48 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
     }
 }
 
-/// What a `try` tries, or what a `return` returns, through parentheses:
-/// an error union returned as it is runs the caller's errdefers just as
-/// `try` does.
+/// What a `try` tries, what a `return` returns, or what a `catch` that
+/// returns what it caught is the handler of, through parentheses: an
+/// error union returned as it is, or handed on by its handler, runs the
+/// caller's errdefers just as `try` does.
 fn operandOf(tree: *const Ast, node: Node.Index) ?Node.Index {
     var operand = switch (tree.nodeTag(node)) {
         .@"try" => tree.nodeData(node).node,
         .@"return" => tree.nodeData(node).opt_node.unwrap() orelse return null,
+        .@"catch" => if (rethrows(tree, node)) tree.nodeData(node).node_and_node[0] else return null,
         else => return null,
     };
     while (tree.nodeTag(operand) == .grouped_expression) operand = tree.nodeData(operand).node_and_token[0];
     return operand;
+}
+
+/// Whether `catch_node` hands on what it caught, on its only path:
+/// `catch |err| return err;`, or a block that ends with that `return` and
+/// leaves no other way (`catch |err| { log(err); return err; }`). A handler
+/// that may do something else handles the error, which only the caller
+/// can judge.
+fn rethrows(tree: *const Ast, catch_node: Node.Index) bool {
+    const token = tree.nodeMainToken(catch_node);
+    if (tree.tokenTag(token + 1) != .pipe) return false;
+    const name = tree.tokenSlice(token + 2);
+    const handler = tree.nodeData(catch_node).node_and_node[1];
+    var buffer: [2]Node.Index = undefined;
+    const statements = tree.blockStatements(&buffer, handler) orelse (&handler)[0..1];
+    if (statements.len == 0) return false;
+    const last = statements[statements.len - 1];
+    if (tree.nodeTag(last) != .@"return") return false;
+    const value = tree.nodeData(last).opt_node.unwrap() orelse return false;
+    if (tree.nodeTag(value) != .identifier or !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(value)), name)) return false;
+    // Nothing before it that leaves another way.
+    for (statements[0 .. statements.len - 1]) |statement| {
+        for (tree.firstToken(statement)..tree.lastToken(statement) + 1) |t| {
+            switch (tree.tokenTag(@intCast(t))) {
+                .keyword_return, .keyword_break, .keyword_continue => return false,
+                else => {},
+            }
+        }
+    }
+    return true;
 }
 
 /// Whether `init`, a local's initializer, is one `Rule.carried` follows:
@@ -810,5 +841,33 @@ test "not reported: another field, a field of what the caller frees whole, a loc
         \\fn d(gpa: Allocator, spare: []u8) !void { const pixels = try gpa.alloc(u8, 4); errdefer gpa.free(pixels); var img: Image = .{ .pixels = pixels }; img = .{ .pixels = spare }; try img.swap(gpa); }
         \\fn e(gpa: Allocator, list: *List) !void { const bytes = try gpa.alloc(u8, 4); errdefer gpa.free(bytes); return keep(list, bytes) catch |err| log(err); }
         \\fn f(gpa: Allocator, list: *List) !void { const bytes = try gpa.alloc(u8, 4); errdefer gpa.free(bytes); { const img: Image = .{ .pixels = bytes }; _ = img; } return; }
+    , "");
+}
+
+test "a receiver whose type its initializer writes, and an error a catch hands on (#116)" {
+    try expectOwners(
+        \\const Image = struct {
+        \\    pixels: []u8,
+        \\    fn turned(img: Image, gpa: Allocator) !Image { defer gpa.free(img.pixels); const out = try gpa.alloc(u8, 4); return .{ .pixels = out }; }
+        \\};
+        \\fn keep(list: *List, gpa: Allocator, bytes: []u8) !void { errdefer gpa.free(bytes); try list.append(gpa, bytes); }
+        \\fn a(gpa: Allocator, n: usize) !Image { const pixels = try gpa.alloc(u8, n); errdefer gpa.free(pixels); const img = Image{ .pixels = pixels }; return img.turned(gpa); }
+        \\fn b(list: *List, gpa: Allocator, text: []const u8) !void { const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); keep(list, gpa, bytes) catch |err| return err; }
+        \\fn c(list: *List, gpa: Allocator, text: []const u8) !void { const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); keep(list, gpa, bytes) catch |err| { log(err); return err; }; }
+    ,
+        \\6:151 img.turned pixels
+        \\7:125 keep bytes
+        \\8:125 keep bytes
+        \\
+    );
+}
+
+test "not reported: a catch that handles the error, or may leave another way" {
+    try expectOwners(
+        \\fn keep(list: *List, gpa: Allocator, bytes: []u8) !void { errdefer gpa.free(bytes); try list.append(gpa, bytes); }
+        \\fn a(list: *List, gpa: Allocator, text: []const u8) !void { const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); keep(list, gpa, bytes) catch |err| log(err); try more(); }
+        \\fn b(list: *List, gpa: Allocator, text: []const u8, quiet: bool) !void { const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); keep(list, gpa, bytes) catch |err| { if (quiet) return; return err; }; }
+        \\fn c(list: *List, gpa: Allocator, text: []const u8) !void { const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); keep(list, gpa, bytes) catch {}; try more(); }
+        \\fn d(list: *List, gpa: Allocator, text: []const u8) !void { const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); keep(list, gpa, bytes) catch |err| return other(err); }
     , "");
 }

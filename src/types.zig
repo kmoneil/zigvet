@@ -125,10 +125,12 @@ pub const Types = struct {
 
     /// The type the file writes for what `use`, an identifier, names: found
     /// by walking out from it, as Zig allows no shadowing. A local's
-    /// annotation, a parameter's type, a container-level variable's
-    /// annotation, or what a capture is taken from: an element of a `for`
-    /// loop's input, the payload of an `if` or `while` on an optional or
-    /// error union, or a union's field for a `switch` prong on one tag.
+    /// annotation, or with none the type its initializer writes
+    /// (`const img = Image{ ... };`), a parameter's type, a container-level
+    /// variable's annotation, or what a capture is taken from: an element
+    /// of a `for` loop's input, the payload of an `if` or `while` on an
+    /// optional or error union, or a union's field for a `switch` prong on
+    /// one tag.
     pub fn bindingType(t: Types, use: Node.Index, depth: u8) ?Node.Index {
         const tree = t.tree;
         const name = tree.tokenSlice(tree.nodeMainToken(use));
@@ -140,7 +142,7 @@ pub const Types = struct {
         }) {
             switch (tree.nodeTag(parent)) {
                 .block, .block_semicolon, .block_two, .block_two_semicolon => {
-                    if (t.localBefore(parent, child, name)) |decl| return decl.ast.type_node.unwrap();
+                    if (t.localBefore(parent, child, name)) |decl| return decl.ast.type_node.unwrap() orelse initType(tree, decl);
                 },
                 .for_simple, .@"for" => {
                     const full = tree.fullFor(parent).?;
@@ -247,6 +249,15 @@ pub const Types = struct {
         };
     }
 };
+
+/// The type a local's initializer writes, for a declaration that writes
+/// none: `Image` of `const img = Image{ .pixels = pixels };`.
+fn initType(tree: *const Ast, decl: Ast.full.VarDecl) ?Node.Index {
+    const init = decl.ast.init_node.unwrap() orelse return null;
+    var buffer: [2]Node.Index = undefined;
+    const struct_init = tree.fullStructInit(&buffer, init) orelse return null;
+    return struct_init.ast.type_expr.unwrap();
+}
 
 /// What a pointer to one value, `*T` or `*const T`, points at.
 pub fn pointee(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
