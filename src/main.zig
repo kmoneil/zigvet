@@ -382,6 +382,7 @@ test {
     _ = @import("freed.zig");
     _ = @import("grow.zig");
     _ = @import("kept.zig");
+    _ = @import("leak.zig");
     _ = @import("owner.zig");
     _ = @import("refill.zig");
     _ = @import("report.zig");
