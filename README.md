@@ -443,9 +443,11 @@ callee leave the allocation to its caller when it fails.
 
 A call under `try` to one of the file's own functions that takes a
 parameter on failure, or one returned as it is (`return f(...)`, which runs
-the caller's errdefers just as `try` does), where the argument for that
-parameter (the receiver, for a method's first) is a name that an
-`errdefer` of the caller, declared before the call in a block around it,
+the caller's errdefers just as `try` does), or one whose `catch` hands on
+what it caught (`catch |err| return err`, or a block ending so with no
+other way out), where the argument for that parameter (the receiver, for
+a method's first) is a name that an `errdefer` of the caller, declared
+before the call in a block around it,
 frees, or carries one: its address (`&list`), a field of an initializer,
 as deep as they nest (`.{ .state = .{ .items = items } }`), or a local
 made from one of those that nothing assigns to before the call.
@@ -494,18 +496,18 @@ fn decode(gpa: Allocator, n: usize) !Image {
 ```
 
 The function is found by name, through its type (`Store.keep(s, b)`), or
-as a method of a binding whose type the file declares (`self.keep(b)`).
+as a method of a binding whose type the file declares, in an annotation or
+in its initializer (`self.keep(b)`, `const img = Image{ ... };`).
 
-Not reported: a call whose error is handled rather than returned with
-`try` or `return`, which only the caller can judge; an `errdefer` declared
-after the call; an argument that neither is a name nor carries one; a
-field the callee frees of a name the caller's errdefer frees whole
-(`gpa.destroy(frame)` against `frame.list.deinit()`), which is not what
-the caller frees; a method's receiver, or the first of several arguments,
-for a call recognized only by its name (`releasePages(pool, pages)`
-releases into `pool`); a release that leaves the value empty
-(`clearAndFree`), or one followed by an assignment to it; and a function
-declared in another file.
+Not reported: a call whose error is handled rather than handed on, which
+only the caller can judge; an `errdefer` declared after the call; an
+argument that neither is a name nor carries one; a field the callee frees
+of a name the caller's errdefer frees whole (`gpa.destroy(frame)` against
+`frame.list.deinit()`), which is not what the caller frees; a method's
+receiver, or the first of several arguments, for a call recognized only by
+its name (`releasePages(pool, pages)` releases into `pool`); a release
+that leaves the value empty (`clearAndFree`), or one followed by an
+assignment to it; and a function declared in another file.
 
 ## Rule seven: kept
 

@@ -14,3 +14,15 @@ file src/owner.zig
 == a var local assigned to before the call
 -            if (std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(root)), name)) return null;
 +            if (false and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(root)), name)) return null;
+
+== a catch that handles the error, rather than handing it on
+-        .@"catch" => if (rethrows(tree, node)) tree.nodeData(node).node_and_node[0] else return null,
++        .@"catch" => tree.nodeData(node).node_and_node[0],
+
+== a catch that returns something other than what it caught
+-    if (tree.nodeTag(value) != .identifier or !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(value)), name)) return false;
++    if (false and !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(value)), name)) return false;
+
+== a catch whose handler may leave another way
+-                .keyword_return, .keyword_break, .keyword_continue => return false,
++                .keyword_break, .keyword_continue => return false,
