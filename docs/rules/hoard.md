@@ -65,10 +65,20 @@ Not reported: memory from `std.testing.allocator`, or from an arena or
 other allocator made on it, which the runner checks after each input;
 memory made once and kept for every later input, in the branch that fills
 a container-level `var` the first time it is found empty and stores into it
-(`keywords orelse made: { ...; keywords = parsed; ... }`, or
-`if (cache == null) { cache = ...; }`); the `test` block that calls `fuzz`,
-which runs once; the functions the target calls; and a container that
-carries its own allocator, grown without naming one.
+(`keywords orelse made: { ...; keywords = parsed; ... }`,
+`if (cache == null) { cache = ...; }` with `null` on either side, or the
+`else` of `if (cache != null)`); a call that hands the allocator to one of
+the file's own functions that gives back all it takes with it, read one
+level with the parameter as the allocator
+(`try validate(std.heap.page_allocator, s)`, with a `validate` that frees
+its copy); the `test` block that calls `fuzz`, which runs once; a function
+the target calls that takes from such an allocator itself, rather than one
+it is handed; and a container that carries its own allocator, grown without
+naming one.
+
+Targets behind a wrapper of `std.testing.fuzz`, such as one that also runs
+them from a seeded generator under a plain `zig build test`, are not read
+yet ([#136](https://github.com/kmoneil/zigvet/issues/136)).
 
 ## Found in real code
 

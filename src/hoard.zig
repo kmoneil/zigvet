@@ -46,9 +46,15 @@
 //! memory made once and kept for every later input, in the branch that
 //! fills a container-level `var` the first time it is found empty and
 //! stores into it (`keywords orelse made: { ...; keywords = parsed; ... }`,
-//! or `if (cache == null) { cache = ...; }`); the `test` block that calls
-//! `fuzz`, which runs once; the functions the target calls; and a container
-//! that carries its own allocator, grown without naming one.
+//! `if (cache == null) { cache = ...; }` with `null` on either side, or the
+//! `else` of `if (cache != null)`); a call that hands the allocator to one
+//! of the file's own functions that gives back all it takes with it, read
+//! one level with the parameter as the allocator
+//! (`try validate(std.heap.page_allocator, s)`, with a `validate` that
+//! frees its copy); the `test` block that calls `fuzz`, which runs once; a
+//! function the target calls that takes from such an allocator itself,
+//! rather than one it is handed; and a container that carries its own
+//! allocator, grown without naming one.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -96,9 +102,15 @@ const Rule = struct {
     findings: *std.ArrayList(Finding),
     types: types.Types,
 
-    /// The target's first parameter, and the context the fuzz call passes
-    /// it, for an allocator in a field of the context.
-    const Context = struct { name: ?[]const u8, value: Node.Index };
+    /// What else names an allocator the runner does not check, in the
+    /// function read: the target's first parameter and the context the
+    /// fuzz call passes it, for a field of the context set to one; or, in a
+    /// function the target calls, the parameter the target hands one.
+    const Context = struct { name: ?[]const u8 = null, value: ?Node.Index = null, param: ?[]const u8 = null };
+
+    /// A call that takes memory, what it takes it from, and whether the
+    /// function it is in keeps it, never giving it back.
+    const Taker = struct { call: Node.Index, from: Node.Index, kept: bool };
 
     /// The function `node`, a fuzz call's second argument, names: one of
     /// the file's by name, one in a container the file declares, or one in
@@ -128,25 +140,11 @@ const Rule = struct {
         const first = params.next();
         const ctx: Context = .{ .name = if (first) |p| if (p.name_token) |t| tree.tokenSlice(t) else null else null, .value = context };
 
-        var nodes: std.ArrayList(Node.Index) = .empty;
-        try descendants(r.arena, tree, tree.nodeData(fn_decl).node_and_node[1], &nodes);
-
-        // Each call that takes memory, with what it takes it from and
-        // whether the target gives it back.
-        const Taker = struct { call: Node.Index, from: Node.Index, kept: bool };
-        var takers: std.ArrayList(Taker) = .empty;
-        for (nodes.items) |node| {
-            var call_buffer: [1]Node.Index = undefined;
-            const call = tree.fullCall(&call_buffer, node) orelse continue;
-            const from = r.takesFrom(call, ctx) orelse continue;
-            const holder = r.holderOf(node, call, from);
-            try takers.append(r.arena, .{ .call = node, .from = from, .kept = if (holder) |h| !r.givenBack(nodes.items, h) else true });
-        }
-        outer: for (takers.items) |taker| {
+        const takers = try r.takersOf(fn_decl, ctx, true);
+        outer: for (takers) |taker| {
             if (!taker.kept) continue;
-            if (try r.once(taker.call, fn_decl)) continue;
             // In the arguments of another that keeps what it takes: left to it.
-            for (takers.items) |other| {
+            for (takers) |other| {
                 if (other.call != taker.call and other.kept and r.within(taker.call, other.call)) continue :outer;
             }
             const offset = tree.tokenStart(tree.firstToken(taker.call));
@@ -163,6 +161,47 @@ const Rule = struct {
                 } },
             });
         }
+    }
+
+    /// The calls in `fn_decl` that take memory from an allocator the runner
+    /// does not check, given `ctx`, each with whether `fn_decl` keeps it:
+    /// never gives it back, and takes it on every input rather than once.
+    /// With `follow`, a call that hands the allocator to one of the file's
+    /// own functions that gives back all it takes with it is no taker.
+    fn takersOf(r: *const Rule, fn_decl: Node.Index, ctx: Context, follow: bool) Allocator.Error![]const Taker {
+        const tree = r.tree;
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try descendants(r.arena, tree, tree.nodeData(fn_decl).node_and_node[1], &nodes);
+        var takers: std.ArrayList(Taker) = .empty;
+        for (nodes.items) |node| {
+            var call_buffer: [1]Node.Index = undefined;
+            const call = tree.fullCall(&call_buffer, node) orelse continue;
+            const from = r.takesFrom(call, ctx) orelse continue;
+            if (follow and try r.helperGivesBack(call, from)) continue;
+            const holder = r.holderOf(node, call, from);
+            const kept = if (holder) |h| !r.givenBack(nodes.items, h) else true;
+            try takers.append(r.arena, .{ .call = node, .from = from, .kept = kept and !try r.once(node, fn_decl) });
+        }
+        return takers.items;
+    }
+
+    /// Whether `call` hands `from`, as an argument, to one of the file's own
+    /// functions that gives back all it takes with it: read one level,
+    /// with the parameter it lands in as the allocator.
+    fn helperGivesBack(r: *const Rule, call: Ast.full.Call, from: Node.Index) Allocator.Error!bool {
+        const tree = r.tree;
+        const fn_decl, const offset = r.types.callee(call.ast.fn_expr) orelse return false;
+        const at = for (call.ast.params, 0..) |param, i| {
+            if (param == from) break i + offset;
+        } else return false;
+        var buffer: [1]Node.Index = undefined;
+        var params = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?.iterate(tree);
+        var i: usize = 0;
+        const name = while (params.next()) |param| : (i += 1) {
+            if (i == at) break tree.tokenSlice(param.name_token orelse return false);
+        } else return false;
+        for (try r.takersOf(fn_decl, .{ .param = name }, false)) |taker| if (taker.kept) return false;
+        return true;
     }
 
     /// The allocator `call` takes memory from, when it is one the runner
@@ -195,12 +234,13 @@ const Rule = struct {
                 // `ctx.gpa`, with the fuzz call's context writing `.gpa`.
                 const ctx_name = ctx.name orelse return false;
                 if (tree.nodeTag(receiver) != .identifier or !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(receiver)), ctx_name)) return false;
-                const value = r.fieldOf(ctx.value, name) orelse return false;
-                return r.unchecked(value, .{ .name = null, .value = ctx.value }, depth + 1);
+                const value = r.fieldOf(ctx.value orelse return false, name) orelse return false;
+                return r.unchecked(value, .{}, depth + 1);
             },
             .identifier => {
-                if (r.types.localInit(node)) |init| return r.unchecked(init, ctx, depth + 1);
                 const name = tree.tokenSlice(tree.nodeMainToken(node));
+                if (ctx.param) |param| if (std.mem.eql(u8, name, param)) return true;
+                if (r.types.localInit(node)) |init| return r.unchecked(init, ctx, depth + 1);
                 var around = r.types.enclosingContainer(node);
                 while (around) |container| : (around = r.types.enclosingContainer(container)) {
                     const decl = types.memberDecl(tree, container, name) orelse continue;
@@ -276,8 +316,9 @@ const Rule = struct {
 
     /// Whether `node`, in `fn_decl`, runs for one input only: in the branch
     /// that fills a container-level `var` the first time it is found
-    /// empty, and stores into it (`g orelse made: { ...; g = x; ... }`, or
-    /// `if (g == null) { ...; g = x; }`), so later inputs reuse it.
+    /// empty, and stores into it (`g orelse made: { ...; g = x; ... }`,
+    /// `if (g == null) { ...; g = x; }` with `null` on either side, or the
+    /// `else` of `if (g != null)`), so later inputs reuse it.
     fn once(r: *const Rule, node: Node.Index, fn_decl: Node.Index) Allocator.Error!bool {
         const tree = r.tree;
         var child = node;
@@ -291,10 +332,13 @@ const Rule = struct {
                 .@"orelse" => tree.nodeData(parent).node_and_node,
                 .if_simple, .@"if" => fill: {
                     const full = tree.fullIf(parent).?;
-                    if (tree.nodeTag(full.ast.cond_expr) != .equal_equal) continue;
+                    const tag = tree.nodeTag(full.ast.cond_expr);
+                    if (tag != .equal_equal and tag != .bang_equal) continue;
                     const lhs, const rhs = tree.nodeData(full.ast.cond_expr).node_and_node;
-                    if (tree.nodeTag(rhs) != .identifier or !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(rhs)), "null")) continue;
-                    break :fill .{ lhs, full.ast.then_expr };
+                    // `g == null` or `null == g`.
+                    const g = if (isNull(tree, rhs)) lhs else if (isNull(tree, lhs)) rhs else continue;
+                    // For `g != null`, the fill is in the `else`.
+                    break :fill .{ g, if (tag == .equal_equal) full.ast.then_expr else full.ast.else_expr.unwrap() orelse continue };
                 },
                 else => continue,
             };
@@ -345,6 +389,11 @@ const Rule = struct {
         return false;
     }
 };
+
+/// Whether `node` is `null`, which the parser reads as a name.
+fn isNull(tree: *const Ast, node: Node.Index) bool {
+    return tree.nodeTag(node) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "null");
+}
 
 /// Whether `fn_expr` names `std.testing.fuzz` or `testing.fuzz`.
 fn isFuzz(tree: *const Ast, fn_expr: Node.Index) bool {
@@ -419,6 +468,13 @@ test "a fuzz target that keeps memory past one input (#132)" {
         \\fn memoLocal(_: void, _: *std.testing.Smith) anyerror!void { var cache: ?[]u8 = null; const c = cache orelse made: { const x = try shared.dupe(u8, "x"); cache = x; break :made x; }; _ = c; }
         \\var never: ?[]u8 = null;
         \\fn unfilled(_: void, _: *std.testing.Smith) anyerror!void { var last: []u8 = undefined; const c = never orelse made: { last = try shared.dupe(u8, "x"); break :made last; }; _ = c; }
+        \\fn keep(gpa: std.mem.Allocator, s: []const u8) !void { try seen.append(gpa, try gpa.dupe(u8, s)); }
+        \\fn keeping(_: void, _: *std.testing.Smith) anyerror!void { try keep(std.heap.page_allocator, "x"); }
+        \\fn copyOf(gpa: std.mem.Allocator, s: []const u8) ![]u8 { return gpa.dupe(u8, s); }
+        \\fn copied(_: void, _: *std.testing.Smith) anyerror!void { _ = try copyOf(shared, "x"); }
+        \\const Bag = struct { items: std.ArrayList(u8) = .empty, fn put(b: *Bag, gpa: std.mem.Allocator) !void { try b.items.append(gpa, 1); } };
+        \\var bag: Bag = .{};
+        \\fn bagged(_: void, _: *std.testing.Smith) anyerror!void { try bag.put(std.heap.page_allocator); }
         \\const Ctx = struct { gpa: std.mem.Allocator };
         \\const Context = struct { fn testOne(_: Context, _: *std.testing.Smith) anyerror!void { _ = try std.heap.raw_c_allocator.alloc(u8, 1); } };
         \\test "fuzz" {
@@ -435,6 +491,9 @@ test "a fuzz target that keeps memory past one input (#132)" {
         \\    try std.testing.fuzz({}, unbound, .{});
         \\    try std.testing.fuzz({}, memoLocal, .{});
         \\    try std.testing.fuzz({}, unfilled, .{});
+        \\    try std.testing.fuzz({}, keeping, .{});
+        \\    try std.testing.fuzz({}, copied, .{});
+        \\    try std.testing.fuzz({}, bagged, .{});
         \\    try std.testing.fuzz(Context{}, Context.testOne, .{});
         \\    try std.testing.fuzz({}, struct { fn f(_: void, _: *std.testing.Smith) anyerror!void { _ = try std.heap.page_allocator.alloc(u8, 1); } }.f, .{});
         \\}
@@ -450,8 +509,11 @@ test "a fuzz target that keeps memory past one input (#132)" {
         \\13:145 shared.dupe from shared in unbound
         \\14:132 shared.dupe from shared in memoLocal
         \\16:131 shared.dupe from shared in unfilled
-        \\18:96 std.heap.raw_c_allocator.alloc from std.heap.raw_c_allocator in testOne
-        \\34:100 std.heap.page_allocator.alloc from std.heap.page_allocator in f
+        \\18:64 keep from std.heap.page_allocator in keeping
+        \\20:67 copyOf from shared in copied
+        \\23:63 bag.put from std.heap.page_allocator in bagged
+        \\25:96 std.heap.raw_c_allocator.alloc from std.heap.raw_c_allocator in testOne
+        \\44:100 std.heap.page_allocator.alloc from std.heap.page_allocator in f
         \\
     );
 }
@@ -476,6 +538,14 @@ test "given back, checked by the runner, or not a fuzz target: not reported" {
         \\var cached: ?[]u8 = null;
         \\fn memo(_: void, _: *std.testing.Smith) anyerror!void { const k = keywords orelse made: { const x = try std.heap.page_allocator.dupe(u8, "x"); keywords = x; break :made x; }; _ = k; }
         \\fn filled(_: void, _: *std.testing.Smith) anyerror!void { if (cached == null) { cached = try std.heap.page_allocator.dupe(u8, "y"); } }
+        \\var first: ?[]u8 = null;
+        \\var later: ?[]u8 = null;
+        \\fn nullFirst(_: void, _: *std.testing.Smith) anyerror!void { if (null == first) { first = try std.heap.page_allocator.dupe(u8, "x"); } }
+        \\fn notNull(_: void, _: *std.testing.Smith) anyerror!void { if (later != null) {} else { later = try std.heap.page_allocator.dupe(u8, "z"); } }
+        \\fn validate(gpa: std.mem.Allocator, s: []const u8) !void { const copy = try gpa.dupe(u8, s); gpa.free(copy); }
+        \\fn scratch(_: void, _: *std.testing.Smith) anyerror!void { try validate(std.heap.page_allocator, "x"); }
+        \\const Box = struct { fn check(b: *Box, gpa: std.mem.Allocator) !void { _ = b; const c = try gpa.alloc(u8, 1); defer gpa.free(c); } };
+        \\fn boxed(_: void, _: *std.testing.Smith) anyerror!void { var b: Box = .{}; try b.check(std.heap.page_allocator); }
         \\const Ctx = struct { gpa: std.mem.Allocator };
         \\const mine = struct { const page_allocator = std.testing.allocator; };
         \\test "fuzz" {
@@ -493,6 +563,10 @@ test "given back, checked by the runner, or not a fuzz target: not reported" {
         \\    try std.testing.fuzz({}, other, .{});
         \\    try std.testing.fuzz({}, memo, .{});
         \\    try std.testing.fuzz({}, filled, .{});
+        \\    try std.testing.fuzz({}, nullFirst, .{});
+        \\    try std.testing.fuzz({}, notNull, .{});
+        \\    try std.testing.fuzz({}, scratch, .{});
+        \\    try std.testing.fuzz({}, boxed, .{});
         \\    try app_testing.fuzz({}, notFuzzed, .{});
         \\}
     , "");

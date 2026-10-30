@@ -12,8 +12,8 @@ file src/hoard.zig
 +                if (oneOf(name, &unchecked_names)) return true;
 
 == memory the target gives back
--            try takers.append(r.arena, .{ .call = node, .from = from, .kept = if (holder) |h| !r.givenBack(nodes.items, h) else true });
-+            try takers.append(r.arena, .{ .call = node, .from = from, .kept = holder == null or true });
+-            const kept = if (holder) |h| !r.givenBack(nodes.items, h) else true;
++            const kept = holder == null or true;
 
 == a call in the arguments of one that is reported
 -                if (other.call != taker.call and other.kept and r.within(taker.call, other.call)) continue :outer;
@@ -24,8 +24,20 @@ file src/hoard.zig
 +            for (r.findings.items) |finding| if (false and finding.offset == offset and finding.detail == .hoard) continue :outer;
 
 == memory made once and kept in a global for later inputs
--            if (try r.once(taker.call, fn_decl)) continue;
-+            if (false and try r.once(taker.call, fn_decl)) continue;
+-            try takers.append(r.arena, .{ .call = node, .from = from, .kept = kept and !try r.once(node, fn_decl) });
++            try takers.append(r.arena, .{ .call = node, .from = from, .kept = kept });
+
+== a memo written with null first, `null == g` (#134)
+-                    const g = if (isNull(tree, rhs)) lhs else if (isNull(tree, lhs)) rhs else continue;
++                    const g = if (isNull(tree, rhs)) lhs else continue;
+
+== a memo filled in the else of `g != null` (#134)
+-                    if (tag != .equal_equal and tag != .bang_equal) continue;
++                    if (tag != .equal_equal) continue;
+
+== a helper of the file's that gives back all it takes (#135)
+-            if (follow and try r.helperGivesBack(call, from)) continue;
++            if (false and follow and try r.helperGivesBack(call, from)) continue;
 
 == a global keeps its value from one input to the next, a local does not
 -            if (child != branch or !r.global(empty)) continue;
