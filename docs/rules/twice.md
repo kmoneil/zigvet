@@ -1,3 +1,8 @@
+---
+title: twice
+parent: Rules
+---
+
 # twice
 
 An errdefer's free also written out by hand on a path that then fails.
@@ -55,4 +60,4 @@ Zig projects, 23 in one compiler: 22 real, at seven places, and one false
 positive, a deinit that resets what it frees run twice, its type declared
 in another file.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

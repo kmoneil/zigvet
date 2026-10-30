@@ -1,3 +1,8 @@
+---
+title: cached
+parent: Rules
+---
+
 # cached
 
 A build script that lists a directory to decide what to build, and never
@@ -51,4 +56,4 @@ library and a static site generator, whose build scripts list a directory
 of tests, examples or sources to decide what to build and never tell Zig
 0.17's configure cache.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

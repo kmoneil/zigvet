@@ -1,0 +1,30 @@
+# The site at https://kmoneil.github.io/zigvet/, built by GitHub Pages from
+# this folder on main. The rule pages are the same files the repository
+# shows; the front matter at their top places them in the sidebar.
+title: zigvet
+description: Things Zig compiles that are wrong.
+url: https://kmoneil.github.io
+baseurl: /zigvet
+
+remote_theme: just-the-docs/just-the-docs@v0.12.0
+plugins:
+  - jekyll-remote-theme
+
+color_scheme: light
+search_enabled: true
+heading_anchors: true
+back_to_top: true
+back_to_top_text: Back to top
+
+aux_links:
+  GitHub: https://github.com/kmoneil/zigvet
+  Releases: https://github.com/kmoneil/zigvet/releases
+
+gh_edit_link: true
+gh_edit_link_text: Edit this page on GitHub
+gh_edit_repository: https://github.com/kmoneil/zigvet
+gh_edit_branch: main
+gh_edit_source: docs
+gh_edit_view_mode: tree
+
+footer_content: zigvet is Apache-2.0 licensed.

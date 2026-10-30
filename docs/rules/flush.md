@@ -1,3 +1,8 @@
+---
+title: flush
+parent: Rules
+---
+
 # flush
 
 A buffered file or stream writer, written to and never flushed.
@@ -46,4 +51,4 @@ emulator: three real (two commands whose error message is lost before
 they exit 1, and one whose plain output loses what is left in its 4 KB
 buffer at the end) and one a test that writes a file it only deletes.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

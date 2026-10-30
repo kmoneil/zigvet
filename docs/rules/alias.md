@@ -1,3 +1,8 @@
+---
+title: alias
+parent: Rules
+---
+
 # alias
 
 An anonymous initializer assigned to a place that one of its own later
@@ -50,4 +55,4 @@ part of a struct, and is still reported.
 Over Zig 0.17.0's standard library and compiler sources and seven
 application repos, alias found one real defect and no false positive.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

@@ -17,7 +17,18 @@ lowercase word for what it catches.
 
 A rule lives in three places: its code and unit tests in `src/<rule>.zig`,
 its cases in `test/cases/<rule>/`, and its page in `docs/rules/<rule>.md`,
-which the table in the README links to.
+with `title` and `parent: Rules` front matter at its top. A new rule also
+gets a row in the tables in the README and in `docs/rules/index.md`, and a
+link in the list on the site's home page, `docs/index.md`.
+
+## The site
+
+GitHub Pages builds <https://kmoneil.github.io/zigvet/> from `docs/` on
+`main`, with the just-the-docs theme (`docs/_config.yml`); there is no
+workflow for it in this repository. The rule pages are the same files the
+repository shows, so a rule's page is written once. The site's own pages,
+`docs/index.md` and `docs/usage.md`, repeat parts of the README, and a
+change to one is a change to the other.
 
 ## Tests
 

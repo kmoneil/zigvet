@@ -1,3 +1,8 @@
+---
+title: escape
+parent: Rules
+---
+
 # escape
 
 A pointer or slice into stack memory that leaves the function that made it.
@@ -157,4 +162,4 @@ and four application repos, escape found two real defects, and three of
 the one false positive it accepts, which it now tells apart from the rest
 (above).
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

@@ -1,3 +1,8 @@
+---
+title: unrun
+parent: Rules
+---
+
 # unrun
 
 A file whose tests never run, because nothing the test build analyses
@@ -67,4 +72,4 @@ by hand, it reports the two files the fix names. Over fourteen well-known
 public Zig projects, four, all real, in a terminal UI library: 20 tests of
 its widgets, which neither its tests nor its C API's run.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

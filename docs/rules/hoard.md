@@ -1,3 +1,8 @@
+---
+title: hoard
+parent: Rules
+---
+
 # hoard
 
 A fuzz target that keeps memory past one input, from an allocator the test
@@ -92,4 +97,4 @@ reports nothing. Its one report while it was being written was a target
 that parses a schema once, on the first input, and keeps it in a global for
 the rest, which is why memory made once is not reported.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)
