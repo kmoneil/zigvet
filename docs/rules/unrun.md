@@ -40,8 +40,13 @@ It starts from the roots, the files whose tests a build runs with nothing
 referring to them: a `.zig` path a build script names
 (`b.path("src/root.zig")`, in `build.zig` or a file with a `*std.Build`
 parameter), each file under a directory one opens, and, where nothing
-names one, each file of an import cycle that nothing outside it imports,
-a file nothing imports among them. A root's tests reach what they name,
+names one, an import cycle that nothing outside it imports, a file
+nothing imports among them: the files of it whose tests name another
+file, as a test root's do (`test { _ = forum; }`,
+`refAllDecls(@This())`), or each file of it when none does. That last is
+how a root the build hides is found, such as an app's `app.zig` that a
+framework's build script names and the app's files import back. A
+root's tests reach what they name,
 and a declaration reached reaches everything in it: a function's body, a
 type's members and their tests. `alias.Name`, with `alias` a constant
 `@import("x.zig")`, reaches `Name` in x.zig, and `_ = alias;` reaches
@@ -55,8 +60,9 @@ imports by path and nothing reached refers to. Every guess errs toward
 reached, so the rule misses rather than reports: a name is taken to mean
 the file's declaration of it wherever it is used, and code a comptime
 condition rules out counts. Not seen: a root only the build's own logic
-names (`b.path(b.fmt(...))`), a file outside those checked, tests run
-another way, such as `zig test` in a script, and a module that names
+names (`b.path(b.fmt(...))`), unless it is found as above, a file outside
+those checked, tests run another way, such as `zig test` in a script, and
+a module that names
 itself, `@import("mylib")` inside mylib, which only the build maps to a
 file; an allow comment above the reported `test` covers one of those.
 
@@ -71,5 +77,14 @@ with the copy another keeps. Over that repo as it was before a fix found
 by hand, it reports the two files the fix names. Over fourteen well-known
 public Zig projects, four, all real, in a terminal UI library: 20 tests of
 its widgets, which neither its tests nor its C API's run.
+
+With a cycle the build hides the root of rooted at the files whose tests
+name another file ([#141](https://github.com/kmoneil/zigvet/issues/141)),
+the standard library, one import cycle whose root no build script in the
+lib directory names, shows one more without being told `std.zig` is its
+root: `std/os/linux/bpf/btf.zig`, whose one test never runs, since
+bpf.zig declares `btf` and nothing the tests reach names it. Over the
+application repos and the fourteen public projects, that change reports
+nothing new.
 
 [All rules](index.md)

@@ -19,8 +19,12 @@
 //! the build runs without anything referring to them: a `.zig` path a build
 //! script names (a `build.zig`, or a file with a `*std.Build` parameter),
 //! every file under a directory one opens, and, as nothing shows where else
-//! the roots are, every file of an import cycle that nothing outside it
-//! imports, such as a file nothing imports. A root's tests reach what they
+//! the roots are, of an import cycle that nothing outside it imports, such
+//! as a file nothing imports, the files whose tests name another file, as a
+//! test root's do (`test { _ = forum; }`, `refAllDecls(@This())`), or
+//! every file of it when none does. That finds a root the build hides, an
+//! app's root a framework's build names, which the app's files import
+//! back. A root's tests reach what they
 //! name, and a declaration reached reaches what it names, all of it: a
 //! function's body, a type's members and their tests. `alias.Name`, with
 //! `alias` a constant `@import("x.zig")`, reaches `Name` in x.zig; `_ =
@@ -37,7 +41,8 @@
 //! reached, so the rule misses rather than reports: a name is taken to mean
 //! the file's declaration of it wherever it is used, and code a comptime
 //! condition rules out is counted. Not seen: a root only the build's own
-//! logic names (`b.path(b.fmt(...))`), a file outside those checked, a
+//! logic names (`b.path(b.fmt(...))`), unless it is found as above, a file
+//! outside those checked, a
 //! test run some other way (`zig test` in a script), and a module that
 //! names itself, `@import("mylib")` inside mylib, which only the build maps
 //! to a file. Name the project's directory, build.zig with it, for the
@@ -66,6 +71,8 @@ pub const Summary = struct {
     /// What is analysed with the file: its tests, `comptime` blocks,
     /// fields and exported declarations.
     always: []const Chain = &.{},
+    /// What its tests name, of `always`.
+    tested: []const Chain = &.{},
     /// Every file it imports by path, anywhere in it.
     imports: []const Import = &.{},
     /// Whether it imports `std`, which is a file checked here too when the
@@ -154,12 +161,13 @@ pub fn summarize(gpa: Allocator, arena: Allocator, path: []const u8, tree: *cons
     var summary: Summary = .{ .path = try arena.dupe(u8, path) };
     var decls: std.ArrayList(Decl) = .empty;
     var always: Set = .{};
+    var tested: Set = .{};
     for (tree.rootDecls()) |member| {
         switch (tree.nodeTag(member)) {
             .test_decl => {
                 if (summary.tests == 0) summary.first_test = tree.tokenStart(tree.nodeMainToken(member));
                 summary.tests += 1;
-                try scan.walk(&always, member, .whole, false);
+                try scan.walk(&tested, member, .whole, false);
                 continue;
             },
             .fn_decl => {
@@ -206,6 +214,8 @@ pub fn summarize(gpa: Allocator, arena: Allocator, path: []const u8, tree: *cons
         try scan.walk(&always, member, .whole, false);
     }
     summary.decls = decls.items;
+    summary.tested = tested.list.items;
+    try always.list.appendSlice(arena, tested.list.items);
     summary.always = always.list.items;
     summary.imports = scan.imports.items;
     summary.imports_std = scan.imports_std;
@@ -586,25 +596,44 @@ const Reach = struct {
         for (r.root, 0..) |is_root, f| if (is_root) try r.analyse(f);
     }
 
-    /// Makes roots of every file of each import cycle, or lone file, that
-    /// nothing outside it imports and that holds no root already.
+    /// Makes roots of each import cycle, or lone file, that nothing outside
+    /// it imports and that holds no root already: of its files whose tests
+    /// name another file, as a test root's do (`test { _ = forum; }`,
+    /// `refAllDecls(@This())`), or of every file of it if none does.
     fn cycleRoots(r: *Reach) Allocator.Error!void {
         const n = r.files.len;
         const component = try sccs(r.arena, r.imports);
         const imported = try r.arena.alloc(bool, n);
         const rooted = try r.arena.alloc(bool, n);
+        const gathering = try r.arena.alloc(bool, n);
+        const gatherer = try r.arena.alloc(bool, n);
         @memset(imported, false);
         @memset(rooted, false);
+        @memset(gathering, false);
         for (0..n) |t| {
             if (r.root[t]) rooted[component[t]] = true;
             for (r.importers[t].items) |f| if (component[f] != component[t]) {
                 imported[component[t]] = true;
             };
+            gatherer[t] = r.gathers(t);
+            if (gatherer[t]) gathering[component[t]] = true;
         }
         for (0..n) |f| {
             const c = component[f];
-            if (!imported[c] and !rooted[c]) r.root[f] = true;
+            if (!imported[c] and !rooted[c] and (gatherer[f] or !gathering[c])) r.root[f] = true;
         }
+    }
+
+    /// Whether a test of file `f` names another file, or the file's own
+    /// declarations as a whole: a test root's `_ = forum;` or
+    /// `refAllDecls(@This())`.
+    fn gathers(r: *Reach, f: usize) bool {
+        for (r.files[f].tested) |c| {
+            if (c.root == .self and c.fields.len == 0 and c.use != .plain) return true;
+            const t = r.chainTarget(f, c, 0) orelse continue;
+            if (t != f) return true;
+        }
+        return false;
     }
 
     fn analyse(r: *Reach, f: usize) Allocator.Error!void {
@@ -671,8 +700,12 @@ const Reach = struct {
     /// The file declaration `d` of file `f` stands for, if it stands for
     /// one: `const s3 = @import("s3.zig");`, or `const T = other.s3;`.
     fn aliasOf(r: *Reach, f: usize, d: usize, depth: u8) ?usize {
+        return r.chainTarget(f, r.files[f].decls[d].init orelse return null, depth);
+    }
+
+    /// The file chain `c`, in file `f`, ends on, if it ends on one.
+    fn chainTarget(r: *Reach, f: usize, c: Chain, depth: u8) ?usize {
         if (depth > 16) return null;
-        const c = r.files[f].decls[d].init orelse return null;
         var target: ?usize = switch (c.root) {
             .name => |name| r.aliasOf(f, r.by_name[f].get(name) orelse return null, depth + 1),
             .file => |path| r.by_path.get(path),
@@ -1002,6 +1035,76 @@ test "roots: an import cycle nothing outside it imports, unless a build script n
         },
     },
         \\named/b.zig:2:1 1 | add `_ = b;` to a test block in named/a.zig
+        \\
+    );
+}
+
+test "roots: in a cycle the build hides the root of, the files whose tests name another file (#141)" {
+    try expectUnrun(&.{
+        .{
+            "hidden/build.zig",
+            \\const std = @import("std");
+            \\pub fn build(b: *std.Build) void { _ = b.path(b.fmt("src/{s}.zig", .{"app"})); }
+            \\
+        },
+        .{
+            "hidden/src/app.zig",
+            \\pub const routes = @import("routes.zig");
+            \\const forum = @import("forum.zig");
+            \\test { _ = forum; }
+            \\
+        },
+        .{ "hidden/src/forum.zig", "pub fn f() u32 { return 1; }\ntest \"forum\" {}\n" },
+        .{
+            "hidden/src/routes.zig",
+            \\const latest = @import("live/latest.zig");
+            \\pub fn home() u32 { return latest.count(); }
+            \\
+        },
+        .{
+            "hidden/src/live/latest.zig",
+            \\const app = @import("../app.zig");
+            \\pub fn count() u32 { return 1; }
+            \\test "count is never run" {}
+            \\pub fn name() []const u8 { _ = app.routes; return "latest"; }
+            \\
+        },
+        .{
+            "gathered/app.zig",
+            \\pub const routes = @import("routes.zig");
+            \\test { _ = routes; }
+            \\
+        },
+        .{
+            "gathered/routes.zig",
+            \\const latest = @import("latest.zig");
+            \\test { _ = latest; }
+            \\
+        },
+        .{
+            "gathered/latest.zig",
+            \\const app = @import("app.zig");
+            \\test "latest" {}
+            \\pub fn name() void { _ = app.routes; }
+            \\
+        },
+        .{
+            "reflected/a.zig",
+            \\const b = @import("b.zig");
+            \\const c = @import("c.zig");
+            \\test { _ = c; }
+            \\
+        },
+        .{
+            "reflected/b.zig",
+            \\const std = @import("std");
+            \\const a = @import("a.zig");
+            \\test { std.testing.refAllDecls(@This()); }
+            \\
+        },
+        .{ "reflected/c.zig", "test \"c\" {}\n" },
+    },
+        \\hidden/src/live/latest.zig:3:1 1 | add `test { _ = latest; }` to hidden/src/routes.zig, and reach that file from a test too
         \\
     );
 }

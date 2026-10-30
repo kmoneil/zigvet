@@ -1,0 +1,12 @@
+# unrun's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/unrun.zig
+
+== a cycle with no file whose tests name another is all roots
+-            if (!imported[c] and !rooted[c] and (gatherer[f] or !gathering[c])) r.root[f] = true;
++            if (!imported[c] and !rooted[c] and gatherer[f]) r.root[f] = true;
+
+== refAllDecls(@This()) in a test names the file's declarations as a whole
+-            if (c.root == .self and c.fields.len == 0 and c.use != .plain) return true;
++            if (false and c.root == .self and c.fields.len == 0 and c.use != .plain) return true;
