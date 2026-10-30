@@ -126,10 +126,13 @@ Leaving the function:
 
 - returned, directly or through `if`, `switch`, `orelse`, `catch`, `try`, a
   labeled block, a cast, a struct returned by value, a local that holds it,
-  an element or field read out of a local made with an initializer that
+  a local returned whole with it stored into a field or element of the
+  local after its declaration (`s.w = .fixed(&s.buf); return s;`), an
+  element or field read out of a local made with an initializer that
   holds it (`whole[i]` of `const whole = [_][]const T{ &.{}, &.{f()} };`),
   a `std` call that returns part of its argument
-  (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`), or one of
+  (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`), a `std`
+  reader or writer made over it (`file.writer(io, &buf)`), or one of
   the file's own that does, such as `return id.slice();` with `id` held by
   value and `fn slice(self: *const Id) []const u8 { return self.bytes[0..self.len]; }`,
   or one of the file's own whose result holds a copy of the argument, such
@@ -171,7 +174,18 @@ part of an argument, `std.fmt`'s `bufPrint` and `bufPrintSentinel` and
 `std.mem`'s `print`, `printSentinel`, `sliceTo`, `span`, `trim`,
 `trimStart`, `trimEnd`, `cutPrefix`, `cutSuffix`, `asBytes`,
 `sliceAsBytes`, `bytesAsSlice` and `bytesAsValue` (`print` and
-`printSentinel` only through their namespace, `mem.print`).
+`printSentinel` only through their namespace, `mem.print`), and as holding
+the buffer they are given, their last argument, `std.Io`'s readers and
+writers: `fixed`, `init` and `initStreaming` through a `Writer` or a
+`Reader` (`std.Io.Writer.fixed(&buf)`, `File.Reader.init(file, io, &buf)`),
+`.fixed(&buf)` in a file that declares no `fixed` of its own, and the
+`writer`, `reader`, `writerStreaming` and `readerStreaming` methods of a
+file or a stream (`file.writer(io, &buf)`), when the file declares no
+method of that name for the receiver's type. A store into a field of a
+local counts only for a local held by value, through as many fields as
+the file's types show held by value, and into an element only for a local
+array: a store through a local pointer is a store outward, as one through
+a parameter is.
 One of the file's own functions returns part of an argument when it
 returns, directly, a slice of an array that a pointer parameter points at
 or the address of one of its fields. Its result holds a copy of an
