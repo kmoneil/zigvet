@@ -91,11 +91,13 @@ pub const Finding = struct {
     pub const Fit = struct {
         /// The call that prints, as written: `std.fmt.bufPrint`.
         callee: []const u8,
-        /// The replacement field that prints the float, as written: `{d}`.
+        /// The replacement field that prints the number, as written: `{d}`.
         placeholder: []const u8,
-        /// The float's type: `f64`.
-        float: []const u8,
-        /// The float, as written.
+        /// The number's type as the file writes it: `f64`, `u128`. Null
+        /// for an anytype parameter or a field of one, whose type the
+        /// caller picks.
+        number: ?[]const u8,
+        /// The number, as written.
         value: []const u8,
         /// The most bytes it can print in.
         need: u64,
@@ -302,8 +304,10 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .cancel => |c| try w.print("`{s}` drops what {s} returns, error.Canceled included, which is delivered once", .{
             c.handler, c.callee,
         }),
-        .fit => |f| try w.print("`{s}` of {s} '{s}' can need {d} bytes, but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{
-            f.placeholder, f.float, f.value, f.need, f.buffer, f.capacity, f.callee,
+        .fit => |f| if (f.number) |number| try w.print("`{s}` of {s} '{s}' can need {d} bytes, but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{
+            f.placeholder, number, f.value, f.need, f.buffer, f.capacity, f.callee,
+        }) else try w.print("`{s}` of '{s}', whose type the caller picks, can need {d} bytes as an i128, but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{
+            f.placeholder, f.value, f.need, f.buffer, f.capacity, f.callee,
         }),
         .refill => |f| try w.print("`{s}` freed here still holds the freed memory if {s} fails before it is refilled", .{
             f.place, f.fails,

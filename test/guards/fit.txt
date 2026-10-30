@@ -1,0 +1,20 @@
+# fit's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/fit.zig
+
+== a parameter the file types, in another file's type
+-                        if (param.anytype_ellipsis3 == null) return false;
++                        if (false and param.anytype_ellipsis3 == null) return false;
+
+== a local the file types, made from what the caller picks
+-                if (decl.ast.type_node != .none) return false;
++                if (false and decl.ast.type_node != .none) return false;
+
+== a private function every call to which passes a type the file picks
+-        if (proto.visib_token != null) return true;
++        if (true or proto.visib_token != null) return true;
+
+== a call to another function of the same name
+-            if (called != fn_decl or index < offset) continue;
++            if (false and called != fn_decl or index < offset) continue;
