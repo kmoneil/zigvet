@@ -1,3 +1,8 @@
+---
+title: copy
+parent: Rules
+---
+
 # copy
 
 A `std.Io.Writer` or `Reader` interface copied out of the struct its
@@ -49,4 +54,4 @@ repos and fourteen well-known public Zig projects, copy reports nothing:
 the copies there of a field named `writer` are copies of a pointer, which
 copy fine.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

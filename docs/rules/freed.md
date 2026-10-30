@@ -1,3 +1,8 @@
+---
+title: freed
+parent: Rules
+---
+
 # freed
 
 A function returns what its own `defer` frees.
@@ -45,4 +50,4 @@ repos and fourteen well-known public Zig projects, freed reports nothing:
 the first test that reads the result fails, so the bug is fixed before it
 lands, and the rule's worth is in reporting it at the edit.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

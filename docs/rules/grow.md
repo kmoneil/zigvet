@@ -1,3 +1,8 @@
+---
+title: grow
+parent: Rules
+---
+
 # grow
 
 A pointer into a list's items, kept across a call that can move them.
@@ -55,4 +60,4 @@ then `continue`s), and the one place in Zig's own LLVM IR builder that
 keeps a `getOrPut` pointer across another `getOrPut` is correct because
 the second only inserts on a path that returns.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

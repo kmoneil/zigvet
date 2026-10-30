@@ -1,3 +1,8 @@
+---
+title: wipe
+parent: Rules
+---
+
 # wipe
 
 A local wiped with `@memset` as the last thing done with it, a dead store
@@ -42,4 +47,4 @@ repos and fourteen well-known public Zig projects, as they are now, wipe
 reports nothing. Over a Kafka client as it was before it changed its
 wipes, it reports all nine.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

@@ -1,3 +1,8 @@
+---
+title: cancel
+parent: Rules
+---
+
 # cancel
 
 In a task's loop, an `Io` call whose error is dropped with `catch {}` or
@@ -61,4 +66,4 @@ Over Zig 0.17.0's standard library and compiler sources and seven
 application repos, cancel found one real defect and one harmless case, a
 test's task that nothing cancels.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

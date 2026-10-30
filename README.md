@@ -3,6 +3,7 @@
 [![ci](https://github.com/kmoneil/zigvet/actions/workflows/ci.yml/badge.svg)](https://github.com/kmoneil/zigvet/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kmoneil/zigvet)](https://github.com/kmoneil/zigvet/releases/latest)
 [![zig](https://img.shields.io/badge/zig-0.17.0-f7a41d)](https://ziglang.org/download/)
+[![docs](https://img.shields.io/badge/docs-kmoneil.github.io%2Fzigvet-blue)](https://kmoneil.github.io/zigvet/)
 [![license](https://img.shields.io/github/license/kmoneil/zigvet)](LICENSE)
 
 **Things Zig compiles that are wrong.**

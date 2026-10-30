@@ -1,3 +1,8 @@
+---
+title: owner
+parent: Rules
+---
+
 # owner
 
 One allocation freed by two errdefers: the caller's, and the one in the
@@ -105,4 +110,4 @@ repos, and a copy of one of them another keeps. Over fourteen well-known
 public Zig projects, six, all real, in one compiler, two of them in its
 tests.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

@@ -1,3 +1,8 @@
+---
+title: kept
+parent: Rules
+---
+
 # kept
 
 An `errdefer` that frees what the function has already stored where its
@@ -96,4 +101,4 @@ fake storage server. Over fourteen well-known public Zig projects, 22: 20
 real, one of them an optional left set over what its errdefer frees, and
 two that leave a freed value in something their caller throws away.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

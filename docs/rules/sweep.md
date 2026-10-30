@@ -1,3 +1,8 @@
+---
+title: sweep
+parent: Rules
+---
+
 # sweep
 
 A loop that frees what a list holds, can fail part way, and empties the
@@ -44,4 +49,4 @@ Over Zig 0.17.0's standard library and compiler sources and the
 application repos, sweep reports nothing. Over fourteen well-known public
 Zig projects, one, real, in an editor.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

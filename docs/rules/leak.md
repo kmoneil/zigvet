@@ -1,3 +1,8 @@
+---
+title: leak
+parent: Rules
+---
+
 # leak
 
 A local released by hand later in its block, with something between that
@@ -70,4 +75,4 @@ ten, all real: seven in a compiler, an allocation or a canonicalizer left
 behind when the next step runs out of memory; two in a database's tools;
 and a directory an editor leaves open when it cannot change into it.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

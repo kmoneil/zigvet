@@ -1,3 +1,8 @@
+---
+title: refill
+parent: Rules
+---
+
 # refill
 
 A place freed, then given new memory by something that can fail first.
@@ -60,4 +65,4 @@ application repos, refill reports eleven, all real: two in the standard
 library, four in three application repos, and five in third-party UI code
 one of them keeps for reference.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

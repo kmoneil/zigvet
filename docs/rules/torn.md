@@ -1,3 +1,8 @@
+---
+title: torn
+parent: Rules
+---
+
 # torn
 
 An optional or union built in place by an initializer that can fail, which
@@ -55,4 +60,4 @@ application repos, torn reports nothing. Over fourteen well-known public
 Zig projects, four, all real, in a terminal emulator, a compiler and a
 browser.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

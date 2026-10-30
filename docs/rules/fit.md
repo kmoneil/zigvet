@@ -1,3 +1,8 @@
+---
+title: fit
+parent: Rules
+---
+
 # fit
 
 A number printed in decimal into a buffer too small for it, with the
@@ -92,4 +97,4 @@ user id ([#128](https://github.com/kmoneil/zigvet/issues/128)), and three
 false positives, each an integer whose type or bound is written in another
 file.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)

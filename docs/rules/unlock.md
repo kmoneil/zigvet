@@ -1,3 +1,8 @@
+---
+title: unlock
+parent: Rules
+---
+
 # unlock
 
 A lock taken, then something that can fail before the unlock, with no
@@ -38,4 +43,4 @@ Over Zig 0.17.0's standard library and compiler sources and the
 application repos, unlock reports nothing. Over fourteen well-known public
 Zig projects, two, both real, in an HTTP server library and a game engine.
 
-[All rules](../../README.md#the-rules)
+[All rules](index.md)
