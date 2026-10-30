@@ -1,0 +1,24 @@
+# escape's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/escape.zig
+
+== a store into a local's field or element, not through a local pointer
+-        return p.storage == storage;
++        return true or p.storage == storage;
+
+== a field read out of a local is not what a store into a field of it wrote
+-        for (r.stores.items) |store| if (store.binding == index and !store.part) try made.append(r.arena, store.value);
++        for (r.stores.items) |store| if (store.binding == index) try made.append(r.arena, store.value);
+
+== the file's own reader or writer method, not std's
+-                if (r.types.callee(callee) != null) return null;
++                if (false and r.types.callee(callee) != null) return null;
+
+== a file with its own fixed, for a .fixed declaration literal
+-                if (!std.mem.eql(u8, name, "fixed") or r.comptime_result_fns.contains(name)) return null;
++                if (!std.mem.eql(u8, name, "fixed")) return null;
+
+== init or fixed only through a Writer or a Reader
+-                    if (!std.mem.eql(u8, namespace, "Writer") and !std.mem.eql(u8, namespace, "Reader")) return null;
++                    if (false and !std.mem.eql(u8, namespace, "Writer") and !std.mem.eql(u8, namespace, "Reader")) return null;

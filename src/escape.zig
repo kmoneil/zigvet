@@ -7,8 +7,11 @@
 //! parameter, and a store to a container-level variable. The second follows
 //! each sink's value back through `if`, `switch`, `orelse`, `catch`, labeled
 //! blocks, locals, the elements and fields of a local made with an
-//! initializer, the `std` calls that return a view of an argument
-//! (`std.fmt.bufPrint`, `std.mem.sliceTo`, ...) and the file's own functions
+//! initializer, what is stored into a field or element of a local that
+//! leaves whole (`s.w = .fixed(&s.buf); return s;`), the `std` calls that
+//! return a view of an argument (`std.fmt.bufPrint`, `std.mem.sliceTo`,
+//! ...) or hold the buffer they are given (`std.Io.Writer.fixed`,
+//! `file.writer(io, &buf)`), and the file's own functions
 //! that return part of what a pointer parameter points at, or whose result
 //! holds a copy of an argument or of the receiver
 //! (`ctx.render(.{ .errors = &errs })`, `buffer.reader()`), and reports a
@@ -559,7 +562,11 @@ const Rule = struct {
                 .target = lhs,
             }),
             .local => {
-                if (whole) try r.stores.append(r.arena, .{ .binding = index, .value = rhs });
+                if (whole) {
+                    try r.stores.append(r.arena, .{ .binding = index, .value = rhs });
+                } else if (r.partOfLocal(lhs)) {
+                    try r.stores.append(r.arena, .{ .binding = index, .value = rhs, .part = true });
+                }
                 if (r.capturedSince(index)) try r.sinks.append(r.arena, .{
                     .value = rhs,
                     .sink = .outer_local,
@@ -569,6 +576,21 @@ const Rule = struct {
             },
             .capture => {},
         }
+    }
+
+    /// Whether `target`, what a store writes to, is in a local's own
+    /// memory: a field of one held by value (`s.w` of `var s: Sink`),
+    /// through as many fields held by value as the file's types show, or
+    /// an element of a local array. Not what a local points at.
+    fn partOfLocal(r: *Rule, target: Node.Index) bool {
+        const tree = r.tree;
+        const holder, const storage: Storage = switch (tree.nodeTag(target)) {
+            .field_access => .{ tree.nodeData(target).node_and_token[0], .value },
+            .array_access => .{ tree.nodeData(target).node_and_node[0], .array },
+            else => return false,
+        };
+        const p = r.place(holder, 0) orelse return false;
+        return p.storage == storage;
     }
 
     /// Whether a capture held by value in a loop, declared after binding
@@ -781,8 +803,10 @@ const Rule = struct {
                     null;
                 return r.heldSource(lhs, .{ .element = at }, depth);
             },
-            // A local holding one: `const x = &.{f()}; return x;`, or
-            // `const s = try std.fmt.bufPrint(&buf, ...); return s;`.
+            // A local holding one: `const x = &.{f()}; return x;`,
+            // `const s = try std.fmt.bufPrint(&buf, ...); return s;`, or,
+            // in a field or element stored to after its declaration,
+            // `s.w = .fixed(&s.buf); return s;`.
             .identifier => {
                 const index = r.resolved.get(node) orelse return null;
                 const binding = r.bindings.items[index];
@@ -802,6 +826,7 @@ const Rule = struct {
             },
             .call_one, .call_one_comma, .call, .call_comma => {
                 if (r.viewedArgument(node)) |argument| return r.stackSource(argument, depth);
+                if (r.bufferArgument(node)) |argument| return r.stackSource(argument, depth);
                 return r.ownViewSource(node, depth);
             },
             else => null,
@@ -823,7 +848,7 @@ const Rule = struct {
         if (binding.kind != .local or binding.is_comptime) return null;
         var made: std.ArrayList(Node.Index) = .empty;
         if (binding.init.unwrap()) |init| try made.append(r.arena, init);
-        for (r.stores.items) |store| if (store.binding == index) try made.append(r.arena, store.value);
+        for (r.stores.items) |store| if (store.binding == index and !store.part) try made.append(r.arena, store.value);
         for (made.items) |value| {
             var init = value;
             while (tree.nodeTag(init) == .grouped_expression) init = tree.nodeData(init).node_and_token[0];
@@ -1103,6 +1128,43 @@ const Rule = struct {
         };
         if (view.argument >= call.ast.params.len) return null;
         return call.ast.params[view.argument];
+    }
+
+    /// The buffer a call's result holds, its last argument, when the
+    /// callee is one of `std_buffer_fns` and not a function of the file's
+    /// own (#125): `Writer.fixed(&buf)` or `std.Io.File.Writer.init(file,
+    /// io, &buf)` through the type made, `.fixed(&buf)`, or
+    /// `file.writer(io, &buf)` and `File.writer(file, io, &buf)`.
+    fn bufferArgument(r: *Rule, node: Node.Index) ?Node.Index {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node).?;
+        const callee = call.ast.fn_expr;
+        const arguments = call.ast.params;
+        if (arguments.len == 0) return null;
+        switch (tree.nodeTag(callee)) {
+            // A declaration of the result's type. Every function the file
+            // declares is a key.
+            .enum_literal => {
+                const name = tree.tokenSlice(tree.nodeMainToken(callee));
+                if (!std.mem.eql(u8, name, "fixed") or r.comptime_result_fns.contains(name)) return null;
+            },
+            .field_access => {
+                if (r.types.callee(callee) != null) return null;
+                const receiver, const field = tree.nodeData(callee).node_and_token;
+                const kind = std_buffer_fns.get(tree.tokenSlice(field)) orelse return null;
+                if (kind == .made) {
+                    const namespace = switch (tree.nodeTag(receiver)) {
+                        .identifier => tree.tokenSlice(tree.nodeMainToken(receiver)),
+                        .field_access => tree.tokenSlice(tree.nodeData(receiver).node_and_token[1]),
+                        else => return null,
+                    };
+                    if (!std.mem.eql(u8, namespace, "Writer") and !std.mem.eql(u8, namespace, "Reader")) return null;
+                }
+            },
+            else => return null,
+        }
+        return arguments[arguments.len - 1];
     }
 
     /// The first stack source among the expressions `node` can evaluate to,
@@ -1438,6 +1500,26 @@ pub const std_view_fns: std.StaticStringMap(ViewFn) = .initComptime(.{
     .{ "bytesAsValue", ViewFn{ .namespace = "mem", .argument = 1 } },
 });
 
+/// `std` functions whose result holds the buffer they are given, their last
+/// argument: a reader or a writer over it.
+const std_buffer_fns: std.StaticStringMap(BufferFn) = .initComptime(.{
+    .{ "fixed", BufferFn.made },
+    .{ "init", BufferFn.made },
+    .{ "initStreaming", BufferFn.made },
+    .{ "reader", BufferFn.method },
+    .{ "readerStreaming", BufferFn.method },
+    .{ "writer", BufferFn.method },
+    .{ "writerStreaming", BufferFn.method },
+});
+
+const BufferFn = enum {
+    /// Called through the type it makes, a `Writer` or a `Reader`:
+    /// `std.Io.Writer.fixed`, `std.Io.File.Reader.init`.
+    made,
+    /// A method of a file or a stream, called on one or through its type.
+    method,
+};
+
 pub const ViewFn = struct {
     namespace: []const u8,
     argument: usize,
@@ -1490,6 +1572,9 @@ const Storage = enum { pointer, array, value, unknown };
 const Store = struct {
     binding: u32,
     value: Node.Index,
+    /// Stored into a field or element of the local (`partOfLocal`), not
+    /// to the whole.
+    part: bool = false,
 };
 
 const SinkSite = struct {
