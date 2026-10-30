@@ -1,4 +1,4 @@
-//! Rule four, fit: a float printed in full decimal by `std.mem.print` or
+//! Rule four, fit: a number printed in decimal by `std.mem.print` or
 //! `std.fmt.bufPrint` into a buffer too small for it, with the error
 //! asserted away by `catch unreachable`.
 //!
@@ -9,15 +9,28 @@
 //! makes the call return error.NoSpaceLeft, which `catch unreachable` turns
 //! into a panic in Debug and ReleaseSafe and into undefined behavior in
 //! ReleaseFast and ReleaseSmall. The buffer size reads as a fair guess
-//! because it is one for integers: a u64 is at most 20 digits.
+//! because it is one for the integers most code prints: a u64 is at most
+//! 20 digits. But a u128 is 39 and an i128 40, and generic code that takes
+//! its integer from the caller does not know which it gets.
 //!
 //! Everything is read from the syntax: the format string, the buffer's
 //! length (`var buf: [48]u8`, a container-level constant, or
 //! `std.fmt.float.min_buffer_size`), and the value's type as the file
 //! writes it: a parameter, local, capture or container-level variable
-//! declared `f16`, `f32` or `f64`, or such a field of a struct the file
-//! declares. A float whose type is not written (`anytype`, an untyped
-//! local) is not looked at, nor f80 and f128.
+//! declared `f16`, `f32`, `f64` or an integer type (`u128`, `i32`,
+//! `usize`, taken as 64 bits), or such a field of a struct the file
+//! declares. f80 and f128 are not looked at.
+//!
+//! A value whose type the caller picks is taken to be as long as an i128,
+//! the widest integer in common use: an anytype parameter, or a field of
+//! one, what an `if`, `while`, `for` or `switch` captures from one, or a
+//! local made from one with no type written. Its callers pick its type
+//! when the function is pub, is named other than to call it, or is passed
+//! there, by a call in the file, a value whose type that call's own caller
+//! picks; a private function whose every call passes a type the file
+//! decides is not looked at. A value of any other type the
+//! file does not write (an untyped local, a type from another file, a
+//! `comptime T: type` parameter's) is not looked at either.
 //!
 //! A value bounded before it is printed is fine, and the bound can take
 //! many shapes, so any will do: the call is not reported when, earlier in
@@ -38,7 +51,7 @@ const Finding = report.Finding;
 const types = @import("types.zig");
 const Types = types.Types;
 
-/// Appends a finding for every float that can overflow the buffer a
+/// Appends a finding for every number that can overflow the buffer a
 /// `print ... catch unreachable` prints it into. Everything is allocated
 /// with `arena`.
 pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
@@ -95,17 +108,26 @@ const Rule = struct {
             const index = placeholder.argument orelse return;
             if (index >= args.len or !placeholder.decimal) continue;
             const arg = args[index];
-            const float = r.floatOf(arg, placeholder.optional) orelse continue;
-            const need = float.worst(placeholder.precision, placeholder.width);
+            const number = r.numberOf(arg, placeholder.optional) orelse continue;
+            const need = number.worst(placeholder);
             if (need <= capacity) continue;
             if (try r.bounded(arg, call_node)) continue;
+            const handle = "handle error.NoSpaceLeft (return it, or `catch \"?\"`)";
             return r.findings.append(r.arena, .{
                 .offset = tree.tokenStart(tree.firstToken(arg)),
-                .hint = try r.arena.print("print it with {{e}}, which needs at most {d} bytes, make the buffer {d}, or handle error.NoSpaceLeft (return it, or `catch \"?\"`)", .{ float.scientific(), need }),
+                .hint = switch (number) {
+                    .float => |float| try r.arena.print("print it with {{e}}, which needs at most {d} bytes, make the buffer {d}, or " ++ handle, .{ float.scientific(), need }),
+                    .int => try r.arena.print("make the buffer {d}, or " ++ handle, .{need}),
+                    .chosen => try r.arena.print("make the buffer {d} and check at comptime that its type is an integer of at most 128 bits, or " ++ handle, .{need}),
+                },
                 .detail = .{ .fit = .{
                     .callee = tree.getNodeSource(full.ast.fn_expr),
                     .placeholder = placeholder.text,
-                    .float = @tagName(float),
+                    .number = switch (number) {
+                        .float => |float| @tagName(float),
+                        .int => |int| int.name,
+                        .chosen => null,
+                    },
                     .value = tree.getNodeSource(arg),
                     .need = need,
                     .buffer = tree.getNodeSource(params[0]),
@@ -199,17 +221,135 @@ const Rule = struct {
         }
     }
 
-    /// The float type of `node` as the file writes it, unwrapped from an
-    /// optional for `{?d}`.
-    fn floatOf(r: *Rule, node: Node.Index, optional: bool) ?Float {
+    /// What `node` prints as: a float or integer type as the file writes
+    /// it, unwrapped from an optional for `{?d}`, or with no type written,
+    /// the caller's choice when `chosen` says it is.
+    fn numberOf(r: *Rule, node: Node.Index, optional: bool) ?Number {
         const tree = r.tree;
-        var type_expr = r.types.typeOf(node, 0) orelse return null;
+        var type_expr = r.types.typeOf(node, 0) orelse return if (r.chosen(node, 0)) .chosen else null;
         if (optional) {
             if (tree.nodeTag(type_expr) != .optional_type) return null;
             type_expr = tree.nodeData(type_expr).node;
         }
         if (tree.nodeTag(type_expr) != .identifier) return null;
-        return std.meta.stringToEnum(Float, tree.tokenSlice(tree.nodeMainToken(type_expr)));
+        const name = tree.tokenSlice(tree.nodeMainToken(type_expr));
+        if (std.meta.stringToEnum(Float, name)) |float| return .{ .float = float };
+        return .{ .int = Int.parse(name) orelse return null };
+    }
+
+    /// Whether the type of `node` is the caller's choice: an anytype
+    /// parameter whose callers pick its type, or what is reached from one,
+    /// by a field (`user.id`, `args.@"0"`), by what an `if`, `while`, `for`
+    /// or `switch` captures from it (`if (ctx.user) |u|`), or by a local
+    /// made from it with no type written (`const id = user.id;`). Found by
+    /// walking out from it, as Zig allows no shadowing.
+    fn chosen(r: *const Rule, node: Node.Index, depth: u8) bool {
+        const tree = r.tree;
+        if (depth > 8) return false;
+        var root = node;
+        while (tree.nodeTag(root) != .identifier) switch (tree.nodeTag(root)) {
+            .field_access, .grouped_expression, .unwrap_optional => root = tree.nodeData(root).node_and_token[0],
+            .deref, .address_of => root = tree.nodeData(root).node,
+            else => return false,
+        };
+        const name = tree.tokenSlice(tree.nodeMainToken(root));
+        var child = root;
+        var up = r.types.parents[@backingInt(root)].unwrap();
+        while (up) |parent| : ({
+            child = parent;
+            up = r.types.parents[@backingInt(parent)].unwrap();
+        }) {
+            switch (tree.nodeTag(parent)) {
+                .fn_decl => {
+                    var buffer: [1]Node.Index = undefined;
+                    var params = tree.fullFnProto(&buffer, tree.nodeData(parent).node_and_node[0]).?.iterate(tree);
+                    var index: usize = 0;
+                    while (params.next()) |param| : (index += 1) {
+                        const name_token = param.name_token orelse continue;
+                        if (!std.mem.eql(u8, tree.tokenSlice(name_token), name)) continue;
+                        // `anytype`: `...` has no name.
+                        if (param.anytype_ellipsis3 == null) return false;
+                        return r.callerPicks(parent, index, depth + 1);
+                    }
+                    return false;
+                },
+                .test_decl => return false,
+                .if_simple, .@"if" => {
+                    const full = tree.fullIf(parent).?;
+                    if (child != full.ast.then_expr) continue;
+                    if (types.captureIndex(tree, full.payload_token orelse continue, name) != 0) continue;
+                    return r.chosen(full.ast.cond_expr, depth + 1);
+                },
+                .while_simple, .while_cont, .@"while" => {
+                    const full = tree.fullWhile(parent).?;
+                    if (child != full.ast.then_expr) continue;
+                    if (types.captureIndex(tree, full.payload_token orelse continue, name) != 0) continue;
+                    return r.chosen(full.ast.cond_expr, depth + 1);
+                },
+                .for_simple, .@"for" => {
+                    const full = tree.fullFor(parent).?;
+                    if (child != full.ast.then_expr) continue;
+                    const index = types.captureIndex(tree, full.payload_token, name) orelse continue;
+                    if (index >= full.ast.inputs.len) return false;
+                    return r.chosen(full.ast.inputs[index], depth + 1);
+                },
+                .switch_case_one, .switch_case => {
+                    const case = tree.fullSwitchCase(parent).?;
+                    if (types.captureIndex(tree, case.payload_token orelse continue, name) != 0) continue;
+                    const switch_node = r.types.parents[@backingInt(parent)].unwrap() orelse return false;
+                    return r.chosen(tree.fullSwitch(switch_node).?.ast.condition, depth + 1);
+                },
+                else => {},
+            }
+            // A local declared before it, in a block around it.
+            var buffer: [2]Node.Index = undefined;
+            const statements = tree.blockStatements(&buffer, parent) orelse continue;
+            for (statements) |statement| {
+                if (statement == child) break;
+                const decl = tree.fullVarDecl(statement) orelse continue;
+                if (!std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) continue;
+                if (decl.ast.type_node != .none) return false;
+                return r.chosen(decl.ast.init_node.unwrap() orelse return false, depth + 1);
+            }
+        }
+        return false;
+    }
+
+    /// Whether the callers of `fn_decl` pick the type of its parameter
+    /// `index`: it is pub, or used other than by a call, or a call to it
+    /// in the file passes there a value whose type is that caller's
+    /// choice. A private function every call to which passes a type the
+    /// file decides prints only what the file decides.
+    fn callerPicks(r: *const Rule, fn_decl: Node.Index, index: usize, depth: u8) bool {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
+        if (proto.visib_token != null) return true;
+        const name = tree.tokenSlice(proto.name_token orelse return true);
+        for (0..tree.nodes.len) |i| {
+            const node: Node.Index = @fromBackingInt(@intCast(i));
+            const named = switch (tree.nodeTag(node)) {
+                .identifier => tree.tokenSlice(tree.nodeMainToken(node)),
+                .field_access => tree.tokenSlice(tree.nodeData(node).node_and_token[1]),
+                else => continue,
+            };
+            if (!std.mem.eql(u8, named, name)) continue;
+            var call_buffer: [1]Node.Index = undefined;
+            const parent = r.types.parents[@backingInt(node)].unwrap() orelse continue;
+            const full = tree.fullCall(&call_buffer, parent);
+            if (full == null or full.?.ast.fn_expr != node) {
+                // Named other than to call it: as a value, by name, which
+                // no local can shadow. `x.name` can be anything of that
+                // name.
+                if (tree.nodeTag(node) == .identifier and r.types.declaredFn(node, name) == fn_decl) return true;
+                continue;
+            }
+            const called, const offset = r.types.callee(node) orelse continue;
+            if (called != fn_decl or index < offset) continue;
+            const args = full.?.ast.params;
+            if (index - offset < args.len and r.chosen(args[index - offset], depth)) return true;
+        }
+        return false;
     }
 
     /// Whether `arg` is bounded before `call_node` prints it, in the
@@ -263,6 +403,58 @@ fn sentinelOf(name: []const u8, base: []const u8) ?bool {
     if (std.mem.eql(u8, rest, "Sentinel")) return true;
     return null;
 }
+
+/// What a decimal placeholder prints, as far as how long it can be.
+const Number = union(enum) {
+    float: Float,
+    int: Int,
+    /// A value whose type the caller picks, through an anytype parameter.
+    /// Taken as the longest i128, 40 bytes: the widest integer in common
+    /// use, which a buffer sized for an i64 cannot hold.
+    chosen,
+
+    /// The most bytes `placeholder` can print it in.
+    fn worst(number: Number, placeholder: Placeholders.Placeholder) u64 {
+        return switch (number) {
+            .float => |float| float.worst(placeholder.precision, placeholder.width),
+            // An optional's null prints as `null`.
+            .int => |int| @max(int.longest(), placeholder.width, @as(u64, if (placeholder.optional) 4 else 0)),
+            .chosen => @max(40, placeholder.width),
+        };
+    }
+};
+
+/// An integer type as the file writes it: `u128`, `i32`, `usize`.
+const Int = struct {
+    name: []const u8,
+    bits: u16,
+    signed: bool,
+
+    fn parse(name: []const u8) ?Int {
+        // The widest a usize or isize is on any target Zig builds for.
+        if (std.mem.eql(u8, name, "usize")) return .{ .name = name, .bits = 64, .signed = false };
+        if (std.mem.eql(u8, name, "isize")) return .{ .name = name, .bits = 64, .signed = true };
+        if (name.len < 2 or (name[0] != 'u' and name[0] != 'i')) return null;
+        // `u08` is not a type: Zig refuses the leading zero.
+        if (name[1] == '0' and name.len > 2) return null;
+        for (name[1..]) |c| if (!std.ascii.isDigit(c)) return null;
+        const bits = std.fmt.parseInt(u16, name[1..], 10) catch return null;
+        const signed = name[0] == 'i';
+        if (signed and bits == 0) return null;
+        return .{ .name = name, .bits = bits, .signed = signed };
+    }
+
+    /// The most bytes `{d}` prints a value of it in: the digits of its
+    /// largest magnitude, 2^k - 1 unsigned or 2^k signed, and a sign for a
+    /// signed one. 2^k - 1 has as many digits as 2^k, since no power of two
+    /// above 1 is a power of ten.
+    fn longest(int: Int) u64 {
+        if (int.bits == 0) return 1;
+        const k: f64 = @floatFromInt(if (int.signed) int.bits - 1 else int.bits);
+        const digits: u64 = @intFromFloat(@floor(k * @log10(2.0)) + 1);
+        return digits + @intFromBool(int.signed);
+    }
+};
 
 /// The float types whose longest printed form is known.
 const Float = enum {
@@ -448,7 +640,8 @@ fn mentions(arena: Allocator, tree: *const Ast, node: Node.Index, text: []const 
 }
 
 /// Runs the rule over `source` and compares one line per finding,
-/// `line:col placeholder of float value: need > capacity`, in source order.
+/// `line:col placeholder of type value: need > capacity`, in source order,
+/// with `anytype` for a type the caller picks.
 fn expectFits(source: [:0]const u8, expected: []const u8) !void {
     const gpa = std.testing.allocator;
     var tree = try Ast.parse(gpa, source, .{});
@@ -463,7 +656,7 @@ fn expectFits(source: [:0]const u8, expected: []const u8) !void {
     for (findings.items) |finding| {
         const loc = report.location(tree.source, finding.offset);
         const f = finding.detail.fit;
-        try out.writer.print("{d}:{d} {s} of {s} {s}: {d} > {d}\n", .{ loc.line + 1, loc.column + 1, f.placeholder, f.float, f.value, f.need, f.capacity });
+        try out.writer.print("{d}:{d} {s} of {s} {s}: {d} > {d}\n", .{ loc.line + 1, loc.column + 1, f.placeholder, f.number orelse "anytype", f.value, f.need, f.capacity });
     }
     try expect.findings(@src(), expected, out.written());
 }
@@ -516,7 +709,6 @@ test "bounded, big enough, handled, or not a float the file types: not reported"
         \\fn clamped(v: f64) usize { const c: f64 = std.math.clamp(v, -1e9, 1e9); var buf: [32]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d:.2}", .{c}) catch unreachable).len; }
         \\fn fromInt(n: u32) usize { const v: f64 = @floatFromInt(n); var buf: [32]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
         \\fn literal() usize { const v: f64 = 1.5; var buf: [8]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
-        \\fn untyped(v: anytype) usize { var buf: [32]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
         \\fn slice(buf: []u8, v: f64) usize { return (std.fmt.bufPrint(buf, "{d}", .{v}) catch unreachable).len; }
         \\fn named(v: f64) usize { var buf: [32]u8 = undefined; return (std.fmt.bufPrint(&buf, "{[v]d}", .{ .v = v }) catch unreachable).len; }
         \\fn wide(v: f80) usize { var buf: [32]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
@@ -525,6 +717,92 @@ test "bounded, big enough, handled, or not a float the file types: not reported"
         \\fn writer(w: *std.Io.Writer, v: f64) void { w.print("{d}", .{v}) catch unreachable; }
         \\fn debug(v: f64) void { std.debug.print("{d}", .{v}); }
     , "");
+}
+
+test "an integer wider than the buffer, or of a type the caller picks (#128)" {
+    try expectFits(
+        \\const std = @import("std");
+        \\const User = struct { id: u128 };
+        \\pub fn key(user: anytype, buf: *[24]u8) []const u8 { return std.fmt.bufPrint(buf, "u{d}", .{user.id}) catch unreachable; }
+        \\pub fn whole(v: anytype) usize { var buf: [32]u8 = undefined; return (std.fmt.bufPrint(&buf, "{}", .{v}) catch unreachable).len; }
+        \\pub fn tuple(args: anytype) usize { var buf: [16]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{args.@"0"}) catch unreachable).len; }
+        \\pub fn chosenWidth(v: anytype) usize { var buf: [48]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d:>50}", .{v}) catch unreachable).len; }
+        \\pub fn current(ctx: anytype) usize { if (ctx.user) |u| { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "u{d}", .{u.id}) catch unreachable).len; } return 0; }
+        \\pub fn each(ids: anytype) void { for (ids) |id| { var buf: [24]u8 = undefined; _ = std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable; } }
+        \\pub fn untypedLocal(user: anytype) usize { const id = user.id; var buf: [8]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable).len; }
+        \\pub fn call(ctx: anytype) usize { var buf: [24]u8 = undefined; return keyOf(ctx.*, &buf).len; }
+        \\fn keyOf(ctx: anytype, buf: *[24]u8) []const u8 { return std.fmt.bufPrint(buf, "u{d}", .{ctx.id}) catch unreachable; }
+        \\pub const show = shown;
+        \\fn shown(v: anytype) usize { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
+        \\const Box = struct { fn put(b: *Box, v: anytype) usize { _ = b; var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; } pub fn putAll(b: *Box, x: anytype) usize { return b.put(x); } };
+        \\fn wide(id: u128) usize { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable).len; }
+        \\fn signed(n: i64) usize { var buf: [19]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable).len; }
+        \\fn size(n: usize) usize { var buf: [16]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable).len; }
+        \\fn field(u: User) usize { var buf: [32]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{u.id}) catch unreachable).len; }
+        \\fn optional(n: ?u8) usize { var buf: [3]u8 = undefined; return (std.fmt.bufPrint(&buf, "{?d}", .{n}) catch unreachable).len; }
+        \\fn padded(n: u8) usize { var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d:>8}", .{n}) catch unreachable).len; }
+        \\fn huge(n: u256) usize { var buf: [64]u8 = undefined; return (std.mem.print(&buf, "{d}", .{n}) catch unreachable).len; }
+    ,
+        \\3:93 {d} of anytype user.id: 40 > 24
+        \\4:102 {} of anytype v: 40 > 32
+        \\5:106 {d} of anytype args.@"0": 40 > 16
+        \\6:113 {d:>50} of anytype v: 50 > 48
+        \\7:128 {d} of anytype u.id: 40 > 24
+        \\8:116 {d} of anytype id: 40 > 24
+        \\9:132 {d} of anytype id: 40 > 8
+        \\11:90 {d} of anytype ctx.id: 40 > 24
+        \\13:99 {d} of anytype v: 40 > 24
+        \\14:134 {d} of anytype v: 40 > 24
+        \\15:96 {d} of u128 id: 39 > 24
+        \\16:96 {d} of i64 n: 20 > 19
+        \\17:96 {d} of usize n: 20 > 16
+        \\18:96 {d} of u128 u.id: 39 > 32
+        \\19:98 {?d} of u8 n: 4 > 3
+        \\20:97 {d:>8} of u8 n: 8 > 4
+        \\21:92 {d} of u256 n: 78 > 64
+        \\
+    );
+}
+
+test "an integer that fits, bounded, or of a type neither the file nor the caller picks: not reported" {
+    try expectFits(
+        \\const std = @import("std");
+        \\fn fits(id: u128) usize { var buf: [39]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable).len; }
+        \\fn small(n: u32) usize { var buf: [10]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable).len; }
+        \\pub fn roomy(user: anytype) usize { var buf: [40]u8 = undefined; return (std.fmt.bufPrint(&buf, "u{d}", .{user.id}) catch unreachable).len - 1; }
+        \\fn compared(n: u64) usize { if (n > 9999) return 0; var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable).len; }
+        \\pub fn hex(user: anytype) usize { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{x}", .{user.id}) catch unreachable).len; }
+        \\pub fn handled(user: anytype) usize { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{user.id}) catch "?").len; }
+        \\pub fn generic(comptime T: type, v: T) usize { var buf: [8]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
+        \\const other = @import("other.zig");
+        \\pub fn typedLocal(ctx: anytype) usize { const u: other.User = ctx.user; var buf: [8]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{u.id}) catch unreachable).len; }
+        \\pub fn imported(u: other.User) usize { var buf: [8]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{u.id}) catch unreachable).len; }
+        \\fn notAnInt(v: u8x) usize { var buf: [1]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
+        \\const u8x = u16;
+        \\fn writeInt(n: anytype) usize { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable).len; }
+        \\pub fn writeCount(count: u64) usize { return writeInt(count); }
+        \\pub fn writeEach(v: ?i64, ns: []const u32) usize { var total: usize = 0; for (ns) |n| total += writeInt(n); if (v) |n| total += writeInt(n); return total; }
+        \\pub fn writeSelf(ctx: anytype) usize { return ctx.writeInt(ctx.big); }
+        \\const Other = struct { fn writeInt(n: anytype) usize { return n; } };
+        \\pub fn other(x: anytype) usize { return Other.writeInt(x); }
+        \\fn unused(v: anytype) usize { var buf: [8]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable).len; }
+    , "");
+}
+
+test "Int.longest is the most std.fmt prints" {
+    inline for (.{ 1, 2, 7, 8, 10, 16, 31, 32, 33, 63, 64, 65, 100, 127, 128, 129, 200, 255, 256, 1000 }) |bits| {
+        var buf: [400]u8 = undefined;
+        const U = @Int(.unsigned, bits);
+        const I = @Int(.signed, bits);
+        const unsigned = (try std.fmt.bufPrint(&buf, "{d}", .{std.math.maxInt(U)})).len;
+        const signed = (try std.fmt.bufPrint(&buf, "{d}", .{@as(I, std.math.minInt(I))})).len;
+        try std.testing.expectEqual(unsigned, Int.parse(@typeName(U)).?.longest());
+        try std.testing.expectEqual(signed, Int.parse(@typeName(I)).?.longest());
+    }
+    try std.testing.expectEqual(1, Int.parse("u0").?.longest());
+    try std.testing.expectEqual(20, Int.parse("usize").?.longest());
+    try std.testing.expectEqual(20, Int.parse("isize").?.longest());
+    for ([_][]const u8{ "u", "i", "i0", "u08", "u1_0", "f64", "uint", "u65536" }) |name| try std.testing.expectEqual(null, Int.parse(name));
 }
 
 test "placeholders: arguments, specifiers and options" {

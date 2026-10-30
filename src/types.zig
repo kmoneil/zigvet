@@ -318,7 +318,7 @@ pub fn elementOf(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
 }
 
 /// Which of `|a, *b|`, starting at `first`, is `name` and held by value.
-fn captureIndex(tree: *const Ast, first: Ast.TokenIndex, name: []const u8) ?usize {
+pub fn captureIndex(tree: *const Ast, first: Ast.TokenIndex, name: []const u8) ?usize {
     var token = first;
     var index: usize = 0;
     while (true) : (index += 1) {
