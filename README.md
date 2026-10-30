@@ -15,7 +15,7 @@ a buffered writer never flushed, tests that never run. `go vet` is the
 closest analog: not style, which `zig fmt` and the existing linters cover,
 but silent wrongness.
 
-- **Nineteen rules.** Sixteen have found real bugs: in Zig's own standard
+- **Twenty rules.** Sixteen have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -211,6 +211,7 @@ seldom take.
 |---|---|---|
 | [cached](docs/rules/cached.md) | A build script that lists a directory to decide what to build, and never tells Zig's configure cache | A file added there is not built until something else changes the build |
 | [unrun](docs/rules/unrun.md) | A file whose tests never run, because nothing the test build analyses refers to it | `zig build test` passes without them |
+| [hoard](docs/rules/hoard.md) | A fuzz target that keeps memory past one input, from an allocator the test runner does not check | It grows with every input until the run runs out of memory, and the leak check passes |
 
 ## Allowing a report
 

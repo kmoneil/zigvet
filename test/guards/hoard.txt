@@ -1,0 +1,36 @@
+# hoard's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/hoard.zig
+
+== std.testing.fuzz, not another namespace's fuzz
+-    return std.mem.eql(u8, tree.tokenSlice(field), "fuzz") and std.mem.eql(u8, lastName(tree, receiver), "testing");
++    return std.mem.eql(u8, tree.tokenSlice(field), "fuzz") and receiver == receiver;
+
+== an allocator of std.heap's, not one of that name elsewhere
+-                if (oneOf(name, &unchecked_names)) return std.mem.eql(u8, lastName(tree, receiver), "heap");
++                if (oneOf(name, &unchecked_names)) return true;
+
+== memory the target gives back
+-            try takers.append(r.arena, .{ .call = node, .from = from, .kept = if (holder) |h| !r.givenBack(nodes.items, h) else true });
++            try takers.append(r.arena, .{ .call = node, .from = from, .kept = holder == null or true });
+
+== a call in the arguments of one that is reported
+-                if (other.call != taker.call and other.kept and r.within(taker.call, other.call)) continue :outer;
++                if (false and other.call != taker.call and other.kept and r.within(taker.call, other.call)) continue :outer;
+
+== a target fuzzed more than once
+-            for (r.findings.items) |finding| if (finding.offset == offset and finding.detail == .hoard) continue :outer;
++            for (r.findings.items) |finding| if (false and finding.offset == offset and finding.detail == .hoard) continue :outer;
+
+== memory made once and kept in a global for later inputs
+-            if (try r.once(taker.call, fn_decl)) continue;
++            if (false and try r.once(taker.call, fn_decl)) continue;
+
+== a global keeps its value from one input to the next, a local does not
+-            if (child != branch or !r.global(empty)) continue;
++            if (child != branch) continue;
+
+== a branch that fills the global, not one that stores elsewhere
+-                if (tree.nodeTag(n) == .assign and std.mem.eql(u8, tree.getNodeSource(tree.nodeData(n).node_and_node[0]), name)) return true;
++                if (tree.nodeTag(n) == .assign and name.len == name.len) return true;
