@@ -18,6 +18,7 @@ const flush = @import("flush.zig");
 const freed = @import("freed.zig");
 const grow = @import("grow.zig");
 const leak = @import("leak.zig");
+const hoard = @import("hoard.zig");
 // Named for the rule, apart from the findings this file keeps.
 const kept_rule = @import("kept.zig");
 const owner = @import("owner.zig");
@@ -85,6 +86,7 @@ pub fn findings(arena: Allocator, tree: *const Ast, extra: []const Finding) Allo
     try flush.check(arena, tree, &all);
     try cached.check(arena, tree, &all);
     try leak.check(arena, tree, &all);
+    try hoard.check(arena, tree, &all);
     return keep(arena, tree.source, all.items);
 }
 
@@ -190,7 +192,7 @@ test "an allow comment that suppresses nothing is reported, with why" {
     try std.testing.expectEqualStrings(
         \\a.zig:2:5: allow: suppresses nothing: no escape finding on the line below it
         \\    hint: delete it, or move it directly above the line it excuses
-        \\a.zig:6:5: allow: no rule named 'escpae' (rules: escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak)
+        \\a.zig:6:5: allow: no rule named 'escpae' (rules: escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard)
         \\    hint: write it as `// zigvet: allow <rule> <reason>`
         \\a.zig:7:12: escape: anonymous array made here leaves typo through return
         \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const

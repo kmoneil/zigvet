@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -59,6 +59,7 @@ pub const Finding = struct {
         cached: Cached,
         unrun: Unrun,
         leak: Leak,
+        hoard: Hoard,
         allow: Allow,
     };
 
@@ -222,6 +223,16 @@ pub const Finding = struct {
         fails: []const u8,
     };
 
+    pub const Hoard = struct {
+        /// The call that takes the memory, as written: `seen.append`.
+        call: []const u8,
+        /// The allocator it takes it from, as written at the call:
+        /// `std.heap.page_allocator`, or `gpa`.
+        allocator: []const u8,
+        /// The fuzz target the call is in, by name.
+        target: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -256,6 +267,7 @@ pub const Finding = struct {
             .cached => .cached,
             .unrun => .unrun,
             .leak => .leak,
+            .hoard => .hoard,
             .allow => null,
         };
     }
@@ -358,6 +370,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
             try w.print("nothing the tests reach refers to this file, so its {d} tests never run", .{u.tests}),
         .leak => |l| try w.print("if {s} fails here, the function returns before `{s}` below, and '{s}' is never released", .{
             l.fails, l.release, l.local,
+        }),
+        .hoard => |h| try w.print("`{s}` takes memory from `{s}` that fuzz target '{s}' never gives back, so it piles up over every input, and the runner's leak check sees only std.testing.allocator", .{
+            h.call, h.allocator, h.target,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),

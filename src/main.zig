@@ -381,6 +381,7 @@ test {
     _ = @import("flush.zig");
     _ = @import("freed.zig");
     _ = @import("grow.zig");
+    _ = @import("hoard.zig");
     _ = @import("kept.zig");
     _ = @import("leak.zig");
     _ = @import("owner.zig");
