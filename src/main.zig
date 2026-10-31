@@ -8,13 +8,15 @@ const Io = std.Io;
 const build_options = @import("build_options");
 const test_options = @import("test_options");
 const report = @import("report.zig");
+const skill = @import("skill.zig");
 const unrun = @import("unrun.zig");
 const vet = @import("vet.zig");
 const walk = @import("walk.zig");
 
 const usage =
     \\Usage: zigvet [--exclude <path>]... [--format <format>] [--summary] <path>...
-    \\       zigvet --version
+    \\       zigvet skill [--install <dir>]
+    \\       zigvet --version | --help
     \\
     \\Checks each file named, and every .zig file under each directory named,
     \\for code the Zig compiler accepts that is almost certainly wrong.
@@ -27,6 +29,12 @@ const usage =
     \\                    (GitHub Actions annotations) or json.
     \\  --summary         Then say on stderr how many files were checked and
     \\                    what each rule reported.
+    \\
+    \\zigvet skill prints what an AI agent needs to work with zigvet: the
+    \\loop, each rule with an example and its fix, how to add it to a
+    \\build, and what to do with a finding that looks wrong. --install <dir>
+    \\writes it to <dir>/zigvet/SKILL.md. To check a directory named skill,
+    \\name it ./skill.
     \\
     \\Exit status: 0 if nothing was reported, 1 if a finding or parse error
     \\was, 2 on a usage error or a path that could not be read or holds no
@@ -51,21 +59,7 @@ pub fn main(init: std.process.Init) !u8 {
     const args = (try init.minimal.args.toSlice(arena))[1..];
     const run = switch (try parseArgs(arena, args)) {
         .run => |run| run,
-        .help => {
-            try out.writeAll(usage);
-            try out.flush();
-            return 0;
-        },
-        .version => {
-            try out.print("zigvet {s}\n", .{build_options.version});
-            try out.flush();
-            return 0;
-        },
-        .usage_error => |message| {
-            if (message.len > 0) std.debug.print("zigvet: {s}\n\n", .{message});
-            std.debug.print("{s}", .{usage});
-            return 2;
-        },
+        else => |command| return answer(arena, io, out, command),
     };
 
     const cwd = Io.Dir.cwd();
@@ -135,6 +129,30 @@ pub fn main(init: std.process.Init) !u8 {
     return @intFromBool(reported > 0);
 }
 
+/// A command that is not a run: the usage, the version, the skill, or why
+/// the command line cannot be run. Returns the exit status.
+fn answer(arena: std.mem.Allocator, io: Io, out: *Io.Writer, command: Command) !u8 {
+    switch (command) {
+        .run => unreachable,
+        .help => try out.writeAll(usage),
+        .version => try out.print("zigvet {s}\n", .{build_options.version}),
+        .skill => |install_dir| if (install_dir) |dir| {
+            const path = skill.install(arena, io, dir) catch |err| {
+                std.debug.print("zigvet: {s}: {t}\n", .{ dir, err });
+                return 2;
+            };
+            try out.print("{s}\n", .{path});
+        } else try out.writeAll(skill.text),
+        .usage_error => |message| {
+            if (message.len > 0) std.debug.print("zigvet: {s}\n\n", .{message});
+            std.debug.print("{s}", .{usage});
+            return 2;
+        },
+    }
+    try out.flush();
+    return 0;
+}
+
 /// What the command line asks for.
 const Command = union(enum) {
     run: struct {
@@ -146,6 +164,8 @@ const Command = union(enum) {
     },
     help,
     version,
+    /// `zigvet skill`, and the directory to install it under, if any.
+    skill: ?[]const u8,
     /// Why the command line cannot be run; empty when the usage alone says.
     usage_error: []const u8,
 };
@@ -153,6 +173,8 @@ const Command = union(enum) {
 /// `-h` and `--help`, `--version`, and an unknown option take effect where
 /// they stand; anything after them is not read.
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
+    // A path named skill is given as ./skill.
+    if (args.len > 0 and std.mem.eql(u8, args[0], "skill")) return parseSkill(args[1..]);
     var paths: std.ArrayList([]const u8) = .empty;
     var excludes: std.ArrayList([]const u8) = .empty;
     var format: report.Format = .text;
@@ -178,6 +200,17 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
     }
     if (paths.items.len == 0) return .{ .usage_error = "" };
     return .{ .run = .{ .paths = paths.items, .excludes = excludes.items, .format = format, .summary = summary } };
+}
+
+/// `zigvet skill`, given what follows `skill`.
+fn parseSkill(args: []const []const u8) Command {
+    if (args.len == 0) return .{ .skill = null };
+    var i: usize = 0;
+    if (optionValue(args, &i, "--install")) |dir| {
+        if (dir.len == 0) return .{ .usage_error = "--install needs a directory" };
+        if (i + 1 == args.len) return .{ .skill = dir };
+    }
+    return .{ .usage_error = "zigvet skill takes --install <dir>, or nothing" };
 }
 
 /// The value of option `name` if `args[i.*]` is it, given as `name value`
@@ -328,6 +361,84 @@ test "parseArgs: help, version and usage errors" {
     try std.testing.expectEqualStrings("", (try parseArgs(arena, &.{ "--exclude", "src" })).usage_error);
 }
 
+test "parseArgs: zigvet skill" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqual(null, (try parseArgs(arena, &.{"skill"})).skill);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install", "d" })).skill.?);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install=d" })).skill.?);
+    try std.testing.expectEqualStrings("zigvet skill takes --install <dir>, or nothing", (try parseArgs(arena, &.{ "skill", "src" })).usage_error);
+    try std.testing.expectEqualStrings("zigvet skill takes --install <dir>, or nothing", (try parseArgs(arena, &.{ "skill", "--install", "d", "src" })).usage_error);
+    try std.testing.expectEqualStrings("--install needs a directory", (try parseArgs(arena, &.{ "skill", "--install" })).usage_error);
+    // A directory named skill is ./skill, or comes after another path.
+    try std.testing.expectEqualStrings("./skill", (try parseArgs(arena, &.{"./skill"})).run.paths[0]);
+    try std.testing.expectEqualStrings("skill", (try parseArgs(arena, &.{ "src", "skill" })).run.paths[1]);
+}
+
+test "zigvet skill prints the skill; --install writes it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+
+    const printed = try std.process.run(gpa, io, .{ .argv = &.{ exe, "skill" }, .cwd = .{ .dir = tmp.dir } });
+    defer gpa.free(printed.stdout);
+    defer gpa.free(printed.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, printed.term);
+    try std.testing.expectEqualStrings(skill.text, printed.stdout);
+    try std.testing.expectEqualStrings("", printed.stderr);
+
+    const installed = try std.process.run(gpa, io, .{ .argv = &.{ exe, "skill", "--install", "agents" }, .cwd = .{ .dir = tmp.dir } });
+    defer gpa.free(installed.stdout);
+    defer gpa.free(installed.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, installed.term);
+    try std.testing.expectEqualStrings("agents" ++ std.fs.path.sep_str ++ "zigvet" ++ std.fs.path.sep_str ++ "SKILL.md\n", installed.stdout);
+    const written = try tmp.dir.readFileAlloc(io, "agents/zigvet/SKILL.md", gpa, .limited(1 << 20));
+    defer gpa.free(written);
+    try std.testing.expectEqualStrings(skill.text, written);
+}
+
+test "the skill names every flag zigvet takes, and no other" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const in_usage = try flags(arena, usage);
+    var in_skill = try flags(arena, skill.text);
+    // Another command's, in `zig fetch --save`.
+    try std.testing.expect(in_skill.swapRemove("--save"));
+    var ok = true;
+    for (in_usage.keys()) |flag| if (!in_skill.contains(flag)) {
+        std.debug.print("{s} is in --help but not in the skill\n", .{flag});
+        ok = false;
+    };
+    for (in_skill.keys()) |flag| if (!in_usage.contains(flag)) {
+        std.debug.print("{s} is in the skill but zigvet does not take it\n", .{flag});
+        ok = false;
+    };
+    try std.testing.expect(ok);
+    try std.testing.expectEqual(6, in_usage.count());
+}
+
+/// Every `--flag` in `text`.
+fn flags(arena: std.mem.Allocator, text: []const u8) !std.StringArrayHashMapUnmanaged(void) {
+    var out: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var i: usize = 0;
+    while (std.mem.findPos(u8, text, i, "--")) |at| {
+        i = at + 2;
+        if (at > 0 and (std.ascii.isAlphanumeric(text[at - 1]) or text[at - 1] == '-')) continue;
+        var end = i;
+        while (end < text.len and (std.ascii.isLower(text[end]) or (text[end] == '-' and end + 1 < text.len and std.ascii.isLower(text[end + 1])))) end += 1;
+        if (end == i) continue;
+        try out.put(arena, text[at..end], {});
+        i = end;
+    }
+    return out;
+}
+
 test "findings land where stdout's file is, not over its start" {
     // On Windows, `std.process.spawn` opens the file again for the child
     // rather than passing on the handle, so the child's position starts at
@@ -387,6 +498,7 @@ test {
     _ = @import("owner.zig");
     _ = @import("refill.zig");
     _ = @import("report.zig");
+    _ = @import("skill.zig");
     _ = @import("sweep.zig");
     _ = @import("torn.zig");
     _ = @import("twice.zig");

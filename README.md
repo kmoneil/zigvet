@@ -107,7 +107,8 @@ zigvet --format github src        # annotate a pull request in CI
 
 ```
 zigvet [--exclude <path>]... [--format <text|github|json>] [--summary] <path>...
-zigvet --version
+zigvet skill [--install <dir>]
+zigvet --version | --help
 ```
 
 A file is checked whatever its extension. A directory is walked for `.zig`
@@ -283,6 +284,20 @@ dependable only in a Debug build (the default for `zig build test`): an
 optimized build may turn a read of a dead frame into anything. The escape
 rule finds the shapes it knows in any function, so the two are worth
 having together.
+
+## For AI agents
+
+`zigvet skill` prints what an AI agent needs to work with zigvet: the
+loop, each rule with the smallest code that trips it and the fix, how to
+add it to a build, and what to do with a finding that looks wrong. It is
+built into the binary, and zigvet's tests run every example in it.
+
+```sh
+zigvet skill                       # print it
+zigvet skill --install ~/.skills   # write it to ~/.skills/zigvet/SKILL.md
+```
+
+To check a directory named `skill`, name it `./skill`.
 
 ## What a rule has to be
 
