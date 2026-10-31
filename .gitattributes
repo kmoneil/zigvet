@@ -2,3 +2,6 @@
 # platform.
 *.zig text eol=lf
 *.zon text eol=lf
+# Embedded in the binary as `zigvet skill`, whose tests read its code
+# blocks byte for byte; a Windows build prints the same file.
+src/skill.md text eol=lf
