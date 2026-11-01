@@ -102,6 +102,11 @@ pub const Finding = struct {
         value: []const u8,
         /// The most bytes it can print in.
         need: u64,
+        /// The most bytes the whole call can print, what is compared with
+        /// `capacity`: the format string's literal text and every number
+        /// fit can size, at its longest. `need` when it is the only thing
+        /// the line prints.
+        line: u64,
         /// The buffer, as written: `&buf`.
         buffer: []const u8,
         /// How many bytes the buffer holds.
@@ -316,11 +321,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .cancel => |c| try w.print("`{s}` drops what {s} returns, error.Canceled included, which is delivered once", .{
             c.handler, c.callee,
         }),
-        .fit => |f| if (f.number) |number| try w.print("`{s}` of {s} '{s}' can need {d} bytes, but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{
-            f.placeholder, number, f.value, f.need, f.buffer, f.capacity, f.callee,
-        }) else try w.print("`{s}` of '{s}', whose type the caller picks, can need {d} bytes as an i128, but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{
-            f.placeholder, f.value, f.need, f.buffer, f.capacity, f.callee,
-        }),
+        .fit => |f| try writeFit(w, f),
         .refill => |f| try w.print("`{s}` freed here still holds the freed memory if {s} fails before it is refilled", .{
             f.place, f.fails,
         }),
@@ -382,6 +383,18 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
             .trailing => try w.writeAll("applies to the line below it, not its own line"),
         },
     }
+}
+
+/// fit's message: the number, what it can need alone and, when the rest
+/// of the format adds to it, with the rest, against what the buffer holds.
+fn writeFit(w: *Writer, f: Finding.Fit) Writer.Error!void {
+    if (f.number) |number| {
+        try w.print("`{s}` of {s} '{s}' can need {d} bytes", .{ f.placeholder, number, f.value, f.need });
+    } else {
+        try w.print("`{s}` of '{s}', whose type the caller picks, can need {d} bytes as an i128", .{ f.placeholder, f.value, f.need });
+    }
+    if (f.line != f.need) try w.print(", {d} with the rest of the format", .{f.line});
+    try w.print(", but {s} holds {d}, and `catch unreachable` says {s} cannot fail", .{ f.buffer, f.capacity, f.callee });
 }
 
 /// How a run writes its reports: text, GitHub Actions workflow commands,

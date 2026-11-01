@@ -445,7 +445,9 @@ fn show(w: *std.Io.Writer, v: f64) !void {
 ```
 
 Print a float with `{e}`, which needs at most 24 bytes for an f64, as
-here; size the buffer for the worst case; or handle `error.NoSpaceLeft`.
+here; size the buffer for the whole line's worst case, the format's own
+text and every number in it (`"user-{d}"` of a u64 needs 25); or handle
+`error.NoSpaceLeft`.
 
 ```zig
 fn show(w: *std.Io.Writer, v: f64) !void {

@@ -13,6 +13,12 @@
 //! 20 digits. But a u128 is 39 and an i128 40, and generic code that takes
 //! its integer from the caller does not know which it gets.
 //!
+//! What the buffer must hold is the whole line, not the number alone: the
+//! format string's literal text and every number in it at its longest, so
+//! `"user-{d}"` of a u64 needs 25 bytes (#149). A placeholder fit cannot
+//! size (`{s}`, `{x}`, a value it does not type) counts nothing, so a line
+//! it reports is too long whatever that prints.
+//!
 //! Everything is read from the syntax: the format string, the buffer's
 //! length (`var buf: [48]u8`, a container-level constant, or
 //! `std.fmt.float.min_buffer_size`), and the value's type as the file
@@ -37,7 +43,9 @@
 //! the function, the value, or a local made from it, is compared with `<`,
 //! `<=`, `>` or `>=`, or passed to `@min`, `@max` or `clamp`. Nor is a
 //! value made from an integer with `@floatFromInt`, which is as short as
-//! the integer, or a constant whose value is a literal.
+//! the integer, a local made with a remainder (`@mod`, `@rem` or `%`),
+//! which is less than what it divides by, or a constant whose value is a
+//! literal.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -87,7 +95,8 @@ const Rule = struct {
     }
 
     /// Checks `call(...) catch unreachable` when the call prints into a
-    /// buffer.
+    /// buffer: the most its whole line prints, against what the buffer
+    /// holds, reported once, at the number that prints the most.
     fn call(r: *Rule, catch_node: Node.Index) Allocator.Error!void {
         const tree = r.tree;
         const call_node = tree.nodeData(catch_node).node_and_node[0];
@@ -103,38 +112,68 @@ const Rule = struct {
         var init_buffer: [2]Node.Index = undefined;
         const args = (tree.fullArrayInit(&init_buffer, params[2]) orelse return).ast.elements;
 
+        const line = try r.lineOf(format, args) orelse return;
+        // The cheap test first: what is bounded is looked for only when the
+        // line can be too long without its bound.
+        if (line.most() <= capacity) return;
+        const need, const widest = try r.unbounded(line, call_node) orelse return;
+        if (need <= capacity) return;
+        const handle = "handle error.NoSpaceLeft (return it, or `catch \"?\"`)";
+        try r.findings.append(r.arena, .{
+            .offset = tree.tokenStart(tree.firstToken(widest.arg)),
+            .hint = switch (widest.number) {
+                .float => |float| try r.arena.print("print it with {{e}}, which needs at most {d} bytes, make the buffer {d}, or " ++ handle, .{ float.scientific(), need }),
+                .int => try r.arena.print("make the buffer {d}, or " ++ handle, .{need}),
+                .chosen => try r.arena.print("make the buffer {d} and check at comptime that its type is an integer of at most 128 bits, or " ++ handle, .{need}),
+            },
+            .detail = .{ .fit = .{
+                .callee = tree.getNodeSource(full.ast.fn_expr),
+                .placeholder = widest.placeholder.text,
+                .number = switch (widest.number) {
+                    .float => |float| @tagName(float),
+                    .int => |int| int.name,
+                    .chosen => null,
+                },
+                .value = tree.getNodeSource(widest.arg),
+                .need = widest.worst,
+                .line = need,
+                .buffer = tree.getNodeSource(params[0]),
+                .capacity = capacity,
+            } },
+        });
+    }
+
+    /// What `format` prints with `args`, as far as fit can size it: its
+    /// literal text, and each decimal placeholder of a number whose type
+    /// the file writes or the caller picks. A placeholder it cannot size
+    /// (`{s}`, `{x}`, a value of a type it does not know) counts nothing,
+    /// so a line too long without it is too long whatever it prints. Null
+    /// when a placeholder names its argument (`{[n]d}`).
+    fn lineOf(r: *Rule, format: []const u8, args: []const Node.Index) Allocator.Error!?Line {
+        var numbers: std.ArrayList(Line.Printed) = .empty;
         var it: Placeholders = .{ .format = format };
         while (it.next()) |placeholder| {
-            const index = placeholder.argument orelse return;
+            const index = placeholder.argument orelse return null;
             if (index >= args.len or !placeholder.decimal) continue;
-            const arg = args[index];
-            const number = r.numberOf(arg, placeholder.optional) orelse continue;
-            const need = number.worst(placeholder);
-            if (need <= capacity) continue;
-            if (try r.bounded(arg, call_node)) continue;
-            const handle = "handle error.NoSpaceLeft (return it, or `catch \"?\"`)";
-            return r.findings.append(r.arena, .{
-                .offset = tree.tokenStart(tree.firstToken(arg)),
-                .hint = switch (number) {
-                    .float => |float| try r.arena.print("print it with {{e}}, which needs at most {d} bytes, make the buffer {d}, or " ++ handle, .{ float.scientific(), need }),
-                    .int => try r.arena.print("make the buffer {d}, or " ++ handle, .{need}),
-                    .chosen => try r.arena.print("make the buffer {d} and check at comptime that its type is an integer of at most 128 bits, or " ++ handle, .{need}),
-                },
-                .detail = .{ .fit = .{
-                    .callee = tree.getNodeSource(full.ast.fn_expr),
-                    .placeholder = placeholder.text,
-                    .number = switch (number) {
-                        .float => |float| @tagName(float),
-                        .int => |int| int.name,
-                        .chosen => null,
-                    },
-                    .value = tree.getNodeSource(arg),
-                    .need = need,
-                    .buffer = tree.getNodeSource(params[0]),
-                    .capacity = capacity,
-                } },
-            });
+            const number = r.numberOf(args[index], placeholder.optional) orelse continue;
+            try numbers.append(r.arena, .{ .placeholder = placeholder, .arg = args[index], .number = number, .worst = number.worst(placeholder) });
         }
+        return .{ .literal = it.literal, .numbers = numbers.items };
+    }
+
+    /// The most `line` prints when a number bounded before `call_node`
+    /// counts nothing, as fit does not read what the bound is, and the
+    /// number that prints the most, the first of equals. Null when every
+    /// number is bounded.
+    fn unbounded(r: *Rule, line: Line, call_node: Node.Index) Allocator.Error!?struct { u64, Line.Printed } {
+        var need = line.literal;
+        var widest: ?Line.Printed = null;
+        for (line.numbers) |printed| {
+            if (try r.bounded(printed.arg, call_node)) continue;
+            need += printed.worst;
+            if (widest == null or printed.worst > widest.?.worst) widest = printed;
+        }
+        return .{ need, widest orelse return null };
     }
 
     /// Whether `callee` prints into a buffer: `std.mem`'s print and
@@ -354,8 +393,8 @@ const Rule = struct {
 
     /// Whether `arg` is bounded before `call_node` prints it, in the
     /// function around it: a constant whose value is a literal, made from
-    /// an integer or clamped, or compared or clamped itself, directly or
-    /// through a local made from it.
+    /// an integer, clamped or with a remainder, or compared or clamped
+    /// itself, directly or through a local made from it.
     fn bounded(r: *Rule, arg: Node.Index, call_node: Node.Index) Allocator.Error!bool {
         const tree = r.tree;
         const text = tree.getNodeSource(arg);
@@ -377,7 +416,7 @@ const Rule = struct {
             const init = decl.ast.init_node.unwrap() orelse continue;
             const name = tree.tokenSlice(decl.ast.mut_token + 1);
             if (std.mem.eql(u8, name, text)) {
-                if (isLiteral(tree, init) or try holdsCall(r.arena, tree, init, &.{ "@floatFromInt", "@min", "@max", "clamp" })) return true;
+                if (isLiteral(tree, init) or try holdsCall(r.arena, tree, init, &.{ "@floatFromInt", "@min", "@max", "clamp", "@mod", "@rem", "%" })) return true;
             } else if (try mentions(r.arena, tree, init, text)) {
                 try names.append(r.arena, name);
             }
@@ -421,6 +460,29 @@ const Number = union(enum) {
             .int => |int| @max(int.longest(), placeholder.width, @as(u64, if (placeholder.optional) 4 else 0)),
             .chosen => @max(40, placeholder.width),
         };
+    }
+};
+
+/// What a format string prints, as far as fit can size it.
+const Line = struct {
+    /// Its literal text, in bytes: `{{` and `}}` print one brace each.
+    literal: u64,
+    /// Each decimal placeholder of a number fit can size, in order.
+    numbers: []const Printed,
+
+    const Printed = struct {
+        placeholder: Placeholders.Placeholder,
+        arg: Node.Index,
+        number: Number,
+        /// The most bytes it prints in.
+        worst: u64,
+    };
+
+    /// The most bytes the line prints, every number at its longest.
+    fn most(line: Line) u64 {
+        var need = line.literal;
+        for (line.numbers) |printed| need += printed.worst;
+        return need;
     }
 };
 
@@ -499,6 +561,9 @@ const Placeholders = struct {
     format: []const u8,
     at: usize = 0,
     next_argument: usize = 0,
+    /// The bytes of literal text passed so far: all of it once `next`
+    /// returns null.
+    literal: u64 = 0,
 
     const Placeholder = struct {
         /// As written, braces included.
@@ -517,12 +582,11 @@ const Placeholders = struct {
         const format = it.format;
         while (it.at < format.len) {
             const c = format[it.at];
-            if (c != '{') {
-                it.at += 1;
-                continue;
-            }
-            if (it.at + 1 < format.len and format[it.at + 1] == '{') {
-                it.at += 2;
+            // `{{` and `}}` print one brace.
+            const escaped = (c == '{' or c == '}') and it.at + 1 < format.len and format[it.at + 1] == c;
+            if (escaped or c != '{') {
+                it.literal += 1;
+                it.at += if (escaped) 2 else 1;
                 continue;
             }
             const close = std.mem.findScalarPos(u8, format, it.at, '}') orelse return null;
@@ -606,8 +670,9 @@ fn holdsCall(arena: Allocator, tree: *const Ast, node: Node.Index, names: []cons
     return false;
 }
 
-/// Whether `node` is a call to one of `names`: a builtin (`@min`) or a
-/// function by its last name (`clamp`, `std.math.clamp`).
+/// Whether `node` is a call to one of `names`: a builtin (`@min`), a
+/// function by its last name (`clamp`, `std.math.clamp`), or the `%`
+/// operator, named `%`.
 fn callsOneOf(tree: *const Ast, node: Node.Index, names: []const []const u8) bool {
     const name = switch (tree.nodeTag(node)) {
         .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => tree.tokenSlice(tree.nodeMainToken(node)),
@@ -620,6 +685,7 @@ fn callsOneOf(tree: *const Ast, node: Node.Index, names: []const []const u8) boo
                 else => "",
             };
         },
+        .mod => "%",
         else => "",
     };
     for (names) |n| if (std.mem.eql(u8, name, n)) return true;
@@ -641,7 +707,9 @@ fn mentions(arena: Allocator, tree: *const Ast, node: Node.Index, text: []const 
 
 /// Runs the rule over `source` and compares one line per finding,
 /// `line:col placeholder of type value: need > capacity`, in source order,
-/// with `anytype` for a type the caller picks.
+/// with `anytype` for a type the caller picks, and the whole line's need
+/// after the number's own when the rest of the format adds to it
+/// (`20, line 25 > 20`).
 fn expectFits(source: [:0]const u8, expected: []const u8) !void {
     const gpa = std.testing.allocator;
     var tree = try Ast.parse(gpa, source, .{});
@@ -656,7 +724,9 @@ fn expectFits(source: [:0]const u8, expected: []const u8) !void {
     for (findings.items) |finding| {
         const loc = report.location(tree.source, finding.offset);
         const f = finding.detail.fit;
-        try out.writer.print("{d}:{d} {s} of {s} {s}: {d} > {d}\n", .{ loc.line + 1, loc.column + 1, f.placeholder, f.number orelse "anytype", f.value, f.need, f.capacity });
+        try out.writer.print("{d}:{d} {s} of {s} {s}: {d}", .{ loc.line + 1, loc.column + 1, f.placeholder, f.number orelse "anytype", f.value, f.need });
+        if (f.line != f.need) try out.writer.print(", line {d}", .{f.line});
+        try out.writer.print(" > {d}\n", .{f.capacity});
     }
     try expect.findings(@src(), expected, out.written());
 }
@@ -687,7 +757,7 @@ test "a float printed in full into a buffer too small for it (#35)" {
         \\9:134 {} of f64 v: 327 > 32
         \\10:124 {any} of f64 v: 327 > 53
         \\11:71 {d} of f32 g.value: 48 > 16
-        \\12:119 {d} of f32 v: 48 > 40
+        \\12:119 {d} of f32 v: 48, line 49 > 40
         \\13:100 {?d} of f64 v: 327 > 64
         \\14:106 {d} of f16 v: 11 > 10
         \\15:83 {d:>30} of f16 v: 30 > 20
@@ -743,14 +813,14 @@ test "an integer wider than the buffer, or of a type the caller picks (#128)" {
         \\fn padded(n: u8) usize { var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d:>8}", .{n}) catch unreachable).len; }
         \\fn huge(n: u256) usize { var buf: [64]u8 = undefined; return (std.mem.print(&buf, "{d}", .{n}) catch unreachable).len; }
     ,
-        \\3:93 {d} of anytype user.id: 40 > 24
+        \\3:93 {d} of anytype user.id: 40, line 41 > 24
         \\4:102 {} of anytype v: 40 > 32
         \\5:106 {d} of anytype args.@"0": 40 > 16
         \\6:113 {d:>50} of anytype v: 50 > 48
-        \\7:128 {d} of anytype u.id: 40 > 24
+        \\7:128 {d} of anytype u.id: 40, line 41 > 24
         \\8:116 {d} of anytype id: 40 > 24
         \\9:132 {d} of anytype id: 40 > 8
-        \\11:90 {d} of anytype ctx.id: 40 > 24
+        \\11:90 {d} of anytype ctx.id: 40, line 41 > 24
         \\13:99 {d} of anytype v: 40 > 24
         \\14:134 {d} of anytype v: 40 > 24
         \\15:96 {d} of u128 id: 39 > 24
@@ -764,12 +834,50 @@ test "an integer wider than the buffer, or of a type the caller picks (#128)" {
     );
 }
 
+test "a number that fits alone, but not with the rest of the format (#149)" {
+    try expectFits(
+        \\const std = @import("std");
+        \\pub fn key(buf: *[20]u8, id: u64) []const u8 { return std.fmt.bufPrint(buf, "user-{d}", .{id}) catch unreachable; }
+        \\pub fn pair(buf: *[24]u8, a: u64, b: u64) []const u8 { return std.fmt.bufPrint(buf, "{d}-{d}", .{ a, b }) catch unreachable; }
+        \\fn index(i: usize) usize { var buf: [8]u8 = undefined; return (std.fmt.bufPrint(&buf, "a{d}", .{i}) catch unreachable).len; }
+        \\fn wider(a: u8, b: u64) usize { var buf: [21]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}{d}", .{ a, b }) catch unreachable).len; }
+        \\fn both(x: f64, y: f64) usize { var buf: [400]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d},{d}", .{ x, y }) catch unreachable).len; }
+        \\fn braces(n: u64) usize { var buf: [21]u8 = undefined; return (std.fmt.bufPrint(&buf, "{{{d}}}", .{n}) catch unreachable).len; }
+        \\fn sentinel(n: u32) usize { var buf: [11]u8 = undefined; return (std.fmt.bufPrintSentinel(&buf, "#{d}", .{n}, 0) catch unreachable).len; }
+    ,
+        \\2:91 {d} of u64 id: 20, line 25 > 20
+        \\3:99 {d} of u64 a: 20, line 41 > 24
+        \\4:97 {d} of usize i: 20, line 21 > 8
+        \\5:109 {d} of u64 b: 20, line 23 > 21
+        \\6:108 {d} of f64 x: 327, line 655 > 400
+        \\7:100 {d} of u64 n: 20, line 22 > 21
+        \\8:107 {d} of u32 n: 10, line 11 > 10
+        \\
+    );
+}
+
+test "the rest of the format fits too, or counts nothing fit cannot size: not reported" {
+    try expectFits(
+        \\const std = @import("std");
+        \\fn exact(id: u64) usize { var buf: [25]u8 = undefined; return (std.fmt.bufPrint(&buf, "user-{d}", .{id}) catch unreachable).len; }
+        \\fn braces(n: u64) usize { var buf: [22]u8 = undefined; return (std.fmt.bufPrint(&buf, "{{{d}}}", .{n}) catch unreachable).len; }
+        \\fn label(s: []const u8, n: u64) usize { var buf: [21]u8 = undefined; return (std.fmt.bufPrint(&buf, "{s}:{d}", .{ s, n }) catch unreachable).len; }
+        \\fn hex(a: u64, b: u64) usize { var buf: [21]u8 = undefined; return (std.fmt.bufPrint(&buf, "{x}-{d}", .{ a, b }) catch unreachable).len; }
+        \\fn boundedPair(a: u64, b: u64) usize { if (a > 9) return 0; var buf: [21]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}-{d}", .{ a, b }) catch unreachable).len; }
+        \\fn allBounded(a: u64) usize { if (a > 99) return 0; var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "id{d}", .{a}) catch unreachable).len; }
+        \\fn words() usize { var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "too long", .{}) catch unreachable).len; }
+        \\fn modulo(ms: i64, buf: *[8]u8) []const u8 { const millis: u64 = @intCast(@divFloor(@mod(ms, 1000), 10)); return std.fmt.bufPrint(buf, "t+{d}ms", .{millis}) catch unreachable; }
+        \\fn rem(n: i64) usize { const r: i64 = @rem(n, 60); var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}s", .{r}) catch unreachable).len; }
+        \\fn percent(n: u64) usize { const r: u64 = n % 100; var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}%", .{r}) catch unreachable).len; }
+    , "");
+}
+
 test "an integer that fits, bounded, or of a type neither the file nor the caller picks: not reported" {
     try expectFits(
         \\const std = @import("std");
         \\fn fits(id: u128) usize { var buf: [39]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{id}) catch unreachable).len; }
         \\fn small(n: u32) usize { var buf: [10]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable).len; }
-        \\pub fn roomy(user: anytype) usize { var buf: [40]u8 = undefined; return (std.fmt.bufPrint(&buf, "u{d}", .{user.id}) catch unreachable).len - 1; }
+        \\pub fn roomy(user: anytype) usize { var buf: [41]u8 = undefined; return (std.fmt.bufPrint(&buf, "u{d}", .{user.id}) catch unreachable).len - 1; }
         \\fn compared(n: u64) usize { if (n > 9999) return 0; var buf: [4]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable).len; }
         \\pub fn hex(user: anytype) usize { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{x}", .{user.id}) catch unreachable).len; }
         \\pub fn handled(user: anytype) usize { var buf: [24]u8 = undefined; return (std.fmt.bufPrint(&buf, "{d}", .{user.id}) catch "?").len; }
@@ -816,6 +924,24 @@ test "placeholders: arguments, specifiers and options" {
     };
     for (want) |w| try std.testing.expectEqualDeep(w, it.next().?);
     try std.testing.expectEqual(null, it.next());
+}
+
+test "placeholders: the literal text is what std.fmt prints besides the arguments" {
+    inline for (.{
+        .{ "{d}", .{0} },
+        .{ "user-{d}", .{0} },
+        .{ "{{{d}}}", .{0} },
+        .{ "{d}-{d}", .{ 0, 0 } },
+        .{ "a {{b}} {d}}}c", .{0} },
+        .{ "none", .{} },
+    }) |case| {
+        var buf: [64]u8 = undefined;
+        // Each argument, a 0, prints one byte.
+        const printed = try std.fmt.bufPrint(&buf, case[0], case[1]);
+        var it: Placeholders = .{ .format = case[0] };
+        while (it.next()) |_| {}
+        try std.testing.expectEqual(printed.len - case[1].len, it.literal);
+    }
 }
 
 test "Float.worst and Float.scientific are the most std.fmt prints" {
