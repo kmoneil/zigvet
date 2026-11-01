@@ -47,7 +47,13 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
-      # Unit tests and the case corpus, which also compiles every case.
+      # gnarl, which `zig build test` runs: one release, pinned with its
+      # checksums in the script.
+      - name: install gnarl
+        shell: bash
+        run: bash scripts/install-gnarl.sh
+      # Unit tests and the case corpus, which also compiles every case, then
+      # zigvet over src/ and gnarl's complexity check.
       - name: zig build test
         run: zig build test --summary all
 
@@ -66,6 +72,11 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
+      # gnarl, which `zig build test` runs: one release, pinned with its
+      # checksums in the script.
+      - name: install gnarl
+        shell: bash
+        run: bash scripts/install-gnarl.sh
       - name: zig build test
         run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
 
