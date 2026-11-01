@@ -42,7 +42,14 @@ bin="$dir/gnarl"
 if [ "$RUNNER_OS" = Windows ]; then bin="$bin.exe"; fi
 
 curl -fsSL -o "$bin" "https://github.com/kmoneil/gnarl/releases/download/${version}/${asset}"
-got=$({ sha256sum "$bin" 2>/dev/null || shasum -a 256 "$bin"; } | cut -d' ' -f1)
+# Hashed from stdin: given a path with a backslash in it, as RUNNER_TEMP is
+# on Windows, sha256sum escapes the name and starts its line with a `\`.
+if command -v sha256sum >/dev/null; then
+	got=$(sha256sum <"$bin")
+else
+	got=$(shasum -a 256 <"$bin")
+fi
+got=${got%% *}
 if [ "$got" != "$sum" ]; then
 	echo "install-gnarl: $asset $version has checksum $got, not $sum" >&2
 	exit 1
