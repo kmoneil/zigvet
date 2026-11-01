@@ -67,6 +67,30 @@ fn freshTyped(m: *N) void {
     m.* = .{ .b = 7, .a = P{ .x = m.b, .y = 0 } };
 }
 
+// A union's own field is read before its payload is written, a typed
+// union is built aside, a struct given one field is given its defaults
+// after it, and an optional's payload is not its mark (#152).
+const Tree = union(enum) { leaf: u32, node: *Tree };
+const Counts = struct { a: u32, b: u32 = 0 };
+fn sum(c: Counts) u32 {
+    return c.a + c.b;
+}
+fn ownField(t: *Tree) void {
+    t.* = .{ .leaf = t.leaf + 1 };
+}
+fn typedUnion(t: *Tree) void {
+    t.* = Tree{ .leaf = switch (t.*) {
+        .leaf => |v| v,
+        .node => 0,
+    } };
+}
+fn structOneField(c: *Counts) void {
+    c.* = .{ .a = sum(c.*) };
+}
+fn optionalPayload(o: *?Counts) void {
+    o.* = .{ .a = sum(o.*.?), .b = 0 };
+}
+
 comptime {
     _ = &ownSlot;
     _ = &eachOwn;
@@ -83,6 +107,10 @@ comptime {
     _ = &chain;
     _ = &fresh;
     _ = &freshTyped;
+    _ = &ownField;
+    _ = &typedUnion;
+    _ = &structOneField;
+    _ = &optionalPayload;
 }
 
 // compile
