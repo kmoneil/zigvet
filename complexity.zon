@@ -1,0 +1,24 @@
+// gnarl's classes for zigvet (github.com/kmoneil/gnarl; `gnarl skill`
+// explains them). `zig build test` runs `gnarl --check .`, which fails a
+// function over a critical limit unless complexity.baseline holds it at
+// that number or above.
+.{
+    // What every file checked goes through, whichever rules run: the walk
+    // that finds it, the vet that parses it and runs the rules, the allow
+    // comments read for each report, and the child nodes and types every
+    // rule asks for, node by node. The rules themselves are normal: each is
+    // one analysis, its own code rather than a path all of them share.
+    .hot = .{
+        "src/walk.zig",
+        "src/vet.zig",
+        "src/allow.zig",
+        "src/children.zig",
+        "src/types.zig",
+    },
+    // What runs no check: the build, the case corpus's runner and the rule
+    // tests' expectations. Held to the critical limits alone, as a test
+    // block is.
+    .cold = .{ "build.zig", "src/cases.zig", "src/expect.zig" },
+    // The case corpus: code wrong on purpose, read by the tests as data.
+    .exclude = .{"test/cases"},
+}
