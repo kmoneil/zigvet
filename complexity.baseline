@@ -19,7 +19,7 @@ src/escape.zig	Rule.walk	33	42	108	3	1	1
 src/escape.zig	countsAtComptime	11	26	14	5	2	2
 src/fit.zig	Placeholders.parse	24	27	35	2	1	1
 src/fit.zig	Rule.bounded	18	30	29	3	2	2
-src/fit.zig	Rule.call	21	23	41	2	1	1
+src/fit.zig	Rule.call	18	13	37	1	1	1
 src/fit.zig	Rule.callerPicks	17	24	24	3	3	3
 src/fit.zig	Rule.chosen	35	73	58	4	2	2
 src/flush.zig	check	19	33	32	4	2	2
@@ -47,7 +47,7 @@ src/refill.zig	Rule.handsOver	14	31	15	4	2	2
 src/refill.zig	Rule.heldByValue	14	36	22	4	2	2
 src/refill.zig	freedParams	13	27	24	5	2	2
 src/report.zig	Finding.rule	22	1	23	1	0	0
-src/report.zig	writeMessage	32	13	60	2	2	2
+src/report.zig	writeMessage	31	11	57	2	2	2
 src/sweep.zig	emptiedAfter	16	26	22	4	4	4
 src/sweep.zig	freeOf	18	30	29	4	3	3
 src/twice.zig	check	18	35	36	3	2	2
