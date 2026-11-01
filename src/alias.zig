@@ -339,10 +339,8 @@ const Rule = struct {
     fn path(r: *Rule, node: Node.Index) Allocator.Error!?Path {
         const tree = r.tree;
         var parts: std.ArrayList(Path.Part) = .empty;
-        // Set by the outermost access: whether the path ends in `.*`, and
-        // whether it ends in `.?`.
+        // Set by the outermost access: whether the path ends in `.*`.
         var deref: ?bool = null;
-        var unwrap: ?bool = null;
         var n = node;
         while (true) switch (tree.nodeTag(n)) {
             .identifier => break,
@@ -350,24 +348,17 @@ const Rule = struct {
                 const lhs, const field = tree.nodeData(n).node_and_token;
                 try parts.append(r.arena, .{ .field = tree.tokenSlice(field) });
                 deref = deref orelse false;
-                unwrap = unwrap orelse false;
                 n = lhs;
             },
             .array_access => {
                 const lhs, const index = tree.nodeData(n).node_and_node;
                 try parts.append(r.arena, .{ .index = tree.getNodeSource(index) });
                 deref = deref orelse false;
-                unwrap = unwrap orelse false;
                 n = lhs;
             },
-            .unwrap_optional => {
-                unwrap = unwrap orelse true;
-                n = tree.nodeData(n).node_and_token[0];
-            },
-            .grouped_expression => n = tree.nodeData(n).node_and_token[0],
+            .unwrap_optional, .grouped_expression => n = tree.nodeData(n).node_and_token[0],
             .deref => {
                 deref = deref orelse true;
-                unwrap = unwrap orelse false;
                 n = tree.nodeData(n).node;
             },
             else => return null,
@@ -377,7 +368,7 @@ const Rule = struct {
             .root = tree.tokenSlice(tree.nodeMainToken(n)),
             .parts = parts.items,
             .deref = deref orelse false,
-            .unwrap = unwrap orelse false,
+            .unwrap = endsInUnwrap(tree, node),
         };
     }
 
@@ -412,6 +403,13 @@ const Rule = struct {
 /// The name `value` is given to in a struct initializer: `.name = value`.
 fn fieldName(tree: *const Ast, value: Node.Index) []const u8 {
     return tree.tokenSlice(tree.firstToken(value) - 2);
+}
+
+/// Whether `node`'s outermost access, under any parentheses, is `.?`.
+fn endsInUnwrap(tree: *const Ast, node: Node.Index) bool {
+    var n = node;
+    while (tree.nodeTag(n) == .grouped_expression) n = tree.nodeData(n).node_and_token[0];
+    return tree.nodeTag(n) == .unwrap_optional;
 }
 
 /// What `?T` holds, or null for any other type.
