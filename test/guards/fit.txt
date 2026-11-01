@@ -18,3 +18,15 @@ file src/fit.zig
 == a call to another function of the same name
 -            if (called != fn_decl or index < offset) continue;
 +            if (false and called != fn_decl or index < offset) continue;
+
+== a number bounded before it is printed counts nothing on the line
+-            if (try r.bounded(printed.arg, call_node)) continue;
++            if (false and try r.bounded(printed.arg, call_node)) continue;
+
+== `{{` and `}}` print one brace
+-                it.literal += 1;
++                it.literal += if (escaped) 2 else 1;
+
+== a local made with a remainder is bounded
+-                if (isLiteral(tree, init) or try holdsCall(r.arena, tree, init, &.{ "@floatFromInt", "@min", "@max", "clamp", "@mod", "@rem", "%" })) return true;
++                if (isLiteral(tree, init) or try holdsCall(r.arena, tree, init, &.{ "@floatFromInt", "@min", "@max", "clamp" })) return true;

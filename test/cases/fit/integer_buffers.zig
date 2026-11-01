@@ -56,5 +56,5 @@ comptime {
 
 // error
 //
-// :15:74: error: `{d}` of 'u.id', whose type the caller picks, can need 40 bytes as an i128, but buf holds 24, and `catch unreachable` says std.fmt.bufPrint cannot fail
+// :15:74: error: `{d}` of 'u.id', whose type the caller picks, can need 40 bytes as an i128, 41 with the rest of the format, but buf holds 24, and `catch unreachable` says std.fmt.bufPrint cannot fail
 // :22:45: error: `{d}` of u128 'id' can need 39 bytes, but &buf holds 24, and `catch unreachable` says std.fmt.bufPrint cannot fail

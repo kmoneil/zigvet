@@ -72,4 +72,4 @@ comptime {
 //
 // :11:47: error: `{d}` of f64 'v' can need 327 bytes, but &buf holds 48, and `catch unreachable` says std.fmt.bufPrint cannot fail
 // :19:61: error: `{d}` of f64 'v' can need 327 bytes, but &buf holds 32, and `catch unreachable` says std.fmt.bufPrint cannot fail
-// :28:49: error: `{d:.2}` of f64 'p' can need 313 bytes, but &buf holds 53, and `catch unreachable` says std.fmt.bufPrint cannot fail
+// :28:49: error: `{d:.2}` of f64 'p' can need 313 bytes, 314 with the rest of the format, but &buf holds 53, and `catch unreachable` says std.fmt.bufPrint cannot fail

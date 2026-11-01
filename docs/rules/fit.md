@@ -40,22 +40,32 @@ fn keyOf(ctx: anytype, buf: *[24]u8) []const u8 {
 }
 ```
 
-24 bytes holds any i64, but a u128 prints as 39 digits and an i128 as 40
-bytes, so an app whose ids are u128 would crash a worker on every
-logged-in request. The fix is a buffer of 40 bytes, with a comptime check
-that the type is an integer of at most 128 bits, or handling the error.
+24 bytes holds any i64 after the `u`, but a u128 prints as 39 digits and
+an i128 as 40 bytes, so an app whose ids are u128 would crash a worker on
+every logged-in request. The fix is a buffer of 41 bytes, the `u` and the
+longest i128, with a comptime check that the type is an integer of at most
+128 bits, or handling the error.
+
+What counts is the whole line, not the number alone: `"user-{d}"` of a u64
+needs 25 bytes, and `"{d}-{d}"` of two u64s 41, though 20 holds each
+number.
 
 ## What fit reports
 
 `std.mem.print` or `printSentinel`, or `std.fmt.bufPrint` or
 `bufPrintSentinel`, which 0.17.0 keeps for them, under `catch unreachable`,
 printing with `{d}`, `{}` or `{any}` (fill, width, precision and `{?d}`
-included) into a buffer smaller than the most that can print: for an
-f16, f32 or f64, 11, 48 and 327 bytes, or with a precision of n digits, 6,
-40 and 310 bytes and then a point and n; for an integer, the digits of its
-largest magnitude and a sign if it has one, such as 20 bytes for a u64,
-i64, usize or isize and 39 for a u128; and for a value whose type the
-caller picks, 40 bytes, the longest i128. The buffer's length has to be in
+included) into a buffer smaller than the most the call can print: the
+format string's own text, `{{` and `}}` a byte each, and each such number
+at its longest. That is, for an f16, f32 or f64, 11, 48 and 327 bytes, or
+with a precision of n digits, 6, 40 and 310 bytes and then a point and n;
+for an integer, the digits of its largest magnitude and a sign if it has
+one, such as 20 bytes for a u64, i64, usize or isize and 39 for a u128;
+and for a value whose type the caller picks, 40 bytes, the longest i128.
+A placeholder fit cannot size, such as `{s}` or `{x}`, and a number it
+leaves alone (below) count nothing, so a call it reports is too long
+whatever they print. Each call is reported once, at the number that can
+print the most, with the size the whole line needs. The buffer's length has to be in
 the syntax: `&buf` or `buf[0..]` with `buf: [N]u8`, or `buf` with
 `buf: *[N]u8`, where N is a literal, a container-level constant, or
 `std.fmt.float.min_buffer_size` (53, which is too small). So does the
@@ -69,15 +79,17 @@ passed such a value by a call in the file.
 
 The file cannot say which types its callers pass, so a value whose type
 the caller picks is reported even when every caller, in other files,
-passes an i64. A buffer of 40 bytes costs 16 more and settles it; or say so
+passes an i64. In `keyOf`, a buffer of 41 bytes costs 17 more and settles it; or say so
 with `// zigvet: allow fit every caller passes an i64 id`.
 
 Not reported: a value bounded before it is printed, where any comparison
 of it (`<`, `<=`, `>`, `>=`), or `@min`, `@max` or `clamp` of it, or of a
 local made from it, earlier in the function counts as a bound, since a
 bound can take many shapes; one made from an integer with
-`@floatFromInt`, which prints no longer than the integer; a constant whose
-value is a literal; an anytype parameter of a private function every call
+`@floatFromInt`, which prints no longer than the integer; a local made
+with a remainder (`@mod`, `@rem` or `%`), which is less than what it
+divides by; a constant whose value is a literal; an anytype parameter of a
+private function every call
 to which, in the file, passes a type the file decides (`writeInt(count)`
 with `count: u64`); and a value whose type is not written and the caller
 does not pick (an untyped local, a type declared in another file, a
@@ -96,5 +108,13 @@ reports: one real, a web framework's rate limit keyed by the app's own
 user id ([#128](https://github.com/kmoneil/zigvet/issues/128)), and three
 false positives, each an integer whose type or bound is written in another
 file.
+
+Counting the whole line rather than each number alone
+([#149](https://github.com/kmoneil/zigvet/issues/149)) added, over the same
+code, one report: a u32 that a function documents as a second's fraction,
+printed after a `.` with `{d:0>9}` into 10 bytes. Its type allows 10
+digits, and its bound is its callers', so it is a false positive of the
+kind above. Two more were values made with `@mod`, which a remainder now
+bounds.
 
 [All rules](index.md)
