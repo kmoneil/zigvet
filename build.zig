@@ -43,11 +43,24 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run zigvet on the given paths").dependOn(&run.step);
 
     // zigvet over its own source: the same step the README tells a
-    // consuming repo to add.
+    // consuming repo to add. `zig build test` runs it too, every time.
     const lint = b.addRunArtifact(exe);
     lint.setCwd(b.path("."));
     lint.addArgs(&.{"src"});
+    lint.has_side_effects = true;
     b.step("lint", "Run zigvet over src/").dependOn(&lint.step);
+
+    // gnarl (github.com/kmoneil/gnarl), a program on the PATH: a function
+    // newly over a critical complexity limit, or worse than
+    // complexity.baseline, fails the build. complexity.zon gives the
+    // classes; both are found in the repository root. A pass prints nothing,
+    // and a failure lists what fails. It runs every time: what gnarl reads is
+    // not among the step's inputs, so a cached step would pass a regression
+    // without running it. `zig build test` runs it too.
+    const complexity = b.addSystemCommand(&.{ "gnarl", "--check", "." });
+    complexity.setCwd(b.path("."));
+    complexity.has_side_effects = true;
+    b.step("complexity", "Fail a function newly over its complexity limit (gnarl, from the PATH)").dependOn(&complexity.step);
 
     // The tests include the case corpus under test/cases/, which runs the
     // compiler over each case and reads the cases at run time: it needs the
@@ -65,7 +78,10 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     run_tests.setCwd(b.path("."));
     run_tests.has_side_effects = true;
-    b.step("test", "Run unit tests and the case corpus").dependOn(&run_tests.step);
+    const test_step = b.step("test", "Run unit tests, the case corpus, zigvet over src/ and gnarl's check");
+    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&lint.step);
+    test_step.dependOn(&complexity.step);
 
     // `zig build release`: every release binary, ReleaseSafe so the checks
     // that make a crash a report rather than a wrong answer stay in, into

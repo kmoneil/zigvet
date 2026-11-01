@@ -1,8 +1,12 @@
 # Contributing
 
 zigvet builds with Zig 0.17.0 and has no dependencies. `zig build` leaves
-the binary in `zig-out/bin/`, `zig build test` runs every test, and
-`zig build lint` runs zigvet over its own `src/`.
+the binary in `zig-out/bin/`, `zig build test` runs every test,
+`zig build lint` runs zigvet over its own `src/`, and
+`zig build complexity` runs [gnarl](https://github.com/kmoneil/gnarl)'s
+complexity check. `zig build test` runs the last two as well, so it needs
+`gnarl` on the PATH: a binary from its releases, or
+`brew install kmoneil/tap/gnarl`.
 
 ## What a rule has to be
 
@@ -49,6 +53,20 @@ prints each one it rewrote with its file and line. Read the diff before it
 is committed: an expectation is only as right as its reading. A test that
 expected nothing and now finds something, or the other way round, still
 fails, as that is a rule gaining or losing a finding, not one moving.
+
+### Complexity
+
+`gnarl --check .`, run by `zig build test`, fails a function over a
+critical complexity limit unless `complexity.baseline` holds it at that
+number or above: the debt already there is held, not let grow.
+`complexity.zon` says which files are held to the tightest limits (what
+every file checked goes through) and which to the loosest (the build and
+the test machinery). Run `gnarl --diff HEAD` before a commit to see what it
+changed. A new function over a critical limit is split rather than added to
+the baseline (`gnarl --explain path:line` lists ranges worth lifting out);
+a commit that improves, renames or moves a baselined function runs
+`gnarl --update-baseline .` too. CI installs the gnarl release
+`scripts/install-gnarl.sh` pins.
 
 ### Measuring a rule on real code
 

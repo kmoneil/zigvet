@@ -50,6 +50,11 @@ jobs:
         run: zig fmt --check build.zig build.zig.zon src test
       - name: zigvet over src/
         run: zig build lint
+      # gnarl, which `zig build test` runs: one release, pinned with its
+      # checksums in the script.
+      - name: install gnarl
+        shell: bash
+        run: bash scripts/install-gnarl.sh
       - name: tests and the case corpus, in every mode a user builds
         run: |
           zig build test --summary all
