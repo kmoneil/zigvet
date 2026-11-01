@@ -1,0 +1,34 @@
+# alias's guards for a union's tag and an optional's mark: each what keeps
+# a report out, and the edit that takes it away. Run with
+# scripts/guardcheck.sh; with any one of them gone, a test must fail.
+file src/alias.zig
+
+== a union's own field is read before its payload is written
+-                return next != .field or !std.mem.eql(u8, next.field, field);
++                return true or next != .field or !std.mem.eql(u8, next.field, field);
+
+== a guessed union's other fields may be a struct's
+-                if (!h.others) return false;
++                if (false and !h.others) return false;
+
+== an optional's payload is not its mark
+-            if (read.parts.len == place.parts.len and read.unwrap and h.field == null) return false;
++            if (false and read.parts.len == place.parts.len and read.unwrap and h.field == null) return false;
+
+== the pointer a place is reached through is not the place
+-            if (read.parts.len == place.parts.len and read.unwrap and h.field == null) return false;
+-            if (read.parts.len != target.parts.len) return read.parts.len > target.parts.len;
+-            // `b` read for `b.* = .{...}` is the pointer, not the memory.
+-            return read.deref or !target.deref;
++            if (read.parts.len == place.parts.len and read.unwrap and h.field == null) return false;
++            if (read.parts.len != target.parts.len) return read.parts.len > target.parts.len;
++            // `b` read for `b.* = .{...}` is the pointer, not the memory.
++            return true;
+
+== a struct the file declares is given no tag
+-                if (declared or container == null) try stored.append(r.arena, .{ .header = .{
++                if (true) try stored.append(r.arena, .{ .header = .{
+
+== a union with no tag
+-    return tree.tokenTag(main) == .keyword_union and tree.tokenTag(main + 1) == .l_paren;
++    return tree.tokenTag(main) == .keyword_union;

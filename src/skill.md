@@ -474,6 +474,12 @@ Copy the old value first and read the copy, swap with `std.mem.swap`, as
 here, or assign the fields one at a time, each read before it is
 overwritten. A typed initializer, `[2]u32{...}`, is built aside and safe.
 
+A union is given its tag, and an optional is marked not null, before any
+element is evaluated, so even the only element can read what was stored:
+`left = .{ .pair = try alloc(arena, .{ .left = left, .right = right }) }`
+copies `left` into the new node already tagged `.pair`, its payload not
+yet written. Build the value in a local first, then assign it.
+
 ```zig
 fn sorted(a: u32, b: u32) [2]u32 {
     var ext: [2]u32 = .{ a, b };

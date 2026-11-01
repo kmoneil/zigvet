@@ -203,7 +203,7 @@ seldom take.
 
 | Rule | Catches | What goes wrong |
 |---|---|---|
-| [alias](docs/rules/alias.md) | An anonymous initializer assigned to a place one of its own later elements reads | `ext = .{ ext[1], ext[0] }` gives `{ ext[1], ext[1] }` |
+| [alias](docs/rules/alias.md) | An anonymous initializer assigned to a place that it reads after storing to it | `ext = .{ ext[1], ext[0] }` gives `{ ext[1], ext[1] }`, and `e = .{ .pair = f(e) }` hands `f` an `e` already tagged `.pair` |
 | [flush](docs/rules/flush.md) | A buffered file or stream writer, written to and never flushed | What is left in the buffer never arrives |
 | [wipe](docs/rules/wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
 
