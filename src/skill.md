@@ -607,7 +607,9 @@ test "s3: a key that leaves the bucket is refused" {}
 
 A fuzz target keeps memory past one input, from an allocator the test
 runner does not check. It grows with every input until the run runs out
-of memory, and the leak check passes.
+of memory, and the leak check passes. A function handed to a wrapper
+around `std.testing.fuzz` (`fuzzing.run({}, fuzzRender, 400)`) is read as a
+target too, when the wrapper's file is checked in the same run.
 
 ```zig
 var seen: std.ArrayList([]const u8) = .empty;

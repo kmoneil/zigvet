@@ -81,9 +81,38 @@ the target calls that takes from such an allocator itself, rather than one
 it is handed; and a container that carries its own allocator, grown without
 naming one.
 
-Targets behind a wrapper of `std.testing.fuzz`, such as one that also runs
-them from a seeded generator under a plain `zig build test`, are not read
-yet ([#136](https://github.com/kmoneil/zigvet/issues/136)).
+## Targets behind a wrapper
+
+A runner that also replays seeded inputs under a plain `zig build test`
+wraps `std.testing.fuzz`, so the function that does the work is never the
+fuzz call's argument:
+
+```zig
+pub fn run(context: anytype, comptime testOne: fn (@TypeOf(context), *Draw) anyerror!void, seeded: usize) anyerror!void {
+    try std.testing.fuzz(context, struct {
+        fn one(ctx: @TypeOf(context), smith: *Smith) anyerror!void {
+            var draw: Draw = .{ .smith = smith };
+            try testOne(ctx, &draw);
+        }
+    }.one, .{});
+    // ... then each seed, through testOne
+}
+```
+
+hoard reads such a wrapper
+([#136](https://github.com/kmoneil/zigvet/issues/136)): a function declared
+at the top of its file whose fuzz target calls one of its parameters. A
+call to it, by name in its own file or through the constants that import
+its file in another (`fuzzing.run({}, fuzzRender, 400)`,
+`lib.fuzzing.run(...)`), has the argument in that parameter's place read as
+a target. The argument in the place of the parameter the wrapper hands the
+fuzz call as its context is the target's context, so a field of it set to
+an allocator counts as above.
+
+A wrapper in another file is seen when that file is checked in the same
+run, and reached by path: an `@import("testing/fuzzing.zig")`, or a
+constant of another file set to one. A module import
+(`@import("app")`), which only the build maps to a file, is not followed.
 
 ## Found in real code
 

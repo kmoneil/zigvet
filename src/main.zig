@@ -7,6 +7,7 @@ const Io = std.Io;
 
 const build_options = @import("build_options");
 const test_options = @import("test_options");
+const hoard = @import("hoard.zig");
 const report = @import("report.zig");
 const skill = @import("skill.zig");
 const unrun = @import("unrun.zig");
@@ -44,6 +45,48 @@ const usage =
 
 /// `Ast` offsets are 32-bit.
 const max_source_bytes = std.math.maxInt(u32);
+
+/// What the rules that read across files learn of every file checked,
+/// read before any file is reported: unrun asks which files the tests
+/// reach, and hoard which wrappers around the fuzz call the files declare.
+/// A file it cannot read or parse here may import anything, and is taken
+/// to be reached.
+const Survey = struct {
+    summaries: []unrun.Summary,
+    fuzz_wrappers: [][]const hoard.Wrapper,
+    /// Which file a name leads to, made only when a file declares a
+    /// wrapper: most runs need no names.
+    resolver: ?unrun.Resolver,
+
+    fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, cwd: Io.Dir, paths: []const []const u8) !Survey {
+        const summaries = try arena.alloc(unrun.Summary, paths.len);
+        const fuzz_wrappers = try arena.alloc([]const hoard.Wrapper, paths.len);
+        var any = false;
+        for (paths, summaries, fuzz_wrappers) |path, *summary, *wrappers| {
+            summary.* = .{ .path = path, .unparsed = true };
+            wrappers.* = &.{};
+            const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                else => continue,
+            };
+            defer gpa.free(source);
+            var tree = try std.zig.Ast.parse(gpa, source, .{});
+            defer tree.deinit(gpa);
+            summary.* = try unrun.summarize(gpa, arena, path, &tree);
+            wrappers.* = try hoard.wrappers(arena, &tree);
+            any = any or wrappers.len > 0;
+        }
+        return .{ .summaries = summaries, .fuzz_wrappers = fuzz_wrappers, .resolver = if (any) try .init(arena, summaries) else null };
+    }
+
+    /// What file `f` is checked with, `found` being unrun's finding in it.
+    fn across(s: *Survey, f: usize, found: *const ?report.Finding) vet.Across {
+        return .{
+            .extra = if (found.*) |*first| first[0..1] else &.{},
+            .wrapped = if (s.resolver) |*r| .{ .wrappers = s.fuzz_wrappers, .resolver = r, .file = f } else null,
+        };
+    }
+};
 
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
@@ -83,29 +126,15 @@ pub fn main(init: std.process.Init) !u8 {
     }
     walk.sortUnique(&files);
 
-    // unrun asks which files the tests reach, so it reads them all before
-    // any is reported. One it cannot read or parse here may import
-    // anything, and is taken to be reached.
-    const summaries = try arena.alloc(unrun.Summary, files.items.len);
-    for (files.items, summaries) |path, *summary| {
-        summary.* = .{ .path = path, .unparsed = true };
-        const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => continue,
-        };
-        defer gpa.free(source);
-        var tree = try std.zig.Ast.parse(gpa, source, .{});
-        defer tree.deinit(gpa);
-        summary.* = try unrun.summarize(gpa, arena, path, &tree);
-    }
-    const unrun_found = try unrun.check(arena, summaries);
+    var survey: Survey = try .read(gpa, arena, io, cwd, files.items);
+    const unrun_found = try unrun.check(arena, survey.summaries);
 
     var reports: report.Out = .init(gpa, out, run.format);
     defer reports.deinit();
     try reports.begin();
     var reported: usize = 0;
     var checked: usize = 0;
-    for (files.items, unrun_found) |path, *found| {
+    for (files.items, unrun_found, 0..) |path, *found, f| {
         const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
@@ -115,8 +144,7 @@ pub fn main(init: std.process.Init) !u8 {
             },
         };
         defer gpa.free(source);
-        const extra: []const report.Finding = if (found.*) |*f| f[0..1] else &.{};
-        reported += try vet.vetSource(gpa, path, source, extra, &reports);
+        reported += try vet.vetSource(gpa, path, source, survey.across(f, found), &reports);
         checked += 1;
     }
     try reports.end();
@@ -312,6 +340,62 @@ test "unrun reads every file checked before it reports one, and an allow comment
     try std.testing.expectEqualStrings("storage" ++ std.fs.path.sep_str ++
         \\s3.zig:1:1: unrun: nothing the tests reach refers to this file, so its test never runs
         \\    hint: add `_ = s3;` to a test block in storage.zig
+        \\
+    , result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "hoard reads a function handed to another file's wrapper around the fuzz call (#136)" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "testing");
+    const files = [_][2][]const u8{
+        .{
+            "testing/fuzzing.zig",
+            \\const std = @import("std");
+            \\pub fn run(context: anytype, comptime testOne: fn (@TypeOf(context), *std.testing.Smith) anyerror!void) anyerror!void {
+            \\    try std.testing.fuzz(context, struct {
+            \\        fn one(ctx: @TypeOf(context), smith: *std.testing.Smith) anyerror!void {
+            \\            try testOne(ctx, smith);
+            \\        }
+            \\    }.one, .{});
+            \\}
+            \\
+        },
+        .{ "lib.zig", "pub const fuzzing = @import(\"testing/fuzzing.zig\");\n" },
+        .{
+            "render.zig",
+            \\const std = @import("std");
+            \\const fuzzing = @import("testing/fuzzing.zig");
+            \\const lib = @import("lib.zig");
+            \\fn leaky(_: void, _: *std.testing.Smith) anyerror!void {
+            \\    _ = try std.heap.page_allocator.alloc(u8, 1);
+            \\}
+            \\fn deep(_: void, _: *std.testing.Smith) anyerror!void {
+            \\    _ = try std.heap.c_allocator.create(u64);
+            \\}
+            \\test "fuzz" {
+            \\    try fuzzing.run({}, leaky);
+            \\    try lib.fuzzing.run({}, deep);
+            \\}
+            \\
+        },
+    };
+    for (files) |file| try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ exe, "." }, .cwd = .{ .dir = tmp.dir } });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqualStrings(
+        \\render.zig:5:13: hoard: `std.heap.page_allocator.alloc` takes memory from `std.heap.page_allocator` that fuzz target 'leaky' never gives back, so it piles up over every input, and the runner's leak check sees only std.testing.allocator
+        \\    hint: take it from std.testing.allocator, which the runner checks after each input, or give it back before the input ends (`defer`)
+        \\render.zig:8:13: hoard: `std.heap.c_allocator.create` takes memory from `std.heap.c_allocator` that fuzz target 'deep' never gives back, so it piles up over every input, and the runner's leak check sees only std.testing.allocator
+        \\    hint: take it from std.testing.allocator, which the runner checks after each input, or give it back before the input ends (`defer`)
         \\
     , result.stdout);
     try std.testing.expectEqualStrings("", result.stderr);
