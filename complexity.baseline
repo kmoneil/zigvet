@@ -12,14 +12,12 @@ src/escape.zig	Rule.assignment	18	24	31	3	1	1
 src/escape.zig	Rule.function	23	42	50	4	1	1
 src/escape.zig	Rule.heldSource	24	52	27	5	3	3
 src/escape.zig	Rule.isComptime	39	62	124	4	1	1
-src/escape.zig	Rule.leavesOf	17	14	44	2	3	3
 src/escape.zig	Rule.ownViewSource	30	62	39	5	2	2
 src/escape.zig	Rule.stackSource	24	30	37	3	2	2
 src/escape.zig	Rule.walk	33	42	108	3	1	1
 src/escape.zig	countsAtComptime	11	26	14	5	2	2
 src/fit.zig	Placeholders.parse	24	27	35	2	1	1
 src/fit.zig	Rule.bounded	18	30	29	3	2	2
-src/fit.zig	Rule.call	18	13	37	1	1	1
 src/fit.zig	Rule.callerPicks	17	24	24	3	3	3
 src/fit.zig	Rule.chosen	35	73	58	4	2	2
 src/flush.zig	check	19	33	32	4	2	2
@@ -46,8 +44,6 @@ src/refill.zig	Rule.failing	13	26	21	4	3	3
 src/refill.zig	Rule.handsOver	14	31	15	4	2	2
 src/refill.zig	Rule.heldByValue	14	36	22	4	2	2
 src/refill.zig	freedParams	13	27	24	5	2	2
-src/report.zig	Finding.rule	22	1	23	1	0	0
-src/report.zig	writeMessage	31	11	57	2	2	2
 src/sweep.zig	emptiedAfter	16	26	22	4	4	4
 src/sweep.zig	freeOf	18	30	29	4	3	3
 src/twice.zig	check	18	35	36	3	2	2
@@ -55,7 +51,6 @@ src/twice.zig	failsAfter	11	27	24	3	5	5
 src/types.zig	Types.bindingType	33	65	48	4	2	2
 src/unlock.zig	check	12	26	24	4	2	2
 src/unlock.zig	returnsError	16	24	25	3	3	3
-src/unrun.zig	Reach.follow	17	13	27	2	2	2
 src/unrun.zig	Reach.markRoots	18	39	22	5	0	0
 src/unrun.zig	Scan.walk	20	31	32	4	4	4
 src/unrun.zig	sccs	11	28	49	5	1	1

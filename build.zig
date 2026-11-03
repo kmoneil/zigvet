@@ -21,6 +21,19 @@ const release_targets = [_]struct { query: std.Target.Query, name: []const u8 }{
     .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .windows }, .name = "zigvet-windows-arm64.exe" },
 };
 
+/// The gnarl release CI installs: the `version=v...` line of
+/// scripts/install-gnarl.sh, without its `v`, so the pin is written once,
+/// beside the checksums it goes with.
+const gnarl_pin = pin: {
+    const script = @embedFile("scripts/install-gnarl.sh");
+    const key = "\nversion=v";
+    const start = (std.mem.find(u8, script, key) orelse
+        @compileError("scripts/install-gnarl.sh has no version=v... line")) + key.len;
+    const end = std.mem.findScalarPos(u8, script, start, '\n') orelse script.len;
+    // A checkout with CRLF line endings leaves a \r on the line.
+    break :pin std.mem.trimEnd(u8, script[start..end], "\r");
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -60,6 +73,15 @@ pub fn build(b: *std.Build) void {
     const complexity = b.addSystemCommand(&.{ "gnarl", "--check", "." });
     complexity.setCwd(b.path("."));
     complexity.has_side_effects = true;
+    // Judged by the gnarl CI installs, not whichever one the PATH has: two
+    // releases can count the same function differently, and then a commit
+    // passes here and fails in CI (#154). A different gnarl fails the build
+    // and prints both versions.
+    const gnarl_version = b.addSystemCommand(&.{ "gnarl", "--version" });
+    gnarl_version.setName("gnarl --version, against the release scripts/install-gnarl.sh pins");
+    gnarl_version.expectStdOutEqual("gnarl " ++ gnarl_pin ++ "\n");
+    gnarl_version.has_side_effects = true;
+    complexity.step.dependOn(&gnarl_version.step);
     b.step("complexity", "Fail a function newly over its complexity limit (gnarl, from the PATH)").dependOn(&complexity.step);
 
     // The tests include the case corpus under test/cases/, which runs the

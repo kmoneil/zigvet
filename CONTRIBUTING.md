@@ -5,8 +5,9 @@ the binary in `zig-out/bin/`, `zig build test` runs every test,
 `zig build lint` runs zigvet over its own `src/`, and
 `zig build complexity` runs [gnarl](https://github.com/kmoneil/gnarl)'s
 complexity check. `zig build test` runs the last two as well, so it needs
-`gnarl` on the PATH: a binary from its releases, or
-`brew install kmoneil/tap/gnarl`.
+`gnarl` on the PATH, the release `scripts/install-gnarl.sh` pins: a binary
+from its releases, or `brew install kmoneil/tap/gnarl` while the tap has
+that release.
 
 ## What a rule has to be
 
@@ -66,7 +67,12 @@ changed. A new function over a critical limit is split rather than added to
 the baseline (`gnarl --explain path:line` lists ranges worth lifting out);
 a commit that improves, renames or moves a baselined function runs
 `gnarl --update-baseline .` too. CI installs the gnarl release
-`scripts/install-gnarl.sh` pins.
+`scripts/install-gnarl.sh` pins, and the complexity step fails, naming both
+versions, when the `gnarl` on the PATH is another release: two releases can
+count the same function differently, so a commit could pass on one and fail
+on the other ([#154](https://github.com/kmoneil/zigvet/issues/154)). Moving
+to a new gnarl is one change: the version and checksums in that script, and
+`gnarl --update-baseline .` run with the new release.
 
 ### Measuring a rule on real code
 
