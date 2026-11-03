@@ -49,6 +49,7 @@ seldom take.
 |---|---|---|
 | [alias](alias.md) | An anonymous initializer assigned to a place that it reads after storing to it | `ext = .{ ext[1], ext[0] }` gives `{ ext[1], ext[1] }`, and `e = .{ .pair = f(e) }` hands `f` an `e` already tagged `.pair` |
 | [flush](flush.md) | A buffered file or stream writer, written to and never flushed | What is left in the buffer never arrives |
+| [positional](positional.md) | A writer on stdout or stderr made positional (`writer`, `File.Writer.init`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled |
 | [wipe](wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
 
 ## Builds and tests

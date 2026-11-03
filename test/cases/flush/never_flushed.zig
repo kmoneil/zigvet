@@ -13,7 +13,7 @@ fn greet(io: std.Io) !void {
 
 fn fail(io: std.Io) !u8 {
     var buf: [256]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &buf);
     const stderr = &stderr_writer.interface;
     try stderr.print("+toggle-quick-terminal is not supported on this platform.\n", .{});
     return 1;
@@ -29,7 +29,7 @@ fn greetFlushed(io: std.Io) !void {
 }
 fn failFlushed(io: std.Io) !u8 {
     var buf: [256]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &buf);
     try stderr_writer.interface.print("not supported\n", .{});
     try stderr_writer.flush();
     return 1;
