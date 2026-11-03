@@ -515,6 +515,34 @@ fn greet(io: std.Io) !void {
 }
 ```
 
+### positional
+
+A writer on stdout or stderr made positional. Redirected to a file, it
+writes from byte 0 at a position of its own, over what else is written
+there: under `prog > log 2>&1`, anything printed to stderr and the output
+overwrite each other.
+
+```zig
+fn report(io: std.Io, rows: usize) !void {
+    var buf: [256]u8 = undefined;
+    var out = std.Io.File.stdout().writer(io, &buf);
+    try out.interface.print("{d} rows\n", .{rows});
+    try out.interface.flush();
+}
+```
+
+Make it streaming, which writes at the file's offset: `writerStreaming`,
+or `File.Writer.initStreaming` in place of `.init`.
+
+```zig
+fn report(io: std.Io, rows: usize) !void {
+    var buf: [256]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(io, &buf);
+    try out.interface.print("{d} rows\n", .{rows});
+    try out.interface.flush();
+}
+```
+
 ### wipe
 
 A local wiped with `@memset` as the last thing done with it. Release

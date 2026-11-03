@@ -577,6 +577,7 @@ test {
     _ = @import("freed.zig");
     _ = @import("grow.zig");
     _ = @import("hoard.zig");
+    _ = @import("positional.zig");
     _ = @import("kept.zig");
     _ = @import("leak.zig");
     _ = @import("owner.zig");

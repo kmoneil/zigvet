@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -60,6 +60,7 @@ pub const Finding = struct {
         unrun: Unrun,
         leak: Leak,
         hoard: Hoard,
+        positional: Positional,
         allow: Allow,
     };
 
@@ -245,6 +246,16 @@ pub const Finding = struct {
         target: []const u8,
     };
 
+    pub const Positional = struct {
+        /// The call that makes the writer, as written up to its arguments:
+        /// `std.Io.File.stdout().writer(...)`, `.init(...)`.
+        call: []const u8,
+        /// `stdout` or `stderr`.
+        stream: []const u8,
+        /// What makes a streaming writer instead: `writerStreaming`.
+        fix: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -280,6 +291,7 @@ pub const Finding = struct {
             .unrun => .unrun,
             .leak => .leak,
             .hoard => .hoard,
+            .positional => .positional,
             .allow => null,
         };
     }
@@ -379,6 +391,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .hoard => |h| try w.print("`{s}` takes memory from `{s}` that fuzz target '{s}' never gives back, so it piles up over every input, and the runner's leak check sees only std.testing.allocator", .{
             h.call, h.allocator, h.target,
+        }),
+        .positional => |p| try w.print("`{s}` makes a positional writer on {s}: redirected to a file, it writes from byte 0 at a position of its own, over what else is written there (`> log 2>&1`, a shell's `echo`, `>>` on macOS)", .{
+            p.call, p.stream,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),

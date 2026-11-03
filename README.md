@@ -16,7 +16,7 @@ a buffered writer never flushed, tests that never run. `go vet` is the
 closest analog: not style, which `zig fmt` and the existing linters cover,
 but silent wrongness.
 
-- **Twenty rules.** Sixteen have found real bugs: in Zig's own standard
+- **Twenty-one rules.** Seventeen have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -205,6 +205,7 @@ seldom take.
 |---|---|---|
 | [alias](docs/rules/alias.md) | An anonymous initializer assigned to a place that it reads after storing to it | `ext = .{ ext[1], ext[0] }` gives `{ ext[1], ext[1] }`, and `e = .{ .pair = f(e) }` hands `f` an `e` already tagged `.pair` |
 | [flush](docs/rules/flush.md) | A buffered file or stream writer, written to and never flushed | What is left in the buffer never arrives |
+| [positional](docs/rules/positional.md) | A writer on stdout or stderr made positional (`writer`, `File.Writer.init`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled |
 | [wipe](docs/rules/wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
 
 ### Builds and tests

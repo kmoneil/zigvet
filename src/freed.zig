@@ -227,8 +227,8 @@ fn borrowing(tree: *const Ast, call: Node.Index, options: Node.Index) bool {
 }
 
 /// The value of the `const name` that the function around `node` declares
-/// before it, if it declares one.
-fn constInFn(tree: *const Ast, node: Node.Index, name: []const u8) ?Node.Index {
+/// before it, if it declares one. positional reads a stream's name with it.
+pub fn constInFn(tree: *const Ast, node: Node.Index, name: []const u8) ?Node.Index {
     const at = tree.nodeMainToken(node);
     var body_start: ?Ast.TokenIndex = null;
     for (0..tree.nodes.len) |i| {
