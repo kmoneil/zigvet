@@ -172,7 +172,7 @@ found in real code.
 | Rule | Catches | What goes wrong |
 |---|---|---|
 | [escape](docs/rules/escape.md) | A pointer or slice into stack memory that leaves the function that made it | The caller reads memory the next call writes over |
-| [freed](docs/rules/freed.md) | A function that returns what its own `defer` frees | The caller reads freed memory |
+| [freed](docs/rules/freed.md) | A function that returns what its own `defer` frees, or a `std.json` value parsed out of it | The caller reads freed memory |
 | [grow](docs/rules/grow.md) | A pointer into a list's items, kept across a call that can move them | The pointer reads freed memory once the list grows |
 | [copy](docs/rules/copy.md) | A `std.Io.Writer` or `Reader` interface copied out of the struct it belongs to | The first flush reads whatever sits next to the copy as its parent, and crashes |
 

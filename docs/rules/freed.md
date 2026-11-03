@@ -25,6 +25,26 @@ The fix is to hand the memory over: `return list.toOwnedSlice(gpa);`,
 which empties the list so the `defer` frees nothing, or an `errdefer` in
 place of the `defer`.
 
+## A value parsed out of it
+
+```zig
+const json = try gpa.dupe(u8, text);
+defer gpa.free(json);
+return std.json.parseFromSlice(Config, gpa, json, .{}); // strings point into json
+```
+
+`std.json.parseFromSlice` and `parseFromSliceLeaky` default to
+`.allocate = .alloc_if_needed`: a string with no escape in it is a slice
+of the input, not a copy. So the value's strings point into `json`, which
+the `defer` frees as the function returns. It compiles clean in every build
+mode, `Parsed.deinit` frees its arena without complaint, and the value
+reads right until something reuses the freed bytes. A string that holds an
+escape (`\"`, `é`) is copied, so the same code works on some inputs
+and not others.
+
+The fix is `.{ .allocate = .alloc_always }`, which copies every string into
+the value's own memory, or keeping the input alive as long as the value.
+
 ## What freed reports
 
 `defer x.deinit(...)`, `defer a.free(x)`, `defer a.destroy(x)` or
@@ -35,7 +55,16 @@ itself, `x.items`, `.ptr` of a view, a slice or `&` of an element of one,
 `x.written()`, `x.keys()`, `x.values()` or `x.slice()`, a `std.mem` or
 `std.fmt` call that returns part of its argument
 (`std.mem.trim(u8, x.items, " ")`), a cast of one, an initializer with one
-as a field, or a branch of an `if` or `switch` that gives one.
+as a field, a branch of an `if` or `switch` that gives one, either side of
+a `catch` or `orelse`, what a `try` gives, or a `const` declared after the
+`defer` with one as its value (`const items = x.items; return items;`).
+
+A value `std.json.parseFromSlice` or `parseFromSliceLeaky` parses out of a
+view of `x` is one too, unless its options set `.allocate` to anything but
+`.alloc_if_needed`. The options are read where the call writes them out,
+or from a `const` the function declares with an initializer; options from
+anywhere else (a parameter, a call) are not known, and not reported. Nor is
+a value of a number or `bool` type, which holds no string.
 
 Not reported: a call that takes `x` and returns something else
 (`return parse(x.items)`, `return gpa.dupe(u8, x.items)`) or hands it over
@@ -49,5 +78,12 @@ Over Zig 0.17.0's standard library and compiler sources, the application
 repos and fourteen well-known public Zig projects, freed reports nothing:
 the first test that reads the result fails, so the bug is fixed before it
 lands, and the rule's worth is in reporting it at the edit.
+
+The `std.json` case turned up in a test harness that read a fixture's
+JSON, parsed it, freed the text with `defer` and returned the `Parsed`: the
+delimiter it held no longer matched, so the parser under test split no
+field. In the public projects, the two functions that return a value
+parsed out of what their `defer` frees, in ZLS and Roc, both pass
+`.allocate = .alloc_always`.
 
 [All rules](index.md)

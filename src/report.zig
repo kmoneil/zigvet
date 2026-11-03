@@ -177,10 +177,17 @@ pub const Finding = struct {
     };
 
     pub const Freed = struct {
-        /// What is returned, as written: `list.items`.
+        /// What is returned, as written: `list.items`, or for a parse
+        /// `std.json.parseFromSlice(...)`.
         returned: []const u8,
         /// The deferred call that frees it, as written: `list.deinit(gpa)`.
         release: []const u8,
+        /// The `const` that holds it until the `return`, if one does:
+        /// `parsed`.
+        through: []const u8 = "",
+        /// For a parse, the input its strings can point into, as written:
+        /// `json`.
+        borrowed: []const u8 = "",
     };
 
     pub const Grow = struct {
@@ -344,9 +351,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
             u.lock, u.fails,
         }),
         .wipe => |p| try w.print("nothing reads '{s}' after this `@memset`, so release builds drop it and what it held stays in memory", .{p.local}),
-        .freed => |f| try w.print("returns `{s}`, which `defer {s}` above frees before the caller gets it", .{
-            f.returned, f.release,
-        }),
+        .freed => |f| try writeFreed(w, f),
         .grow => |g| if (g.pointer.len == 0)
             try w.print("`{s}` can move {s}, and the `for` around it walks on through the old memory on its next turn", .{
                 g.call, g.moved,
@@ -387,6 +392,16 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
 
 /// fit's message: the number, what it can need alone and, when the rest
 /// of the format adds to it, with the rest, against what the buffer holds.
+fn writeFreed(w: *Writer, f: Finding.Freed) Writer.Error!void {
+    try w.print("returns `{s}`", .{f.returned});
+    if (f.through.len != 0) try w.print(" as `{s}`", .{f.through});
+    if (f.borrowed.len != 0) {
+        try w.print(", whose strings can point into `{s}`, which `defer {s}` above frees before the caller reads them", .{ f.borrowed, f.release });
+    } else {
+        try w.print(", which `defer {s}` above frees before the caller gets it", .{f.release});
+    }
+}
+
 fn writeFit(w: *Writer, f: Finding.Fit) Writer.Error!void {
     if (f.number) |number| {
         try w.print("`{s}` of {s} '{s}' can need {d} bytes", .{ f.placeholder, number, f.value, f.need });

@@ -22,7 +22,7 @@ src/fit.zig	Rule.callerPicks	17	24	24	3	3	3
 src/fit.zig	Rule.chosen	35	73	58	4	2	2
 src/flush.zig	check	19	33	32	4	2	2
 src/flush.zig	use	19	33	21	3	4	4
-src/freed.zig	check	19	53	35	5	2	2
+src/freed.zig	check	18	48	30	4	2	2
 src/freed.zig	isView	24	27	38	3	3	3
 src/grow.zig	Rule.insertsOnlyToLeave	20	19	29	1	1	1
 src/grow.zig	Rule.pointsInto	20	19	32	2	1	1
