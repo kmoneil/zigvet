@@ -32,6 +32,28 @@
 //! field of the context that the fuzz call writes as one
 //! (`std.testing.fuzz(Context{ .gpa = std.heap.page_allocator }, ...)`).
 //!
+//! A function handed to a wrapper around the fuzz call is a target too
+//! (#136): a function declared at the top of its file whose fuzz target
+//! calls one of its parameters, as a runner that also replays seeded
+//! inputs under a plain `zig build test` does:
+//!
+//!     pub fn run(context: anytype, comptime testOne: fn (@TypeOf(context), *Draw) anyerror!void, seeded: usize) anyerror!void {
+//!         try std.testing.fuzz(context, struct {
+//!             fn one(ctx: @TypeOf(context), smith: *Smith) anyerror!void {
+//!                 var draw: Draw = .{ .smith = smith };
+//!                 try testOne(ctx, &draw);
+//!             }
+//!         }.one, .{});
+//!         ...
+//!     }
+//!
+//! A call to it, by name in its own file or through the constants that
+//! import it in another (`fuzzing.run({}, fuzzRender, 400)`,
+//! `lib.fuzzing.run(...)`), has the argument in that parameter's place read
+//! as a target, with the argument in the place of the parameter the
+//! wrapper hands the fuzz call as its context as the target's context.
+//! Across files this needs the wrapper's file checked in the same run.
+//!
 //! What holds the memory is the local the call's result is bound to, or
 //! else the receiver it is called on (`seen` of `seen.append`). The call is
 //! reported unless the target gives it back: a call there, deferred or not
@@ -66,24 +88,107 @@ const expect = @import("expect.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 const types = @import("types.zig");
+const unrun = @import("unrun.zig");
 
 /// Appends a finding for every call in a fuzz target that takes memory from
 /// an allocator the runner does not check and that the target never gives
 /// back. Everything is allocated with `arena`.
-pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
+/// `wrapped`, when the run checks other files with this one, says which
+/// of them declare a wrapper around the fuzz call and how this file's
+/// names reach them.
+pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding), wrapped: ?Wrapped) Allocator.Error!void {
     // Most files fuzz nothing: look for the call, which `zig fmt` writes
-    // `.fuzz(`, before building anything.
-    if (std.mem.find(u8, tree.source, ".fuzz(") == null) return;
+    // `.fuzz(`, and for a call to another file's wrapper around one,
+    // before building anything.
+    const fuzzes = std.mem.find(u8, tree.source, ".fuzz(") != null;
+    const across: []const Wrapped.Call = if (wrapped) |w| try w.callsIn(arena, tree) else &.{};
+    if (!fuzzes and across.len == 0) return;
     var rule: Rule = .{ .arena = arena, .tree = tree, .findings = findings, .types = try .init(arena, tree) };
-    for (0..tree.nodes.len) |i| {
-        const node: Node.Index = @fromBackingInt(@intCast(i));
-        var buffer: [1]Node.Index = undefined;
-        const call = tree.fullCall(&buffer, node) orelse continue;
-        if (!isFuzz(tree, call.ast.fn_expr) or call.ast.params.len < 2) continue;
-        const target = rule.targetOf(call.ast.params[1]) orelse continue;
-        try rule.target(target, call.ast.params[0]);
+    if (fuzzes) {
+        const own = try rule.wrappersHere();
+        for (0..tree.nodes.len) |i| try rule.fuzzedBy(@fromBackingInt(@intCast(i)), own);
     }
+    for (across) |c| try rule.throughWrapper(c.call, c.wrapper);
 }
+
+/// The wrappers around a fuzz call that `tree` declares, each named by
+/// its own copy: what the run knows of a file before any is checked.
+pub fn wrappers(arena: Allocator, tree: *const Ast) Allocator.Error![]const Wrapper {
+    if (std.mem.find(u8, tree.source, ".fuzz(") == null) return &.{};
+    var none: std.ArrayList(Finding) = .empty;
+    const rule: Rule = .{ .arena = arena, .tree = tree, .findings = &none, .types = try .init(arena, tree) };
+    return rule.wrappersHere();
+}
+
+/// A function that hands a function it is given to the fuzz call as its
+/// target's own: its fuzz target calls that parameter.
+pub const Wrapper = struct {
+    /// Its name, as its file declares it at the top.
+    name: []const u8,
+    /// The place of the parameter the target calls.
+    target: usize,
+    /// The place of the parameter it gives the fuzz call as its context,
+    /// when it gives one.
+    context: ?usize,
+};
+
+/// What the run knows of the other files checked with this one: each
+/// file's wrappers, by its place among them, which file a name written in
+/// this one leads to, and this file's place.
+pub const Wrapped = struct {
+    wrappers: []const []const Wrapper,
+    resolver: *unrun.Resolver,
+    file: usize,
+
+    const Call = struct { call: Node.Index, wrapper: Wrapper };
+
+    /// The calls in `tree`, this file, to a wrapper another file declares,
+    /// through the constants that import it: `fuzzing.run(...)`.
+    fn callsIn(w: Wrapped, arena: Allocator, tree: *const Ast) Allocator.Error![]const Call {
+        var found: std.ArrayList(Call) = .empty;
+        for (0..tree.nodes.len) |i| {
+            const node: Node.Index = @fromBackingInt(@intCast(i));
+            var buffer: [1]Node.Index = undefined;
+            const call = tree.fullCall(&buffer, node) orelse continue;
+            if (tree.nodeTag(call.ast.fn_expr) != .field_access) continue;
+            const receiver, const method = tree.nodeData(call.ast.fn_expr).node_and_token;
+            const name = tree.tokenSlice(method);
+            if (!w.named(name)) continue;
+            const t = try w.fileOf(arena, tree, receiver) orelse continue;
+            if (t == w.file) continue;
+            for (w.wrappers[t]) |wrapper| {
+                if (std.mem.eql(u8, wrapper.name, name)) try found.append(arena, .{ .call = node, .wrapper = wrapper });
+            }
+        }
+        return found.items;
+    }
+
+    /// Whether a wrapper in any file has the name `name`.
+    fn named(w: Wrapped, name: []const u8) bool {
+        for (w.wrappers) |file| for (file) |wrapper| {
+            if (std.mem.eql(u8, wrapper.name, name)) return true;
+        };
+        return false;
+    }
+
+    /// The file `node`, written in this file, names: a constant set to an
+    /// `@import`, and the declarations after it (`lib.fuzzing`).
+    fn fileOf(w: Wrapped, arena: Allocator, tree: *const Ast, node: Node.Index) Allocator.Error!?usize {
+        var fields: std.ArrayList([]const u8) = .empty;
+        var root = node;
+        while (tree.nodeTag(root) == .field_access) {
+            const receiver, const field = tree.nodeData(root).node_and_token;
+            try fields.insert(arena, 0, tree.tokenSlice(field));
+            root = receiver;
+        }
+        if (tree.nodeTag(root) != .identifier) return null;
+        return w.resolver.fileOf(w.file, .{
+            .root = .{ .name = tree.tokenSlice(tree.nodeMainToken(root)) },
+            .fields = fields.items,
+            .use = .plain,
+        });
+    }
+};
 
 const hint = "take it from std.testing.allocator, which the runner checks after each input, or give it back before the input ends (`defer`)";
 
@@ -129,9 +234,85 @@ const Rule = struct {
         }
     }
 
+    /// Reads the target of `node` when it is a fuzz call, or a call by name
+    /// to one of `own`, the wrappers the file declares.
+    fn fuzzedBy(r: *Rule, node: Node.Index, own: []const Wrapper) Allocator.Error!void {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node) orelse return;
+        if (isFuzz(tree, call.ast.fn_expr)) {
+            if (call.ast.params.len < 2) return;
+            const fn_decl = r.targetOf(call.ast.params[1]) orelse return;
+            return r.target(fn_decl, call.ast.params[0]);
+        }
+        if (tree.nodeTag(call.ast.fn_expr) != .identifier) return;
+        const name = tree.tokenSlice(tree.nodeMainToken(call.ast.fn_expr));
+        for (own) |w| if (std.mem.eql(u8, w.name, name)) return r.throughWrapper(node, w);
+    }
+
+    /// Reads the function `node`, a call to the wrapper `w`, hands it, as a
+    /// target given the argument in the wrapper's context place.
+    fn throughWrapper(r: *Rule, node: Node.Index, w: Wrapper) Allocator.Error!void {
+        var buffer: [1]Node.Index = undefined;
+        const args = r.tree.fullCall(&buffer, node).?.ast.params;
+        if (w.target >= args.len) return;
+        const fn_decl = r.targetOf(args[w.target]) orelse return;
+        const context = if (w.context) |c| if (c < args.len) args[c] else null else null;
+        try r.target(fn_decl, context);
+    }
+
+    /// The wrappers the file declares: see `wrapperOf`.
+    fn wrappersHere(r: *const Rule) Allocator.Error![]const Wrapper {
+        var found: std.ArrayList(Wrapper) = .empty;
+        for (0..r.tree.nodes.len) |i| {
+            if (try r.wrapperOf(@fromBackingInt(@intCast(i)))) |w| try found.append(r.arena, w);
+        }
+        return found.items;
+    }
+
+    /// The wrapper `node` makes of the function around it, when `node` is a
+    /// fuzz call whose target calls a parameter of that function, and the
+    /// function is declared at the top of the file.
+    fn wrapperOf(r: *const Rule, node: Node.Index) Allocator.Error!?Wrapper {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node) orelse return null;
+        if (!isFuzz(tree, call.ast.fn_expr) or call.ast.params.len < 2) return null;
+        const fn_decl = r.enclosingFn(node) orelse return null;
+        if (r.types.parents[@backingInt(fn_decl)].unwrap() != .root) return null;
+        const target_fn = r.targetOf(call.ast.params[1]) orelse return null;
+        var proto_buffer: [1]Node.Index = undefined;
+        const proto = tree.fullFnProto(&proto_buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try descendants(r.arena, tree, tree.nodeData(target_fn).node_and_node[1], &nodes);
+        const called = for (nodes.items) |n| {
+            var inner_buffer: [1]Node.Index = undefined;
+            const inner = tree.fullCall(&inner_buffer, n) orelse continue;
+            if (paramIndex(tree, proto, inner.ast.fn_expr)) |at| break at;
+        } else return null;
+        return .{
+            .name = try r.arena.dupe(u8, tree.tokenSlice(proto.name_token orelse return null)),
+            .target = called,
+            .context = paramIndex(tree, proto, call.ast.params[0]),
+        };
+    }
+
+    /// The function `node` is in, unless a `test` block holds it first.
+    fn enclosingFn(r: *const Rule, node: Node.Index) ?Node.Index {
+        var up = r.types.parents[@backingInt(node)].unwrap();
+        while (up) |parent| : (up = r.types.parents[@backingInt(parent)].unwrap()) {
+            switch (r.tree.nodeTag(parent)) {
+                .fn_decl => return parent,
+                .test_decl => return null,
+                else => {},
+            }
+        }
+        return null;
+    }
+
     /// Reports the calls in `fn_decl`, a fuzz target given `context`, that
     /// take memory it never gives back.
-    fn target(r: *Rule, fn_decl: Node.Index, context: Node.Index) Allocator.Error!void {
+    fn target(r: *Rule, fn_decl: Node.Index, context: ?Node.Index) Allocator.Error!void {
         const tree = r.tree;
         var buffer: [1]Node.Index = undefined;
         const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
@@ -390,6 +571,20 @@ const Rule = struct {
     }
 };
 
+/// The place of the parameter of `proto` that `node` names, when it names
+/// one.
+fn paramIndex(tree: *const Ast, proto: Ast.full.FnProto, node: Node.Index) ?usize {
+    if (tree.nodeTag(node) != .identifier) return null;
+    const name = tree.tokenSlice(tree.nodeMainToken(node));
+    var params = proto.iterate(tree);
+    var i: usize = 0;
+    while (params.next()) |param| : (i += 1) {
+        const token = param.name_token orelse continue;
+        if (std.mem.eql(u8, tree.tokenSlice(token), name)) return i;
+    }
+    return null;
+}
+
 /// Whether `node` is `null`, which the parser reads as a name.
 fn isNull(tree: *const Ast, node: Node.Index) bool {
     return tree.nodeTag(node) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "null");
@@ -434,7 +629,7 @@ fn expectHoard(source: [:0]const u8, expected: []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     var findings: std.ArrayList(Finding) = .empty;
-    try check(arena_state.allocator(), &tree, &findings);
+    try check(arena_state.allocator(), &tree, &findings, null);
     std.mem.sort(Finding, findings.items, {}, struct {
         fn before(_: void, a: Finding, b: Finding) bool {
             return a.offset < b.offset;
@@ -514,6 +709,32 @@ test "a fuzz target that keeps memory past one input (#132)" {
         \\23:63 bag.put from std.heap.page_allocator in bagged
         \\25:96 std.heap.raw_c_allocator.alloc from std.heap.raw_c_allocator in testOne
         \\44:100 std.heap.page_allocator.alloc from std.heap.page_allocator in f
+        \\
+    );
+}
+
+test "a function handed to a wrapper around the fuzz call, in the same file (#136)" {
+    try expectHoard(
+        \\const std = @import("std");
+        \\const Smith = std.testing.Smith;
+        \\pub fn run(context: anytype, comptime testOne: fn (@TypeOf(context), *Smith) anyerror!void, seeded: usize) anyerror!void { try std.testing.fuzz(context, struct { fn one(ctx: @TypeOf(context), smith: *Smith) anyerror!void { try testOne(ctx, smith); } }.one, .{}); _ = seeded; }
+        \\fn leaky(_: void, _: *Smith) anyerror!void { _ = try std.heap.page_allocator.alloc(u8, 1); }
+        \\fn withGpa(ctx: Ctx, _: *Smith) anyerror!void { var list: std.ArrayList(u8) = .empty; try list.append(ctx.gpa, 1); }
+        \\fn freed(_: void, _: *Smith) anyerror!void { const a = try std.heap.page_allocator.alloc(u8, 1); std.heap.page_allocator.free(a); }
+        \\fn checked(ctx: Ctx, _: *Smith) anyerror!void { var list: std.ArrayList(u8) = .empty; try list.append(ctx.gpa, 1); }
+        \\fn fixed(comptime testOne: fn (void, *Smith) anyerror!void) anyerror!void { _ = testOne; try std.testing.fuzz({}, plain, .{}); }
+        \\fn plain(_: void, _: *Smith) anyerror!void {}
+        \\fn passedOnly(_: void, _: *Smith) anyerror!void { _ = try std.heap.page_allocator.alloc(u8, 1); }
+        \\test "fuzz" {
+        \\    try run({}, leaky, 10);
+        \\    try run(Ctx{ .gpa = std.heap.page_allocator }, withGpa, 10);
+        \\    try run({}, freed, 10);
+        \\    try run(Ctx{ .gpa = std.testing.allocator }, checked, 10);
+        \\    try fixed(passedOnly);
+        \\}
+    ,
+        \\4:54 std.heap.page_allocator.alloc from std.heap.page_allocator in leaky
+        \\5:91 list.append from ctx.gpa in withGpa
         \\
     );
 }

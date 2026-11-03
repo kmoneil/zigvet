@@ -33,10 +33,20 @@ const Finding = report.Finding;
 
 pub const Error = Allocator.Error || Writer.Error;
 
+/// What a file's rules learn from the other files checked in the same
+/// run.
+pub const Across = struct {
+    /// What the rules that read every file found in this one: unrun's.
+    extra: []const Finding = &.{},
+    /// For hoard: the wrappers around a fuzz call the files declare, and
+    /// how this file's names reach them.
+    wrapped: ?hoard.Wrapped = null,
+};
+
 /// Writes `source`'s parse errors or, if it parses, its findings to `out`,
-/// naming the file `path`, with `extra`, what the rules that read every
-/// file found in it. Returns how many it wrote.
-pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, extra: []const Finding, out: *report.Out) Error!usize {
+/// naming the file `path`, with what `across` holds for it. Returns how
+/// many it wrote.
+pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, across: Across, out: *report.Out) Error!usize {
     var tree = try Ast.parse(gpa, source, .{});
     defer tree.deinit(gpa);
 
@@ -50,7 +60,7 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, extra: 
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
 
-    const kept = try findings(arena_state.allocator(), &tree, extra);
+    const kept = try findings(arena_state.allocator(), &tree, across);
     for (kept) |finding| try out.finding(path, report.location(source, finding.offset), finding);
     return kept.len;
 }
@@ -59,15 +69,15 @@ pub fn vetSource(gpa: Allocator, path: []const u8, source: [:0]const u8, extra: 
 fn vetText(path: []const u8, source: [:0]const u8, w: *Writer) Error!usize {
     var out: report.Out = .init(std.testing.allocator, w, .text);
     defer out.deinit();
-    return vetSource(std.testing.allocator, path, source, &.{}, &out);
+    return vetSource(std.testing.allocator, path, source, .{}, &out);
 }
 
 /// Runs every rule over `tree` and returns the findings no allow comment
-/// covers, of those and `extra`, and a report for each allow comment that
-/// covers none, in source order. Allocated with `arena`.
-pub fn findings(arena: Allocator, tree: *const Ast, extra: []const Finding) Allocator.Error![]Finding {
+/// covers, of those and `across.extra`, and a report for each allow
+/// comment that covers none, in source order. Allocated with `arena`.
+pub fn findings(arena: Allocator, tree: *const Ast, across: Across) Allocator.Error![]Finding {
     var all: std.ArrayList(Finding) = .empty;
-    try all.appendSlice(arena, extra);
+    try all.appendSlice(arena, across.extra);
     try escape.check(arena, tree, &all);
     try alias.check(arena, tree, &all);
     try cancel.check(arena, tree, &all);
@@ -86,7 +96,7 @@ pub fn findings(arena: Allocator, tree: *const Ast, extra: []const Finding) Allo
     try flush.check(arena, tree, &all);
     try cached.check(arena, tree, &all);
     try leak.check(arena, tree, &all);
-    try hoard.check(arena, tree, &all);
+    try hoard.check(arena, tree, &all, across.wrapped);
     return keep(arena, tree.source, all.items);
 }
 

@@ -478,6 +478,23 @@ fn hint(arena: Allocator, importer: Summary, path: []const u8, runs: bool) Alloc
     return arena.print("{s}, and reach that file from a test too", .{where});
 }
 
+/// Which file a name written in one of the files checked leads to: the
+/// constants set to an `@import`, and the declarations after them, as
+/// `check` follows them. For hoard, which reads a call to a function
+/// another file declares.
+pub const Resolver = struct {
+    reach: Reach,
+
+    pub fn init(arena: Allocator, files: []const Summary) Allocator.Error!Resolver {
+        return .{ .reach = try .init(arena, files) };
+    }
+
+    /// The file `c`, written in file `f`, ends on, if it ends on one.
+    pub fn fileOf(r: *Resolver, f: usize, c: Chain) ?usize {
+        return r.reach.chainTarget(f, c, 0);
+    }
+};
+
 const Reach = struct {
     arena: Allocator,
     files: []const Summary,

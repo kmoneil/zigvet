@@ -9,6 +9,7 @@ const Ast = std.zig.Ast;
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
+const hoard = @import("hoard.zig");
 const report = @import("report.zig");
 const unrun = @import("unrun.zig");
 const vet = @import("vet.zig");
@@ -110,18 +111,22 @@ fn fileName(line: []const u8) ?[]const u8 {
 fn vetFiles(arena: Allocator, examples: []const File) ![]const Finding {
     const trees = try arena.alloc(Ast, examples.len);
     const summaries = try arena.alloc(unrun.Summary, examples.len);
-    for (examples, trees, summaries) |file, *tree, *summary| {
+    const fuzz_wrappers = try arena.alloc([]const hoard.Wrapper, examples.len);
+    for (examples, trees, summaries, fuzz_wrappers) |file, *tree, *summary, *wrappers| {
         tree.* = try Ast.parse(arena, file.source, .{});
         if (tree.errors.len > 0) {
             std.debug.print("skill: this does not parse:\n{s}\n", .{file.source});
             return error.ExampleDoesNotParse;
         }
         summary.* = try unrun.summarize(std.testing.allocator, arena, file.path, tree);
+        wrappers.* = try hoard.wrappers(arena, tree);
     }
+    var resolver: unrun.Resolver = try .init(arena, summaries);
     var all: std.ArrayList(Finding) = .empty;
-    for (trees, try unrun.check(arena, summaries)) |*tree, *found| {
-        const extra: []const Finding = if (found.*) |*f| f[0..1] else &.{};
-        try all.appendSlice(arena, try vet.findings(arena, tree, extra));
+    for (trees, try unrun.check(arena, summaries), 0..) |*tree, *found, f| {
+        const extra: []const Finding = if (found.*) |*first| first[0..1] else &.{};
+        const wrapped: hoard.Wrapped = .{ .wrappers = fuzz_wrappers, .resolver = &resolver, .file = f };
+        try all.appendSlice(arena, try vet.findings(arena, tree, .{ .extra = extra, .wrapped = wrapped }));
     }
     return all.items;
 }
@@ -214,7 +219,7 @@ test "the output the loop shows is what zigvet prints for escape's example" {
     defer out.deinit();
     var reports: report.Out = .init(gpa, &out.writer, .text);
     defer reports.deinit();
-    _ = try vet.vetSource(gpa, path, try arena.dupeSentinel(u8, escape.blocks[0], 0), &.{}, &reports);
+    _ = try vet.vetSource(gpa, path, try arena.dupeSentinel(u8, escape.blocks[0], 0), .{}, &reports);
     try std.testing.expectEqualStrings(shown, out.written());
 }
 
@@ -263,7 +268,7 @@ test "the skill names every format, and every field of a json report" {
     var reports: report.Out = .init(gpa, &out.writer, .json);
     defer reports.deinit();
     try reports.begin();
-    _ = try vet.vetSource(gpa, "a.zig", "fn f(a: u8) []const u8 {\n    return &.{a};\n}\n", &.{}, &reports);
+    _ = try vet.vetSource(gpa, "a.zig", "fn f(a: u8) []const u8 {\n    return &.{a};\n}\n", .{}, &reports);
     try reports.end();
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, out.written(), .{});
     const fields = parsed.array.items[0].object.keys();
