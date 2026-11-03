@@ -83,7 +83,10 @@ fn joined(gpa: Allocator, a: []const u8, b: []const u8) ![]u8 {
 ```
 
 Hand the memory over with `toOwnedSlice`, which empties the list so the
-`defer` frees nothing, or make the `defer` an `errdefer`.
+`defer` frees nothing, or make the `defer` an `errdefer`. A value
+`std.json.parseFromSlice` parsed out of what the `defer` frees is reported
+too: its strings point into the input unless the options say
+`.allocate = .alloc_always`.
 
 ```zig
 fn joined(gpa: Allocator, a: []const u8, b: []const u8) ![]u8 {
