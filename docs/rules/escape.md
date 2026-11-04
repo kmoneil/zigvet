@@ -162,4 +162,11 @@ and four application repos, escape found two real defects, and three of
 the one false positive it accepts, which it now tells apart from the rest
 (above).
 
+Zig 0.17.1's standard library adds one false report it cannot tell apart:
+`Ip6Address.Unresolved.parse` points `text` at a buffer on its own stack
+only when the input has no `%`, and returns only the part of `text` after
+a `%`, so nothing in the buffer leaves. Telling so takes the buffer's
+bytes, which the syntax does not show
+([#163](https://github.com/kmoneil/zigvet/issues/163)).
+
 [All rules](index.md)

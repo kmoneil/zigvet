@@ -15,6 +15,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# setup-zig is given no version anywhere here, so every job installs the Zig
+# build.zig.zon names as minimum_zig_version: the one pin, which each tag
+# carries, so a release names the Zig that rebuilds it.
+
 # Every job name here is a required status check in the `main` ruleset;
 # renaming one means updating the ruleset in the same change.
 jobs:
@@ -25,8 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
       - name: zig fmt
         run: zig fmt --check build.zig build.zig.zon src test
       # zigvet over its own source, the way a consuming repo runs it. The
@@ -45,8 +47,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
       # gnarl, which `zig build test` runs: one release, pinned with its
       # checksums in the script.
       - name: install gnarl
@@ -70,8 +70,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
       # gnarl, which `zig build test` runs: one release, pinned with its
       # checksums in the script.
       - name: install gnarl
@@ -89,8 +87,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
       - name: zig build release
         run: zig build release && ls -l zig-out/release
 
@@ -109,7 +105,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.17.0
           use-cache: false
       - name: zig build release
         run: zig build release && cd zig-out/release && shasum -a 256 zigvet-* > SHA256SUMS && cat SHA256SUMS

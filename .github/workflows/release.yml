@@ -30,10 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No cache, here or in the build: a release builds from nothing it did
-      # not make.
+      # not make. No version either, here or in the build: setup-zig installs
+      # the Zig build.zig.zon names as minimum_zig_version, the one pin, and
+      # the Zig that rebuilds this tag's binaries.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.17.0
           use-cache: false
       - name: the tag is build.zig.zon's version
         if: github.event_name == 'push'
@@ -70,7 +71,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.17.0
           use-cache: false
       # The six targets and their names are build.zig's release_targets, the
       # same list ci.yml builds on every change.
