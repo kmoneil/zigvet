@@ -16,20 +16,20 @@
 # no binary pinned here.
 set -euo pipefail
 
-version=v0.5.0
+version=v0.6.0
 
 case "${RUNNER_OS}-${RUNNER_ARCH}" in
 Linux-X64)
 	asset=gnarl-linux-amd64
-	sum=1a65c1ff9d378761e826ec39123d04d2ee5b376c2f1e4fbaf6b7ba67acb07669
+	sum=d8cde27f1230843e5c65d9d1bade415609de3fa6bbc8d00acfb9e75617d00900
 	;;
 macOS-ARM64)
 	asset=gnarl-darwin-arm64
-	sum=e218811310776f768699147e9d036661f499a4f195bdc647899fd208454f1fa4
+	sum=16cb0f54f0db4ed4577fb9462c463de24ca03ef1350589f4e60c45f7573d74ee
 	;;
 Windows-X64)
 	asset=gnarl-windows-amd64.exe
-	sum=77cec42e4ff33772d47f822837ffc4e497bbce3b136931732940f34c350c802c
+	sum=8b701a912f529e10e56e317392e7ab38e27b90cef0413582e1b5a57160feac57
 	;;
 *)
 	echo "install-gnarl: no gnarl binary pinned for ${RUNNER_OS}-${RUNNER_ARCH}" >&2
