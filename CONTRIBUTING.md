@@ -1,6 +1,8 @@
 # Contributing
 
-zigvet builds with Zig 0.17.0 and has no dependencies. `zig build` leaves
+zigvet builds with Zig 0.17.1 and has no dependencies. CI and the release
+install the Zig `build.zig.zon` names as `minimum_zig_version`, the one
+place it is pinned. `zig build` leaves
 the binary in `zig-out/bin/`, `zig build test` runs every test,
 `zig build lint` runs zigvet over its own `src/`, and
 `zig build complexity` runs [gnarl](https://github.com/kmoneil/gnarl)'s

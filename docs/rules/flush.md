@@ -46,9 +46,11 @@ reader; and a writer handed to a call, which only the callee can judge.
 Over Zig 0.17.0's standard library and compiler sources and the
 application repos, flush reports one, real, in the compiler's build
 runner, which saves a fuzz crash input through a buffered writer it never
-flushes. Over fourteen well-known public Zig projects, four in a terminal
-emulator: three real (two commands whose error message is lost before
-they exit 1, and one whose plain output loses what is left in its 4 KB
-buffer at the end) and one a test that writes a file it only deletes.
+flushes. Zig 0.17.1 fixes it, flushing that writer, and flush reports
+nothing in its sources. Over fourteen well-known public Zig projects, four
+in a terminal emulator: three real (two commands whose error message is
+lost before they exit 1, and one whose plain output loses what is left in
+its 4 KB buffer at the end) and one a test that writes a file it only
+deletes.
 
 [All rules](index.md)

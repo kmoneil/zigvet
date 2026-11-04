@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/kmoneil/zigvet/actions/workflows/ci.yml/badge.svg)](https://github.com/kmoneil/zigvet/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kmoneil/zigvet)](https://github.com/kmoneil/zigvet/releases/latest)
-[![zig](https://img.shields.io/badge/zig-0.17.0-f7a41d)](https://ziglang.org/download/)
+[![zig](https://img.shields.io/badge/zig-0.17.1-f7a41d)](https://ziglang.org/download/)
 [![docs](https://img.shields.io/badge/docs-kmoneil.github.io%2Fzigvet-blue)](https://kmoneil.github.io/zigvet/)
 [![license](https://img.shields.io/github/license/kmoneil/zigvet)](LICENSE)
 
@@ -52,7 +52,7 @@ stack slot. The fix is one word: `&.{comptime Scope.monitoring.url()}`.
 | macOS, Linux | `brew install kmoneil/tap/zigvet` |
 | Windows | `scoop bucket add kmoneil https://github.com/kmoneil/scoop-bucket` then `scoop install kmoneil/zigvet` |
 | Anywhere | a binary from the [latest release](https://github.com/kmoneil/zigvet/releases/latest) |
-| From source | `zig build -Doptimize=ReleaseSafe` with Zig 0.17.0, which leaves it in `zig-out/bin/` |
+| From source | `zig build -Doptimize=ReleaseSafe` with Zig 0.17.1, which leaves it in `zig-out/bin/` |
 
 Homebrew and Scoop move to each release by themselves, after checking every
 file's build provenance. Each release carries a binary for Linux, macOS and
@@ -76,13 +76,17 @@ chmod +x zigvet-darwin-arm64 && mv zigvet-darwin-arm64 /usr/local/bin/zigvet
 A binary downloaded with a browser on macOS is quarantined; clear it with
 `xattr -d com.apple.quarantine zigvet`. `curl` does not set the flag.
 
-From v0.2.1 on, releases are also reproducible: a tag built with Zig 0.17.0
-from ziglang.org gives the same bytes wherever it is built, so a release
-can be checked without trusting the workflow that made it. CI builds every
-change on Linux and on macOS and compares them. To check one yourself:
+From v0.2.1 on, releases are also reproducible: a tag built with the Zig
+its `build.zig.zon` names as `minimum_zig_version`, from ziglang.org, gives
+the same bytes wherever it is built, so a release can be checked without
+trusting the workflow that made it. That is the Zig its CI and release ran
+(0.17.0 up to v0.24.0, 0.17.1 after); another Zig gives other bytes. CI
+builds every change on Linux and on macOS and compares them. To check one
+yourself:
 
 ```sh
 git clone --depth 1 --branch <tag> https://github.com/kmoneil/zigvet && cd zigvet
+grep minimum_zig_version build.zig.zon   # the Zig to build it with
 zig build release && cd zig-out/release
 curl -fLO https://github.com/kmoneil/zigvet/releases/download/<tag>/SHA256SUMS
 shasum -a 256 --check SHA256SUMS

@@ -58,7 +58,7 @@ stack slot. The fix is one word: `&.{comptime Scope.monitoring.url()}`.
 | macOS, Linux | `brew install kmoneil/tap/zigvet` |
 | Windows | `scoop bucket add kmoneil https://github.com/kmoneil/scoop-bucket` then `scoop install kmoneil/zigvet` |
 | Anywhere | a binary from the [latest release](https://github.com/kmoneil/zigvet/releases/latest), for Linux, macOS and Windows on x86-64 and arm64 |
-| From source | `zig build -Doptimize=ReleaseSafe` with Zig 0.17.0, which leaves it in `zig-out/bin/` |
+| From source | `zig build -Doptimize=ReleaseSafe` with Zig 0.17.1, which leaves it in `zig-out/bin/` |
 
 Every release file comes with `SHA256SUMS` and a build-provenance
 attestation, and releases build reproducibly; the
