@@ -36,6 +36,14 @@ fn initStreaming(io: Io) !void {
     try out.interface.print("result line 1\n", .{});
     try out.interface.flush();
 }
+// Io.failing fails every write, so nothing reaches stdout (#164): Zig
+// 0.17.1's own test of positional mode.
+fn failing() !void {
+    var buf: [256]u8 = undefined;
+    var out: Io.File.Writer = .init(.stdout(), .failing, &buf);
+    try out.interface.writeAll("hello");
+    try std.testing.expectError(error.WriteFailed, out.interface.flush());
+}
 fn toFile(io: Io, file: Io.File) !void {
     var buf: [256]u8 = undefined;
     var out = file.writer(io, &buf);
@@ -48,6 +56,7 @@ comptime {
     _ = &warn;
     _ = &streaming;
     _ = &initStreaming;
+    _ = &failing;
     _ = &toFile;
 }
 

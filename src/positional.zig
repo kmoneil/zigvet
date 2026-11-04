@@ -33,8 +33,11 @@
 //! only for a terminal, so it is positional for a file too.
 //!
 //! Not reported: the streaming writers; a writer on any other file, which
-//! the program opens and is the only writer of; a reader; and a file the
-//! function is handed, which only its caller knows.
+//! the program opens and is the only writer of; a writer made with
+//! `Io.failing` (`.failing`, `std.Io.failing`, or a `const` the function
+//! declares as one), which fails every write, so nothing reaches the stream
+//! to be written over (#164); a reader; and a file the function is handed,
+//! which only its caller knows.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -99,6 +102,7 @@ fn made(tree: *const Ast, node: Node.Index, typed: bool) ?Made {
             const name = tree.tokenSlice(method);
             // `std.Io.File.stdout().writer(io, &buf)`.
             if (std.mem.eql(u8, name, "writer") and call.ast.params.len == 2) {
+                if (failing(tree, node, call.ast.params[0])) return null;
                 const stream = streamOf(tree, node, receiver) orelse return null;
                 return .{ .stream = stream, .fix = "writerStreaming" };
             }
@@ -119,9 +123,28 @@ fn positionalInit(name: []const u8) bool {
 /// The `Made` for `File.Writer.init(file, io, buffer)` and the like, the
 /// call `node` with `params`.
 fn onStream(tree: *const Ast, node: Node.Index, params: []const Node.Index) ?Made {
-    if (params.len != 3) return null;
+    if (params.len != 3 or failing(tree, node, params[1])) return null;
     const stream = streamOf(tree, node, params[0]) orelse return null;
     return .{ .stream = stream, .fix = "initStreaming" };
+}
+
+/// Whether `io`, the io a writer is made with in the call `node`, is
+/// `Io.failing`, which fails every write: `.failing`, `Io.failing`,
+/// `std.Io.failing`, or a `const` the function declares as one.
+fn failing(tree: *const Ast, node: Node.Index, io: Node.Index) bool {
+    switch (tree.nodeTag(io)) {
+        .enum_literal => return std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(io)), "failing"),
+        .field_access => {
+            const receiver, const field = tree.nodeData(io).node_and_token;
+            return std.mem.eql(u8, tree.tokenSlice(field), "failing") and std.mem.endsWith(u8, tree.getNodeSource(receiver), "Io");
+        },
+        .identifier => {
+            const init = freed.constInFn(tree, node, tree.tokenSlice(tree.nodeMainToken(io))) orelse return false;
+            if (tree.nodeTag(init) == .identifier) return false;
+            return failing(tree, node, init);
+        },
+        else => return false,
+    }
 }
 
 /// `stdout` or `stderr`, when `file`, written in the call `node`, is one:
@@ -205,6 +228,7 @@ test "a positional writer on stdout or stderr (#8)" {
         \\fn caught(io: Io) void { var buf: [64]u8 = undefined; var w = File.Writer.initDetect(File.stdout(), io, &buf) catch return; _ = &w; }
         \\fn grouped(io: Io) void { var buf: [64]u8 = undefined; var w = (File.stderr()).writer(io, &buf); _ = &w; }
         \\fn once(io: Io) void { var buf: [64]u8 = undefined; var w: File.Writer = File.Writer.init(File.stdout(), io, &buf); _ = &w; }
+        \\fn param(failing: Io) void { var buf: [64]u8 = undefined; var w = std.Io.File.stdout().writer(failing, &buf); _ = &w; }
     ,
         \\1:63 std.Io.File.stdout().writer(...) on stdout (writerStreaming)
         \\2:81 .init(...) on stdout (initStreaming)
@@ -214,15 +238,20 @@ test "a positional writer on stdout or stderr (#8)" {
         \\6:63 File.Writer.initDetect(...) on stdout (initStreaming)
         \\7:64 (File.stderr()).writer(...) on stderr (writerStreaming)
         \\8:74 File.Writer.init(...) on stdout (initStreaming)
+        \\9:67 std.Io.File.stdout().writer(...) on stdout (writerStreaming)
         \\
     );
 }
 
-test "not reported: streaming, another file, stdin, a reader, a file handed in" {
+test "not reported: streaming, another file, a failing io, stdin, a reader, a file handed in" {
     try expectPositional(
         \\fn streaming(io: Io) void { var buf: [64]u8 = undefined; var w = std.Io.File.stdout().writerStreaming(io, &buf); _ = &w; }
         \\fn initStreaming(io: Io) void { var buf: [64]u8 = undefined; var w: Io.File.Writer = .initStreaming(.stdout(), io, &buf); _ = &w; }
         \\fn opened(io: Io, file: File) void { var buf: [64]u8 = undefined; var w = file.writer(io, &buf); _ = &w; }
+        \\fn failingTest() void { var buf: [64]u8 = undefined; var w: File.Writer = .init(.stdout(), .failing, &buf); _ = &w; }
+        \\fn failingNamed() void { var buf: [64]u8 = undefined; var w = std.Io.File.stdout().writer(std.Io.failing, &buf); _ = &w; }
+        \\fn failingInit() void { var buf: [64]u8 = undefined; var w = File.Writer.init(File.stderr(), Io.failing, &buf); _ = &w; }
+        \\fn failingConst() void { const io: Io = .failing; var buf: [64]u8 = undefined; var w = File.Writer.initDetect(File.stdout(), io, &buf) catch return; _ = &w; }
         \\fn input(io: Io) void { var buf: [64]u8 = undefined; var r = std.Io.File.stdin().reader(io, &buf); _ = &r; }
         \\fn reader(io: Io) void { var buf: [64]u8 = undefined; var r: Io.File.Reader = .init(.stdin(), io, &buf); _ = &r; }
         \\fn declares(io: Io) void { const out = Io.File.stdout(); _ = out; _ = io; }

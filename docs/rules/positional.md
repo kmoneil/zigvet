@@ -53,8 +53,10 @@ as one. `initDetect` picks streaming only for a terminal, so it is
 positional for a file too.
 
 Not reported: the streaming writers; a writer on any other file, which the
-program opens and is the only writer of; a reader; and a file the function
-is handed, which only its caller knows.
+program opens and is the only writer of; a writer made with `Io.failing`
+(`.failing`, `std.Io.failing`, or a `const` the function declares as one),
+which fails every write, so nothing reaches the stream to be written over;
+a reader; and a file the function is handed, which only its caller knows.
 
 ## Found in real code
 
