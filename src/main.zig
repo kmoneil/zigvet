@@ -578,6 +578,7 @@ test {
     _ = @import("grow.zig");
     _ = @import("hoard.zig");
     _ = @import("positional.zig");
+    _ = @import("race.zig");
     _ = @import("kept.zig");
     _ = @import("leak.zig");
     _ = @import("owner.zig");
