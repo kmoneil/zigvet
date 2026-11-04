@@ -89,6 +89,11 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - name: zig build release
         run: zig build release && ls -l zig-out/release
+      # zigvet packed as `zig fetch` packs it, only what build.zig.zon's
+      # .paths lists, and built as a dependency of an empty project: a file
+      # build.zig reads that .paths leaves out fails here (#174).
+      - name: builds as a dependency
+        run: bash scripts/dependency-build.sh
 
   # A release binary is the same bytes wherever it is built, so anyone can
   # rebuild one from its tag and match SHA256SUMS: built here on Linux and

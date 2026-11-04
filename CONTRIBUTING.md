@@ -11,6 +11,12 @@ complexity check. `zig build test` runs the last two as well, so it needs
 from its releases, or `brew install kmoneil/tap/gnarl` while the tap has
 that release.
 
+A project that depends on zigvet gets only what `build.zig.zon`'s `.paths`
+lists, so a file `build.zig` reads has to be listed there too.
+`scripts/dependency-build.sh`, which CI runs, packs the tree that way and
+builds it as a dependency of an empty project
+([#174](https://github.com/kmoneil/zigvet/issues/174)).
+
 ## What a rule has to be
 
 The admission test: the code compiles clean in every build mode and is still

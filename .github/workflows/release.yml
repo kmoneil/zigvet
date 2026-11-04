@@ -61,6 +61,9 @@ jobs:
           zig build test --summary all
           zig build test -Doptimize=ReleaseSafe --summary all
           zig build test -Doptimize=ReleaseFast --summary all
+      # What a project that depends on this tag gets builds (#174).
+      - name: builds as a dependency
+        run: bash scripts/dependency-build.sh
 
   build:
     name: build the binaries
