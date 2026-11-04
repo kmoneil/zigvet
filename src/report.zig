@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -61,6 +61,7 @@ pub const Finding = struct {
         leak: Leak,
         hoard: Hoard,
         positional: Positional,
+        race: Race,
         allow: Allow,
     };
 
@@ -256,6 +257,19 @@ pub const Finding = struct {
         fix: []const u8,
     };
 
+    pub const Race = struct {
+        /// The read that copies the global, as written: `registry == null`,
+        /// `if (registry) |r|`.
+        read: []const u8,
+        /// The container-level optional it copies: `registry`.
+        global: []const u8,
+        /// The field of its payload other threads change atomically, as a
+        /// path from the payload: `mutex`, `inner.count`.
+        field: []const u8,
+        /// That field's type, as written: `std.Io.Mutex`.
+        field_type: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -292,6 +306,7 @@ pub const Finding = struct {
             .leak => .leak,
             .hoard => .hoard,
             .positional => .positional,
+            .race => .race,
             .allow => null,
         };
     }
@@ -394,6 +409,9 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .positional => |p| try w.print("`{s}` makes a positional writer on {s}: redirected to a file, it writes from byte 0 at a position of its own, over what else is written there (`> log 2>&1`, a shell's `echo`, `>>` on macOS)", .{
             p.call, p.stream,
+        }),
+        .race => |r| try w.print("`{s}` copies all of `{s}` to read whether it is null, and `{s}` (`{s}`) with it: in Debug that copy is a plain read, a data race with the atomic writes other threads make to it", .{
+            r.read, r.global, r.field, r.field_type,
         }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),

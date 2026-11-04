@@ -1,0 +1,32 @@
+# race's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/race.zig
+
+== a const, which nothing writes
+-            if (tree.tokenTag(decl.ast.mut_token) != .keyword_var or decl.threadlocal_token != null) continue;
++            if (decl.threadlocal_token != null) continue;
+
+== a threadlocal, which no other thread reaches
+-            if (tree.tokenTag(decl.ast.mut_token) != .keyword_var or decl.threadlocal_token != null) continue;
++            if (tree.tokenTag(decl.ast.mut_token) != .keyword_var) continue;
+
+== a capture by pointer, which reads only the tag
+-    if (tree.tokenTag(capture) == .asterisk) return null;
++    if (false and tree.tokenTag(capture) == .asterisk) return null;
+
+== a lock two levels down is not looked for
+-        if (depth > 0) continue;
++        if (false and depth > 0) continue;
+
+== Condition and Event count only in std's namespaces
+-            return among(name, &lock_names) or (among(name, &std_names) and among(lastName(tree, lhs), &std_spaces));
++            return among(name, &lock_names) or (among(name, &std_names) and lastName(tree, lhs).len >= 0);
+
+== Value counts only as atomic.Value
+-            return std.mem.eql(u8, tree.tokenSlice(name), "Value") and std.mem.eql(u8, lastName(tree, lhs), "atomic");
++            return std.mem.eql(u8, tree.tokenSlice(name), "Value") and lastName(tree, lhs).len >= 0;
+
+== a name is the nearest container's declaration of it
+-        if (types.memberDecl(t.tree, container, name)) |decl| return decl;
++        if (types.memberDecl(t.tree, container, name)) |decl| if (t.enclosingContainer(container) == null) return decl;

@@ -567,6 +567,45 @@ fn login(io: std.Io) !void {
 }
 ```
 
+### race
+
+A container-level optional asked whether it is null by value, when what
+it holds has atomics or a lock in it. Debug copies the whole global to
+read the tag, a plain read racing the atomic writes of every thread that
+locks it: a data race, which ThreadSanitizer reports.
+
+```zig
+const Registry = struct {
+    mutex: std.Io.Mutex = .init,
+    hits: usize = 0,
+};
+
+var registry: ?Registry = null;
+
+fn state() *Registry {
+    if (registry == null) registry = .{};
+    return &registry.?;
+}
+```
+
+Ask through a pointer, which reads only the tag: `if (registry) |*r|`, and
+`|*r|` in place of a by-value capture.
+
+```zig
+const Registry = struct {
+    mutex: std.Io.Mutex = .init,
+    hits: usize = 0,
+};
+
+var registry: ?Registry = null;
+
+fn state() *Registry {
+    if (registry) |*r| return r;
+    registry = .{};
+    return &registry.?;
+}
+```
+
 ### cached
 
 A build script lists a directory to decide what to build, and never tells
@@ -683,6 +722,10 @@ takes the path:
   `lock` waits for good.
 - twice needs no failure made: a test with the input that takes the
   path, and `std.testing.allocator` reports the double free.
+- race: a Debug test built with ThreadSanitizer
+  (`.sanitize_thread = true` on its module) on x86_64 Linux, with other
+  threads locking or storing while one asks. macOS's ThreadSanitizer does
+  not see this copy.
 - escape: `zigvet.clobberStack()`, called after the function returns and
   before its result is read, writes over the stack the function used, so
   a Debug test fails at once. It comes from zigvet's package

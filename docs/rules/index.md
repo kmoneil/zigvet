@@ -52,6 +52,12 @@ seldom take.
 | [positional](positional.md) | A writer on stdout or stderr made positional (`writer`, `File.Writer.init`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled |
 | [wipe](wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
 
+## Data races
+
+| Rule | Catches | What goes wrong |
+|---|---|---|
+| [race](race.md) | A container-level optional tested by value (`g == null`, `if (g) \|v\|`) when what it holds has a lock or atomics in it | Debug copies all of it to read the tag, a plain read racing other threads' atomic writes, and ThreadSanitizer reports it |
+
 ## Builds and tests
 
 | Rule | Catches | What goes wrong |
