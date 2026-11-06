@@ -517,10 +517,10 @@ fn greet(io: std.Io) !void {
 
 ### positional
 
-A writer on stdout or stderr made positional. Redirected to a file, it
-writes from byte 0 at a position of its own, over what else is written
-there: under `prog > log 2>&1`, anything printed to stderr and the output
-overwrite each other.
+A writer on stdout or stderr, or a reader on stdin, made positional.
+Redirected to a file, a writer writes from byte 0 at a position of its
+own, over what else is written there: under `prog > log 2>&1`, anything
+printed to stderr and the output overwrite each other.
 
 ```zig
 fn report(io: std.Io, rows: usize) !void {
@@ -542,6 +542,11 @@ fn report(io: std.Io, rows: usize) !void {
     try out.interface.flush();
 }
 ```
+
+A reader on stdin made positional is the same bug from the reading side:
+redirected from a file, it reads from byte 0, so under
+`{ read -r header; prog; } < input` it reads the header again. Make it
+`readerStreaming`, or `File.Reader.initStreaming` in place of `.init`.
 
 ### wipe
 

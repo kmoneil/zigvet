@@ -5,7 +5,7 @@ parent: Rules
 
 # positional
 
-A writer on stdout or stderr made positional.
+A writer on stdout or stderr, or a reader on stdin, made positional.
 
 ```zig
 var buf: [1024]u8 = undefined;
@@ -42,21 +42,57 @@ The fix costs nothing: `writerStreaming`, or `File.Writer.initStreaming`
 in place of `.init`, writes at the file's offset, after what else was
 written there.
 
+## A reader on stdin
+
+A reader on stdin has the same bug from the reading side
+([#177](https://github.com/kmoneil/zigvet/issues/177)):
+
+```zig
+var buf: [4096]u8 = undefined;
+var in = std.Io.File.stdin().reader(io, &buf); // positional
+const input = try in.interface.allocRemaining(gpa, .unlimited);
+```
+
+`File.reader` and `File.Reader.init` read with `pread` from a position of
+their own, from byte 0, and never move the file's offset. From a terminal
+or a pipe it works, as the writers do. Redirected from a regular file, what
+was read from the file before the program is read again, and what reads
+after the program starts where the program did.
+
+Measured on Zig 0.17.1, macOS, a program that reads all of stdin and
+prints it, over a file holding `skip` and `rest`:
+
+| Run | Positional stdin | Streaming stdin |
+|---|---|---|
+| `{ read -r header; prog; } < input` | `skip` and `rest`: the header again | `rest` |
+| `{ prog > /dev/null; cat; } < input` | `cat` prints the whole file again | `cat` prints nothing |
+| `prog < input`, the only reader | correct | correct |
+| `cat input \| prog` | correct | correct |
+
+zig-charts' `zc render -` had it: given its input after a header line the
+shell had read, it read the header too and refused the input as malformed
+JSON. `readerStreaming`, or `File.Reader.initStreaming` in place of
+`.init`, reads from the file's offset and moves it.
+
 ## What positional reports
 
 `f.writer(io, buffer)`, `File.Writer.init(f, io, buffer)` and
-`File.Writer.initDetect(...)`, or `.init(f, ...)` and `.initDetect(f, ...)`
-for a local whose type is written as a `File.Writer`, where `f` is stdout
-or stderr: `std.Io.File.stdout()`, `File.stderr()` and the like,
-`.stdout()` where a `File` is expected, or a `const` the function declares
-as one. `initDetect` picks streaming only for a terminal, so it is
-positional for a file too.
+`File.Writer.initDetect(...)` where `f` is stdout or stderr, and
+`f.reader(io, buffer)`, `File.Reader.init(f, io, buffer)` and
+`File.Reader.initSize(...)` where `f` is stdin; or `.init(f, ...)`,
+`.initDetect(f, ...)` and `.initSize(f, ...)` for a local whose type is
+written as a `File.Writer` or a `File.Reader`. A stream is
+`std.Io.File.stdout()`, `File.stdin()` and the like, `.stdout()` where a
+`File` is expected, or a `const` the function declares as one.
+`initDetect` picks streaming only for a terminal, so it is positional for
+a file too.
 
-Not reported: the streaming writers; a writer on any other file, which the
-program opens and is the only writer of; a writer made with `Io.failing`
-(`.failing`, `std.Io.failing`, or a `const` the function declares as one),
-which fails every write, so nothing reaches the stream to be written over;
-a reader; and a file the function is handed, which only its caller knows.
+Not reported: the streaming readers and writers; one on any other file,
+which the program opens and is the only reader or writer of; one made with
+`Io.failing` (`.failing`, `std.Io.failing`, or a `const` the function
+declares as one), which fails every read and write, so nothing is read or
+reaches the stream to be written over; and a file the function is handed,
+which only its caller knows.
 
 ## Found in real code
 
@@ -68,5 +104,14 @@ and the benchmarks. It reports 25 in four of the application repos zigvet
 is measured on, and 53 in nine of the fourteen well-known public projects,
 31 of them in Ghostty (`ghostty +version > out.txt 2>&1` among them).
 The same code bases make 106 streaming writers on the same streams.
+
+Readers on stdin are fewer. Over Zig 0.17.1's standard library and
+compiler, positional reports 2: the `--listen` protocol of the build runner
+(`compiler/Maker.zig`) and of `objcopy`, both read over a pipe, where the
+compiler's own test runner reads the same protocol with `initStreaming`.
+It reports 3 in two of the application repos and 4 in two of the public
+projects: superhtml's `check` and `fmt` reading a document from stdin, and
+flow's `--debug-wait`. The same code bases make 13 streaming readers on
+stdin.
 
 [All rules](index.md)

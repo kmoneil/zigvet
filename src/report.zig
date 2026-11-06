@@ -248,13 +248,17 @@ pub const Finding = struct {
     };
 
     pub const Positional = struct {
-        /// The call that makes the writer, as written up to its arguments:
+        /// A writer on stdout or stderr, or a reader on stdin.
+        kind: Kind,
+        /// The call that makes it, as written up to its arguments:
         /// `std.Io.File.stdout().writer(...)`, `.init(...)`.
         call: []const u8,
-        /// `stdout` or `stderr`.
+        /// `stdout` or `stderr` for a writer, `stdin` for a reader.
         stream: []const u8,
-        /// What makes a streaming writer instead: `writerStreaming`.
+        /// What makes a streaming one instead: `writerStreaming`.
         fix: []const u8,
+
+        pub const Kind = enum { reader, writer };
     };
 
     pub const Race = struct {
@@ -407,9 +411,14 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .hoard => |h| try w.print("`{s}` takes memory from `{s}` that fuzz target '{s}' never gives back, so it piles up over every input, and the runner's leak check sees only std.testing.allocator", .{
             h.call, h.allocator, h.target,
         }),
-        .positional => |p| try w.print("`{s}` makes a positional writer on {s}: redirected to a file, it writes from byte 0 at a position of its own, over what else is written there (`> log 2>&1`, a shell's `echo`, `>>` on macOS)", .{
-            p.call, p.stream,
-        }),
+        .positional => |p| switch (p.kind) {
+            .writer => try w.print("`{s}` makes a positional writer on {s}: redirected to a file, it writes from byte 0 at a position of its own, over what else is written there (`> log 2>&1`, a shell's `echo`, `>>` on macOS)", .{
+                p.call, p.stream,
+            }),
+            .reader => try w.print("`{s}` makes a positional reader on {s}: redirected from a file, it reads from byte 0 at a position of its own, so what was read from the file before it is read again (`{{ read -r header; prog; }} < input`)", .{
+                p.call, p.stream,
+            }),
+        },
         .race => |r| try w.print("`{s}` copies all of `{s}` to read whether it is null, and `{s}` (`{s}`) with it: in Debug that copy is a plain read, a data race with the atomic writes other threads make to it", .{
             r.read, r.global, r.field, r.field_type,
         }),
