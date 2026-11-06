@@ -209,7 +209,7 @@ seldom take.
 |---|---|---|
 | [alias](docs/rules/alias.md) | An anonymous initializer assigned to a place that it reads after storing to it | `ext = .{ ext[1], ext[0] }` gives `{ ext[1], ext[1] }`, and `e = .{ .pair = f(e) }` hands `f` an `e` already tagged `.pair` |
 | [flush](docs/rules/flush.md) | A buffered file or stream writer, written to and never flushed | What is left in the buffer never arrives |
-| [positional](docs/rules/positional.md) | A writer on stdout or stderr made positional (`writer`, `File.Writer.init`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled |
+| [positional](docs/rules/positional.md) | A writer on stdout or stderr, or a reader on stdin, made positional (`writer`, `File.Writer.init`, `reader`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled; a reader reads again what was read before it |
 | [wipe](docs/rules/wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
 
 ### Data races
