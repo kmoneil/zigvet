@@ -5,6 +5,5 @@
 # Embedded in the binary as `zigvet skill`, whose tests read its code
 # blocks byte for byte; a Windows build prints the same file.
 src/skill.md text eol=lf
-# Run by bash on every runner, Windows too, and read by build.zig for the
-# gnarl release it pins.
+# Run by bash on every runner, Windows too.
 *.sh text eol=lf
