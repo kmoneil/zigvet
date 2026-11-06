@@ -3,6 +3,11 @@
 // function over a critical limit unless complexity.baseline holds it at
 // that number or above.
 .{
+    // The gnarl release the code is judged by. A gnarl that counts
+    // otherwise, or is newer, refuses `--check` and names both releases,
+    // so a commit cannot pass on one gnarl and fail in CI on another
+    // (#154). CI installs it with scripts/install-gnarl.sh.
+    .gnarl = "0.7.0",
     // What every file checked goes through, whichever rules run: the walk
     // that finds it, the vet that parses it and runs the rules, the allow
     // comments read for each report, and the child nodes and types every

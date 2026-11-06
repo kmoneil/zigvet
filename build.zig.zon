@@ -6,13 +6,12 @@
     // No dependencies, by design: std.zig.Ast, the compiler's own parser, is
     // the only parser.
     .dependencies = .{},
-    // What a project that depends on zigvet gets. build.zig embeds
-    // scripts/install-gnarl.sh for the gnarl pin, so it is shipped too, or
-    // the dependency's build.zig does not compile (#174).
+    // What a project that depends on zigvet gets: a file build.zig reads
+    // has to be listed here, or the dependency's build.zig does not compile
+    // (#174).
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "scripts/install-gnarl.sh",
         "src",
         "README.md",
         "LICENSE",

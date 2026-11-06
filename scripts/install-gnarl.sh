@@ -3,10 +3,11 @@
 # for the complexity check `zig build test` runs. One release, pinned with
 # the checksum of each binary a runner here uses, so a new gnarl release
 # cannot fail an unchanged commit: moving to one means changing the version
-# and the sums here, and complexity.baseline if its counting changed.
-# build.zig reads the version line too, and fails the complexity step when
-# the gnarl on the PATH is another release. Locally, install gnarl from its
-# release or `brew install kmoneil/tap/gnarl`.
+# and the sums here, the release complexity.zon's .gnarl names, and
+# complexity.baseline if its counting changed. gnarl --check refuses to run,
+# naming both releases, when the gnarl on the PATH counts otherwise than the
+# one .gnarl names, or is newer. Locally, install gnarl from its release or
+# `brew install kmoneil/tap/gnarl`.
 #
 #   scripts/install-gnarl.sh
 #
@@ -16,20 +17,20 @@
 # no binary pinned here.
 set -euo pipefail
 
-version=v0.6.0
+version=v0.7.0
 
 case "${RUNNER_OS}-${RUNNER_ARCH}" in
 Linux-X64)
 	asset=gnarl-linux-amd64
-	sum=d8cde27f1230843e5c65d9d1bade415609de3fa6bbc8d00acfb9e75617d00900
+	sum=3b98843a610e74862a2e62edf3dbb2d35be3e74485718e703429c84f2b8e57f3
 	;;
 macOS-ARM64)
 	asset=gnarl-darwin-arm64
-	sum=16cb0f54f0db4ed4577fb9462c463de24ca03ef1350589f4e60c45f7573d74ee
+	sum=82ccdb87a5ef91ea2eff5b1e9cdc58f26e6a9563622bbadf457fb37f6f3311e8
 	;;
 Windows-X64)
 	asset=gnarl-windows-amd64.exe
-	sum=8b701a912f529e10e56e317392e7ab38e27b90cef0413582e1b5a57160feac57
+	sum=e150110d613e77ff109404b4addd36f550bc87d89b48b7e52d95003d209a8918
 	;;
 *)
 	echo "install-gnarl: no gnarl binary pinned for ${RUNNER_OS}-${RUNNER_ARCH}" >&2

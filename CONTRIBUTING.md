@@ -7,9 +7,10 @@ the binary in `zig-out/bin/`, `zig build test` runs every test,
 `zig build lint` runs zigvet over its own `src/`, and
 `zig build complexity` runs [gnarl](https://github.com/kmoneil/gnarl)'s
 complexity check. `zig build test` runs the last two as well, so it needs
-`gnarl` on the PATH, the release `scripts/install-gnarl.sh` pins: a binary
-from its releases, or `brew install kmoneil/tap/gnarl` while the tap has
-that release.
+`gnarl` on the PATH: the release `complexity.zon`'s `.gnarl` names, or a
+later one that counts the same, from gnarl's releases or
+`brew install kmoneil/tap/gnarl`. Any other refuses to check and names both
+releases.
 
 A project that depends on zigvet gets only what `build.zig.zon`'s `.paths`
 lists, so a file `build.zig` reads has to be listed there too.
@@ -74,12 +75,13 @@ the test machinery). Run `gnarl --diff HEAD` before a commit to see what it
 changed. A new function over a critical limit is split rather than added to
 the baseline (`gnarl --explain path:line` lists ranges worth lifting out);
 a commit that improves, renames or moves a baselined function runs
-`gnarl --update-baseline .` too. CI installs the gnarl release
-`scripts/install-gnarl.sh` pins, and the complexity step fails, naming both
-versions, when the `gnarl` on the PATH is another release: two releases can
-count the same function differently, so a commit could pass on one and fail
-on the other ([#154](https://github.com/kmoneil/zigvet/issues/154)). Moving
-to a new gnarl is one change: the version and checksums in that script, and
+`gnarl --update-baseline .` too. `complexity.zon`'s `.gnarl` names the gnarl
+release the code is judged by, and a `gnarl` that counts otherwise, or is
+newer, refuses `--check` and names both releases: two releases can count the
+same function differently, so a commit could pass on one and fail on the
+other ([#154](https://github.com/kmoneil/zigvet/issues/154)). CI installs the
+release `scripts/install-gnarl.sh` pins. Moving to a new gnarl is one change:
+`.gnarl`, the version and checksums in that script, and
 `gnarl --update-baseline .` run with the new release.
 
 ### Measuring a rule on real code
