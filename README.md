@@ -111,7 +111,7 @@ zigvet --format github src        # annotate a pull request in CI
 
 ```
 zigvet [--exclude <path>]... [--format <text|github|json>] [--summary] <path>...
-zigvet skill [--install <dir>]
+zigvet skill [<rule>... | --all | --install <dir>]
 zigvet --version | --help
 ```
 
@@ -299,14 +299,21 @@ having together.
 ## For AI agents
 
 `zigvet skill` prints what an AI agent needs to work with zigvet: the
-loop, each rule with the smallest code that trips it and the fix, how to
-add it to a build, and what to do with a finding that looks wrong. It is
-built into the binary, and zigvet's tests run every example in it.
+loop, each rule in a line, how to add it to a build, and what to do with
+a finding that looks wrong. `zigvet skill <rule>` prints a rule's part:
+what it catches, the smallest code that trips it, and the fix. A finding
+names its rule, so an agent reads the parts it needs and not every one. It
+is built into the binary, and zigvet's tests run every example in it.
 
 ```sh
-zigvet skill                       # print it
-zigvet skill --install ~/.skills   # write it to ~/.skills/zigvet/SKILL.md
+zigvet skill                       # the short guide
+zigvet skill escape twice          # those rules' parts
+zigvet skill --all                 # the whole guide
+zigvet skill --install ~/.skills   # write ~/.skills/zigvet/SKILL.md
 ```
+
+What `--install` writes has the agent run `zigvet skill`, so it is never
+older than the zigvet installed.
 
 To check a directory named `skill`, name it `./skill`.
 

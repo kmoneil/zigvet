@@ -16,7 +16,7 @@ const walk = @import("walk.zig");
 
 const usage =
     \\Usage: zigvet [--exclude <path>]... [--format <format>] [--summary] <path>...
-    \\       zigvet skill [--install <dir>]
+    \\       zigvet skill [<rule>... | --all | --install <dir>]
     \\       zigvet --version | --help
     \\
     \\Checks each file named, and every .zig file under each directory named,
@@ -32,10 +32,12 @@ const usage =
     \\                    what each rule reported.
     \\
     \\zigvet skill prints what an AI agent needs to work with zigvet: the
-    \\loop, each rule with an example and its fix, how to add it to a
-    \\build, and what to do with a finding that looks wrong. --install <dir>
-    \\writes it to <dir>/zigvet/SKILL.md. To check a directory named skill,
-    \\name it ./skill.
+    \\loop, each rule in a line, how to add it to a build, and what to do
+    \\with a finding that looks wrong. zigvet skill <rule> prints that
+    \\rule's part: what it catches, an example and its fix. --all prints
+    \\the whole guide. --install <dir> writes <dir>/zigvet/SKILL.md, which
+    \\has the agent run zigvet skill, so it is never out of date. To check
+    \\a directory named skill, name it ./skill.
     \\
     \\Exit status: 0 if nothing was reported, 1 if a finding or parse error
     \\was, 2 on a usage error or a path that could not be read or holds no
@@ -164,13 +166,7 @@ fn answer(arena: std.mem.Allocator, io: Io, out: *Io.Writer, command: Command) !
         .run => unreachable,
         .help => try out.writeAll(usage),
         .version => try out.print("zigvet {s}\n", .{build_options.version}),
-        .skill => |install_dir| if (install_dir) |dir| {
-            const path = skill.install(arena, io, dir) catch |err| {
-                std.debug.print("zigvet: {s}: {t}\n", .{ dir, err });
-                return 2;
-            };
-            try out.print("{s}\n", .{path});
-        } else try out.writeAll(skill.text),
+        .skill => |what| return printSkill(arena, io, out, what),
         .usage_error => |message| {
             if (message.len > 0) std.debug.print("zigvet: {s}\n\n", .{message});
             std.debug.print("{s}", .{usage});
@@ -180,6 +176,41 @@ fn answer(arena: std.mem.Allocator, io: Io, out: *Io.Writer, command: Command) !
     try out.flush();
     return 0;
 }
+
+/// `zigvet skill`: prints what of the guide was asked for, or installs
+/// the stub. Returns the exit status.
+fn printSkill(arena: std.mem.Allocator, io: Io, out: *Io.Writer, what: Skill) !u8 {
+    switch (what) {
+        .short => for (skill.short) |piece| try out.writeAll(piece),
+        .all => try out.writeAll(skill.text),
+        // Checked when parsed. A blank line between two, as in the guide.
+        .rules => |names| for (names, 0..) |name, i| {
+            if (i > 0) try out.writeByte('\n');
+            try out.print("{s}\n", .{std.mem.trimEnd(u8, skill.partOf(name).?, "\n")});
+        },
+        .install => |dir| {
+            const path = skill.install(arena, io, dir) catch |err| {
+                std.debug.print("zigvet: {s}: {t}\n", .{ dir, err });
+                return 2;
+            };
+            try out.print("{s}\n", .{path});
+        },
+    }
+    try out.flush();
+    return 0;
+}
+
+/// What of the skill `zigvet skill` asks for.
+const Skill = union(enum) {
+    /// The guide without the rules' parts.
+    short,
+    /// The whole guide.
+    all,
+    /// These rules' parts, in the order named.
+    rules: []const []const u8,
+    /// The directory to install the stub under.
+    install: []const u8,
+};
 
 /// What the command line asks for.
 const Command = union(enum) {
@@ -192,8 +223,7 @@ const Command = union(enum) {
     },
     help,
     version,
-    /// `zigvet skill`, and the directory to install it under, if any.
-    skill: ?[]const u8,
+    skill: Skill,
     /// Why the command line cannot be run; empty when the usage alone says.
     usage_error: []const u8,
 };
@@ -202,7 +232,7 @@ const Command = union(enum) {
 /// they stand; anything after them is not read.
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
     // A path named skill is given as ./skill.
-    if (args.len > 0 and std.mem.eql(u8, args[0], "skill")) return parseSkill(args[1..]);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "skill")) return parseSkill(arena, args[1..]);
     var paths: std.ArrayList([]const u8) = .empty;
     var excludes: std.ArrayList([]const u8) = .empty;
     var format: report.Format = .text;
@@ -231,14 +261,21 @@ fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocat
 }
 
 /// `zigvet skill`, given what follows `skill`.
-fn parseSkill(args: []const []const u8) Command {
-    if (args.len == 0) return .{ .skill = null };
+fn parseSkill(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Command {
+    const takes = "zigvet skill takes rule names, --all or --install <dir>, or nothing";
+    if (args.len == 0) return .{ .skill = .short };
+    if (std.mem.eql(u8, args[0], "--all")) return if (args.len == 1) .{ .skill = .all } else .{ .usage_error = takes };
     var i: usize = 0;
     if (optionValue(args, &i, "--install")) |dir| {
         if (dir.len == 0) return .{ .usage_error = "--install needs a directory" };
-        if (i + 1 == args.len) return .{ .skill = dir };
+        return if (i + 1 == args.len) .{ .skill = .{ .install = dir } } else .{ .usage_error = takes };
     }
-    return .{ .usage_error = "zigvet skill takes --install <dir>, or nothing" };
+    for (args) |name| {
+        if (std.mem.startsWith(u8, name, "-")) return .{ .usage_error = takes };
+    }
+    for (args) |name| if (skill.partOf(name) == null)
+        return .{ .usage_error = try arena.print("zigvet has no rule named '{s}'; it has {s}", .{ name, try skill.names(arena) }) };
+    return .{ .skill = .{ .rules = args } };
 }
 
 /// The value of option `name` if `args[i.*]` is it, given as `name value`
@@ -450,18 +487,29 @@ test "parseArgs: zigvet skill" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    try std.testing.expectEqual(null, (try parseArgs(arena, &.{"skill"})).skill);
-    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install", "d" })).skill.?);
-    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install=d" })).skill.?);
-    try std.testing.expectEqualStrings("zigvet skill takes --install <dir>, or nothing", (try parseArgs(arena, &.{ "skill", "src" })).usage_error);
-    try std.testing.expectEqualStrings("zigvet skill takes --install <dir>, or nothing", (try parseArgs(arena, &.{ "skill", "--install", "d", "src" })).usage_error);
+    const takes = "zigvet skill takes rule names, --all or --install <dir>, or nothing";
+    try std.testing.expect((try parseArgs(arena, &.{"skill"})).skill == .short);
+    try std.testing.expect((try parseArgs(arena, &.{ "skill", "--all" })).skill == .all);
+    const two = (try parseArgs(arena, &.{ "skill", "twice", "escape" })).skill.rules;
+    try std.testing.expectEqual(2, two.len);
+    try std.testing.expectEqualStrings("twice", two[0]);
+    try std.testing.expectEqualStrings("escape", two[1]);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install", "d" })).skill.install);
+    try std.testing.expectEqualStrings("d", (try parseArgs(arena, &.{ "skill", "--install=d" })).skill.install);
+    const no_rule = (try parseArgs(arena, &.{ "skill", "escape", "src" })).usage_error;
+    try std.testing.expect(std.mem.startsWith(u8, no_rule, "zigvet has no rule named 'src'; it has escape, freed, "));
+    try std.testing.expect(std.mem.endsWith(u8, no_rule, ", hoard"));
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "--all", "escape" })).usage_error);
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "escape", "--all" })).usage_error);
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "--install", "d", "src" })).usage_error);
+    try std.testing.expectEqualStrings(takes, (try parseArgs(arena, &.{ "skill", "-h" })).usage_error);
     try std.testing.expectEqualStrings("--install needs a directory", (try parseArgs(arena, &.{ "skill", "--install" })).usage_error);
     // A directory named skill is ./skill, or comes after another path.
     try std.testing.expectEqualStrings("./skill", (try parseArgs(arena, &.{"./skill"})).run.paths[0]);
     try std.testing.expectEqualStrings("skill", (try parseArgs(arena, &.{ "src", "skill" })).run.paths[1]);
 }
 
-test "zigvet skill prints the skill; --install writes it" {
+test "zigvet skill prints the short guide, a rule's part, or the whole; --install writes the stub" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -469,12 +517,36 @@ test "zigvet skill prints the skill; --install writes it" {
     const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
     defer gpa.free(exe);
 
-    const printed = try std.process.run(gpa, io, .{ .argv = &.{ exe, "skill" }, .cwd = .{ .dir = tmp.dir } });
-    defer gpa.free(printed.stdout);
-    defer gpa.free(printed.stderr);
-    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, printed.term);
-    try std.testing.expectEqualStrings(skill.text, printed.stdout);
-    try std.testing.expectEqualStrings("", printed.stderr);
+    const short = try std.mem.concat(gpa, u8, &skill.short);
+    defer gpa.free(short);
+    const escape = skill.partOf("escape").?;
+    const twice = skill.partOf("twice").?;
+    // Each part ends with a blank line, which separates two.
+    const two = try std.mem.concat(gpa, u8, &.{ escape, twice[0 .. twice.len - 1] });
+    defer gpa.free(two);
+    const cases = [_]struct { argv: []const []const u8, stdout: []const u8 }{
+        .{ .argv = &.{"skill"}, .stdout = short },
+        .{ .argv = &.{ "skill", "--all" }, .stdout = skill.text },
+        .{ .argv = &.{ "skill", "escape" }, .stdout = escape[0 .. escape.len - 1] },
+        .{ .argv = &.{ "skill", "escape", "twice" }, .stdout = two },
+    };
+    for (cases) |case| {
+        const argv = try std.mem.concat(gpa, []const u8, &.{ &.{exe}, case.argv });
+        defer gpa.free(argv);
+        const printed = try std.process.run(gpa, io, .{ .argv = argv, .cwd = .{ .dir = tmp.dir } });
+        defer gpa.free(printed.stdout);
+        defer gpa.free(printed.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, printed.term);
+        try std.testing.expectEqualStrings(case.stdout, printed.stdout);
+        try std.testing.expectEqualStrings("", printed.stderr);
+    }
+
+    const unknown = try std.process.run(gpa, io, .{ .argv = &.{ exe, "skill", "allow" }, .cwd = .{ .dir = tmp.dir } });
+    defer gpa.free(unknown.stdout);
+    defer gpa.free(unknown.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, unknown.term);
+    try std.testing.expectEqualStrings("", unknown.stdout);
+    try std.testing.expect(std.mem.startsWith(u8, unknown.stderr, "zigvet: zigvet has no rule named 'allow'; it has escape, "));
 
     const installed = try std.process.run(gpa, io, .{ .argv = &.{ exe, "skill", "--install", "agents" }, .cwd = .{ .dir = tmp.dir } });
     defer gpa.free(installed.stdout);
@@ -483,7 +555,7 @@ test "zigvet skill prints the skill; --install writes it" {
     try std.testing.expectEqualStrings("agents" ++ std.fs.path.sep_str ++ "zigvet" ++ std.fs.path.sep_str ++ "SKILL.md\n", installed.stdout);
     const written = try tmp.dir.readFileAlloc(io, "agents/zigvet/SKILL.md", gpa, .limited(1 << 20));
     defer gpa.free(written);
-    try std.testing.expectEqualStrings(skill.text, written);
+    try std.testing.expectEqualStrings(skill.stub, written);
 }
 
 test "the skill names every flag zigvet takes, and no other" {
@@ -504,7 +576,7 @@ test "the skill names every flag zigvet takes, and no other" {
         ok = false;
     };
     try std.testing.expect(ok);
-    try std.testing.expectEqual(6, in_usage.count());
+    try std.testing.expectEqual(7, in_usage.count());
 }
 
 /// Every `--flag` in `text`.
