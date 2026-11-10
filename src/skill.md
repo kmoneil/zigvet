@@ -28,7 +28,8 @@ src/auth.zig:2:28: escape: anonymous array made here leaves scopes through retur
     hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const
 ```
 
-Read the rule's section below, change the code, and run zigvet again
+Read the rule's part (`zigvet skill escape` prints this one's: what it
+catches, an example and the fix), change the code, and run zigvet again
 until it is silent. Fix the bug the finding names, not the shape the rule
 saw: code moved about until the report goes away still has the bug.
 
@@ -40,9 +41,54 @@ from one over 3.
 ## The rules
 
 Each rule is one lowercase word, the name a report and an allow comment
-use. Under each: what it catches, the smallest code that trips it, and
-the same code fixed. zigvet's tests run every example here: the first
-trips its rule, and the fix reports nothing.
+use. Each has a part of this guide: what it catches, the smallest code
+that trips it, and the same code fixed. `zigvet skill escape` prints
+escape's; name several to print several. Read a rule's part before
+changing the code it reported. zigvet's tests run every example: the
+first trips its rule, and the fix reports nothing.
+
+- escape: a pointer or slice into stack memory leaves the function that
+  made it.
+- freed: a function returns what its own `defer` frees.
+- grow: a pointer into a list's items or a map's values, kept across a
+  call that can move them.
+- copy: a `std.Io.Writer` or `Reader` interface copied out of the struct
+  it belongs to.
+- refill: a place freed, then given new memory by something that can
+  fail first.
+- owner: one allocation freed by two errdefers, the caller's and the
+  callee's.
+- kept: an `errdefer` frees what the function has already stored where
+  its caller keeps it.
+- torn: an optional or union field built in place by an initializer
+  that can fail.
+- twice: an errdefer's free also written out by hand on a path that
+  returns an error.
+- sweep: a loop frees what a list holds, can fail part way, and empties
+  the list only after it.
+- unlock: a lock taken, then something that can fail before the unlock,
+  with no `defer`.
+- leak: a local released by hand later, with something that can fail in
+  between and no `defer`.
+- cancel: an `Io` call's error dropped in a task's loop, so whoever
+  cancels the task waits for good.
+- fit: a number printed into a buffer too small for it, under
+  `catch unreachable`.
+- alias: an anonymous initializer assigned to a place its own later
+  elements read.
+- flush: a buffered file or stream writer, written to and never flushed.
+- positional: a writer on stdout or stderr, or a reader on stdin, made
+  positional.
+- wipe: a local wiped with `@memset` as the last thing done with it,
+  which release builds drop.
+- race: a container-level optional holding atomics or a lock, asked
+  whether it is null by value.
+- cached: a build script lists a directory to decide what to build, and
+  never tells Zig's configure cache.
+- unrun: a file whose tests never run, because nothing the test build
+  analyses names it.
+- hoard: a fuzz target keeps memory past one input, from an allocator
+  the test runner does not check.
 
 ### escape
 
@@ -835,7 +881,9 @@ what it could read.
   types the file declares, not what the compiler infers. A shape spread
   across files or behind a helper may not be seen, so no finding is not
   proof of no bug.
-- `zigvet --help` prints every flag and `zigvet --version` the version;
-  `zigvet skill --install <dir>` writes this file to
-  `<dir>/zigvet/SKILL.md`. To check a directory named `skill`, name it
-  `./skill`.
+- `zigvet --help` prints every flag and `zigvet --version` the version.
+  `zigvet skill` prints this guide without the rules' parts,
+  `zigvet skill --all` the whole of it, and
+  `zigvet skill --install <dir>` writes `<dir>/zigvet/SKILL.md`, which
+  has an agent run `zigvet skill`. To check a directory named `skill`,
+  name it `./skill`.

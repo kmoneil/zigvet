@@ -2,6 +2,14 @@
 //! binary itself, and tested here against what zigvet does: every rule's
 //! example trips it and its fix reports nothing, and the output it shows
 //! is what zigvet prints.
+//!
+//! The guide is printed in parts (#184). An agent reads it as a command's
+//! output, and Claude Code shows about 30,000 characters of one; of a
+//! longer one, the first 2 KB. Most of the guide is the rules' parts, and
+//! a finding needs one. So `zigvet skill` prints the guide with the rules'
+//! parts left out, `zigvet skill escape` escape's part, and `--all` the
+//! whole. skill.md stays one file: a rule's part is a `### ` heading under
+//! `## The rules` and what follows it, up to the next.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,15 +23,92 @@ const unrun = @import("unrun.zig");
 const vet = @import("vet.zig");
 const Finding = report.Finding;
 
+/// The whole guide, frontmatter first: `zigvet skill --all` prints it.
 pub const text = @embedFile("skill.md");
 
-/// Writes the skill to `dir/zigvet/SKILL.md`, making the directories, and
+/// The frontmatter, from its first `---` line through its last.
+const frontmatter = text[0 .. (std.mem.find(u8, text[4..], "\n---\n") orelse @compileError("skill.md: no end to the frontmatter")) + 4 + "\n---\n".len];
+
+/// Where the guide starts after its frontmatter and the blank line under it.
+const body_start = std.mem.findNonePos(u8, text, frontmatter.len, "\n") orelse text.len;
+
+/// Where the rules' parts start: the first `### ` heading under
+/// `## The rules`.
+const parts_start = blk: {
+    @setEvalBranchQuota(100_000);
+    const rules_at = std.mem.find(u8, text, "\n## The rules\n") orelse @compileError("skill.md: no ## The rules");
+    break :blk (std.mem.findPos(u8, text, rules_at + 1, "\n### ") orelse @compileError("skill.md: no rule under ## The rules")) + 1;
+};
+
+/// Where the rules' parts end: the `## ` heading after them, or the end.
+const parts_end = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk if (std.mem.findPos(u8, text, parts_start, "\n## ")) |at| at + 1 else text.len;
+};
+
+/// What `zigvet skill` prints, in two pieces: the guide after its
+/// frontmatter, the rules' parts left out.
+pub const short: [2][]const u8 = .{ text[body_start..parts_start], text[parts_end..] };
+
+/// What `zigvet skill --install` writes: the frontmatter, so an agent
+/// knows when to load the skill, and a line handing over to
+/// `zigvet skill`, so an installed skill is never older than the zigvet
+/// that prints it.
+pub const stub = frontmatter ++
+    \\
+    \\Run `zigvet skill` and follow what it prints: it is the guide to the zigvet installed on this machine, current for its version.
+    \\
+;
+
+/// A rule's part of the guide: its `### ` heading and what follows it, up
+/// to the next.
+pub const Part = struct {
+    name: []const u8,
+    text: []const u8,
+};
+
+/// The rules' parts, in the guide's order.
+pub const Parts = struct {
+    at: usize = parts_start,
+
+    pub fn next(it: *Parts) ?Part {
+        if (it.at >= parts_end) return null;
+        const end = if (std.mem.findPos(u8, text[0..parts_end], it.at + 1, "\n### ")) |at| at + 1 else parts_end;
+        const part = text[it.at..end];
+        it.at = end;
+        const name_end = std.mem.findScalar(u8, part, '\n') orelse part.len;
+        return .{ .name = part["### ".len..name_end], .text = part };
+    }
+};
+
+/// The part of the rule named `name`, or null when zigvet has no such rule.
+pub fn partOf(name: []const u8) ?[]const u8 {
+    var it: Parts = .{};
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, part.name, name)) return part.text;
+    }
+    return null;
+}
+
+/// Every rule's name, in the guide's order, for a message:
+/// `escape, freed, ...`.
+pub fn names(arena: Allocator) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it: Parts = .{};
+    while (it.next()) |part| {
+        if (out.items.len > 0) try out.appendSlice(arena, ", ");
+        try out.appendSlice(arena, part.name);
+    }
+    return out.items;
+}
+
+/// Writes the stub to `dir/zigvet/SKILL.md`, making the directories, and
 /// returns the path written.
 pub fn install(arena: Allocator, io: Io, dir: []const u8) ![]const u8 {
     const sub = try std.fs.path.join(arena, &.{ dir, "zigvet" });
     try Io.Dir.cwd().createDirPath(io, sub);
     const path = try std.fs.path.join(arena, &.{ sub, "SKILL.md" });
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = stub });
     return path;
 }
 
@@ -61,15 +146,11 @@ const Rule = struct {
     blocks: []const []const u8,
 };
 
-/// Each `### ` part under `## The rules`.
+/// Each rule's part, as its name and its zig blocks.
 fn rules(arena: Allocator) ![]const Rule {
     var out: std.ArrayList(Rule) = .empty;
-    var parts = std.mem.splitSequence(u8, try section("## The rules"), "\n### ");
-    _ = parts.next(); // what the rules have in common
-    while (parts.next()) |part| {
-        const name_end = std.mem.findScalar(u8, part, '\n') orelse part.len;
-        try out.append(arena, .{ .name = part[0..name_end], .blocks = try zigBlocks(arena, part) });
-    }
+    var it: Parts = .{};
+    while (it.next()) |part| try out.append(arena, .{ .name = part.name, .blocks = try zigBlocks(arena, part.text) });
     return out.items;
 }
 
@@ -281,7 +362,69 @@ test "the skill names every format, and every field of a json report" {
     }
 }
 
-test "install writes SKILL.md under the directory named" {
+test "the short guide and the rules' parts, in order, are the guide" {
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(std.testing.allocator);
+    try joined.appendSlice(std.testing.allocator, text[0..body_start]);
+    try joined.appendSlice(std.testing.allocator, short[0]);
+    var it: Parts = .{};
+    var count: usize = 0;
+    while (it.next()) |part| : (count += 1) {
+        try std.testing.expect(std.mem.startsWith(u8, part.text, "### "));
+        try std.testing.expect(std.mem.find(u8, part.text, "\n## ") == null);
+        try std.testing.expectEqualStrings(part.text, partOf(part.name).?);
+        try joined.appendSlice(std.testing.allocator, part.text);
+    }
+    try joined.appendSlice(std.testing.allocator, short[1]);
+    try std.testing.expectEqualStrings(text, joined.items);
+    try std.testing.expectEqual(std.enums.values(report.Rule).len, count);
+    // Nothing but the parts is left out.
+    try std.testing.expect(std.mem.startsWith(u8, short[0], "# zigvet"));
+    try std.testing.expect(std.mem.endsWith(u8, short[0], "\n\n"));
+    try std.testing.expect(std.mem.startsWith(u8, short[1], "## When a finding looks wrong\n"));
+    try std.testing.expectEqual(null, partOf("allow"));
+    try std.testing.expectEqual(null, partOf(""));
+    try std.testing.expectEqual(null, partOf("The rules"));
+}
+
+test "the short guide names every rule in a line, in the order of their parts" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Each `- name: ` line under `## The rules`.
+    var listed: Writer.Allocating = .init(arena);
+    var lines = std.mem.splitScalar(u8, short[0][std.mem.find(u8, short[0], "\n## The rules\n").?..], '\n');
+    while (lines.next()) |line| {
+        const item = std.mem.cutPrefix(u8, line, "- ") orelse continue;
+        const colon = std.mem.findScalar(u8, item, ':') orelse continue;
+        try listed.writer.print("{s}{s}", .{ if (listed.written().len == 0) "" else ", ", item[0..colon] });
+    }
+    try std.testing.expectEqualStrings(try names(arena), listed.written());
+}
+
+test "the short guide and each rule's part are held under a size" {
+    // An agent reads them as a command's output: the short guide on every
+    // load, and a rule's part for each rule a run reports. Raise a limit
+    // only after cutting what can go.
+    try std.testing.expect(short[0].len + short[1].len <= 12_000);
+    var it: Parts = .{};
+    while (it.next()) |part| {
+        if (part.text.len > 2_000) {
+            std.debug.print("skill: {s}'s part is {d} bytes, over 2,000\n", .{ part.name, part.text.len });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "the stub is the frontmatter and a line handing over to zigvet skill" {
+    try std.testing.expect(std.mem.startsWith(u8, stub, "---\nname: zigvet\ndescription: "));
+    try std.testing.expect(std.mem.startsWith(u8, text, frontmatter));
+    try std.testing.expectEqualStrings(frontmatter, stub[0..frontmatter.len]);
+    try std.testing.expect(std.mem.find(u8, stub[frontmatter.len..], "`zigvet skill`") != null);
+}
+
+test "install writes the stub as SKILL.md under the directory named" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -293,5 +436,5 @@ test "install writes SKILL.md under the directory named" {
     const path = try install(arena, io, dir);
     try std.testing.expect(std.mem.endsWith(u8, path, "zigvet" ++ std.fs.path.sep_str ++ "SKILL.md"));
     const written = try tmp.dir.readFileAlloc(io, "skills/zigvet/SKILL.md", arena, .limited(1 << 20));
-    try std.testing.expectEqualStrings(text, written);
+    try std.testing.expectEqualStrings(stub, written);
 }
