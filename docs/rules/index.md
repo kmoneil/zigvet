@@ -17,7 +17,7 @@ found in real code.
 |---|---|---|
 | [escape](escape.md) | A pointer or slice into stack memory that leaves the function that made it | The caller reads memory the next call writes over |
 | [freed](freed.md) | A function that returns what its own `defer` frees, or a `std.json` value parsed out of it | The caller reads freed memory |
-| [grow](grow.md) | A pointer into a list's items, kept across a call that can move them | The pointer reads freed memory once the list grows |
+| [grow](grow.md) | A pointer into a list's items or a reader's buffer, kept across a call that can move them | The pointer reads freed memory once the list grows, or other bytes once the reader refills |
 | [copy](copy.md) | A `std.Io.Writer` or `Reader` interface copied out of the struct it belongs to | The first flush reads whatever sits next to the copy as its parent, and crashes |
 
 ## Error paths: double frees, leaks, held locks

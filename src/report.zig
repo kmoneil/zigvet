@@ -199,6 +199,9 @@ pub const Finding = struct {
         moved: []const u8,
         /// The local that points into it, or empty for a `for` over it.
         pointer: []const u8,
+        /// A reader's buffer, whose bytes move and have others read over
+        /// their old place, rather than being freed (#188).
+        rebased: bool = false,
     };
 
     pub const Copy = struct {
@@ -386,6 +389,10 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .grow => |g| if (g.pointer.len == 0)
             try w.print("`{s}` can move {s}, and the `for` around it walks on through the old memory on its next turn", .{
                 g.call, g.moved,
+            })
+        else if (g.rebased)
+            try w.print("`{s}` can move the bytes in {s} and read others into their place, and '{s}', taken before it, still points there where it is used after", .{
+                g.call, g.moved, g.pointer,
             })
         else
             try w.print("`{s}` can move {s}, and '{s}', taken before it, still points at the old memory where it is used after", .{

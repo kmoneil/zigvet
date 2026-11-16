@@ -148,7 +148,10 @@ fn joined(gpa: Allocator, a: []const u8, b: []const u8) ![]u8 {
 
 A pointer into a list's items, or a map's value, kept across a call that
 can move them (`append`, `put`). It works while the list has room, which
-is most test runs, and reads freed memory once it grows.
+is most test runs, and reads freed memory once it grows. A slice of a
+`std.Io.Reader`'s buffer (`take`, `peek`, `buffered`) kept across a call
+that reads more (`fill`, `takeInt`) is the same: a refill moves the
+buffer's bytes and reads others into their place.
 
 ```zig
 fn bump(gpa: Allocator, list: *std.ArrayList(u32), x: u32) !void {
@@ -156,16 +159,28 @@ fn bump(gpa: Allocator, list: *std.ArrayList(u32), x: u32) !void {
     try list.append(gpa, x);
     first.* += 1;
 }
+
+fn isAnih(in: *std.Io.Reader) !bool {
+    const id = try in.takeArray(4);
+    _ = try in.takeInt(u32, .little);
+    return std.mem.eql(u8, id, "anih");
+}
 ```
 
 Keep the index and take the pointer again after the growth, or reserve
 first with `ensureUnusedCapacity` and grow with an `AssumeCapacity` call,
-which cannot move anything.
+which cannot move anything. Copy a reader's bytes out before reading on.
 
 ```zig
 fn bump(gpa: Allocator, list: *std.ArrayList(u32), x: u32) !void {
     try list.append(gpa, x);
     list.items[0] += 1;
+}
+
+fn isAnih(in: *std.Io.Reader) !bool {
+    const id = (try in.takeArray(4)).*;
+    _ = try in.takeInt(u32, .little);
+    return std.mem.eql(u8, &id, "anih");
 }
 ```
 
