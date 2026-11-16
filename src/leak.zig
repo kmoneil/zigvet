@@ -30,7 +30,8 @@
 //! an `else |err|` caught, on a path that does not release it first; for
 //! an empty value, after the first statement that uses it.
 //!
-//! Not reported: a local a `defer` or `errdefer` names before the failure;
+//! Not reported: a local a `defer` or `errdefer` names before the failure,
+//! in its block or a block around the failure (#183);
 //! one assigned to between, or stored on the failing path; a failure in a
 //! `return` that hands it on; one made from a name, a field, a call that
 //! cannot fail or one under `orelse`, a view more often than something
@@ -73,15 +74,9 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
                 if (try rule.releasedInEach(later, name)) |call| break .{ k, call, true };
             } else continue;
             var between = statements[at + 1 .. end];
-            // A `defer` or `errdefer` that names it covers what follows,
-            // whether it releases it or hands it back
-            // (`errdefer self.definitions.restore(gpa, &snapshot);`).
+            // A `defer` or `errdefer` that names it covers what follows.
             for (between, 0..) |later, k| {
-                switch (tree.nodeTag(later)) {
-                    .@"defer", .@"errdefer" => {},
-                    else => continue,
-                }
-                if (mentions(tree, later, name)) {
+                if (deferred(tree, later, name)) {
                     between = between[0..k];
                     break;
                 }
@@ -354,7 +349,9 @@ const Rule = struct {
 
     /// Whether, on the way from `statement` down to `node`, a block
     /// releases the local `name` before what holds `node`
-    /// (`else => { stmt.finalize(); return err; }`), or stores it.
+    /// (`else => { stmt.finalize(); return err; }`), stores it, or has a
+    /// `defer` or `errdefer` that names it, which runs when the error
+    /// leaves that block (`{ errdefer close(fd); try write(fd); }`, #183).
     fn handledBefore(r: *Rule, node: Node.Index, statement: Node.Index, name: []const u8) Allocator.Error!bool {
         const tree = r.tree;
         var child = node;
@@ -368,6 +365,7 @@ const Rule = struct {
                 for (inner) |s| {
                     if (s == child) break;
                     if (try r.releaseIn(s, name) != null or try stores(r.arena, tree, s, name)) return true;
+                    if (deferred(tree, s, name)) return true;
                 }
             }
             if (parent == statement) return false;
@@ -375,6 +373,16 @@ const Rule = struct {
         return false;
     }
 };
+
+/// Whether `statement` is a `defer` or `errdefer` that names the local
+/// `name`, which covers what follows it in its block, whether it releases
+/// it or hands it back (`errdefer self.definitions.restore(gpa, &snapshot);`).
+fn deferred(tree: *const Ast, statement: Node.Index, name: []const u8) bool {
+    return switch (tree.nodeTag(statement)) {
+        .@"defer", .@"errdefer" => mentions(tree, statement, name),
+        else => false,
+    };
+}
 
 /// The name a call's function is written with: `prepare` of `prepare(gpa)`
 /// or `finalize` of `stmt.finalize()`.
@@ -589,6 +597,20 @@ test "not reported: covered, released on the way out, after, not made here, move
         \\fn handedIo(file: File) !void { const io = try makeIo(); try more(); file.close(io); }
         \\test "held" { var x = try make(std.testing.allocator); try more(); x.deinit(); }
     , "");
+}
+
+test "an errdefer in an inner block covers a failure in that block, not one after it (#183)" {
+    try expectLeaks(
+        \\fn save(fail: bool) !void { const fd = try open(); { errdefer close(fd); try write(fd, fail); } close(fd); }
+        \\fn nested(gpa: Allocator) !void { var stmt = try prepare(gpa); { errdefer stmt.finalize(); if (more()) { try stmt.bind(1); } } stmt.finalize(); }
+        \\fn looped(gpa: Allocator, rs: []const Row) !void { var stmt = try prepare(gpa); for (rs) |row| { defer stmt.reset(); try bindRow(&stmt, row); } stmt.finalize(); }
+        \\fn outside(fail: bool) !void { const fd = try open(); { errdefer close(fd); try write(fd, fail); } try sync(fd); close(fd); }
+        \\fn sibling(fail: bool) !void { const fd = try open(); { errdefer close(fd); } { try write(fd, fail); } close(fd); }
+    ,
+        \\4:100 fd <- sync, close(fd)
+        \\5:81 fd <- write, close(fd)
+        \\
+    );
 }
 
 test "an error an else capture returns before the release (#118)" {
