@@ -13,15 +13,29 @@
 //! mode, and it works whenever the list happened to have room, which is
 //! most test runs.
 //!
+//! A `std.Io.Reader`'s buffer moves the same way (#188): a slice from
+//! `in.buffered()`, `in.peek(n)` or `in.take(n)`, kept across a call that
+//! reads more, such as `in.fill(n)`, shows other bytes once the reader
+//! rebases, moving what it has not handed out yet to the start of its
+//! buffer and reading new bytes in after.
+//!
 //! What points in is a local made with `&x.items[...]`, `x.items` or a
 //! slice of it, `x.addOne(...)` and its kind when the file shows `x` is an
 //! `ArrayList`, or `x.getPtr(...)`, `x.getOrPut(...)`, `x.getEntry(...)`
 //! and their kind when it shows `x` is a hash map, as escape finds types;
-//! what an `if` captures from such a `getPtr`; and a `for` over `x.items`
-//! or a slice of it. What moves is a call on the same `x`, as written,
-//! that can reallocate: `append`, `appendSlice`, `insert`, `addOne`,
-//! `resize`, `ensureTotalCapacity` and the rest for a list, `put`,
-//! `getOrPut`, `fetchPut`, `ensureTotalCapacity` and the rest for a map.
+//! what an `if` captures from such a `getPtr`; a `for` over `x.items` or a
+//! slice of it; and a local made with `x.buffered()`, `x.peek(...)`,
+//! `x.take(...)` and their kind, or a slice of one, when the file shows `x`
+//! is a reader (a type named `Reader` it does not declare itself, or the
+//! `interface` of one, `&file_reader.interface`) not made with `fixed`,
+//! whose buffer is the bytes it reads and never moves. What moves is a call
+//! on the same `x`, as written, that can reallocate: `append`,
+//! `appendSlice`, `insert`, `addOne`, `resize`, `ensureTotalCapacity` and
+//! the rest for a list, `put`, `getOrPut`, `fetchPut`,
+//! `ensureTotalCapacity` and the rest for a map, and for a reader any call
+//! that can read more: `fill`, `fillMore`, `rebase`, and those named
+//! `peek`, `take`, `discard`, `read`, `stream`, `append` or `alloc` and
+//! more, but not `toss`, which only moves the reader on.
 //! It is reported when, on a path after the call, the local is used, or
 //! the `for` goes on to its next turn: later in the same block, after the
 //! loop or block a `break` leaves, or on the next turn of a loop around
@@ -82,6 +96,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
 const hint_list = "keep the index and take the pointer again after it, or reserve first with `ensureUnusedCapacity` and grow with an `AssumeCapacity` call, which cannot move anything";
 const hint_map = "look it up again after it, or reserve first with `ensureUnusedCapacity` and use `putAssumeCapacity` or `getOrPutAssumeCapacity`, which cannot move anything";
 const hint_loop = "walk an index (`while (i < list.items.len)`) so each turn reads the items afresh, or reserve first with `ensureUnusedCapacity` and grow with an `AssumeCapacity` call";
+const hint_reader = "take the slice again after it, or copy the bytes out before it (into an array, or with `gpa.dupe`) when they must outlive it";
 
 /// What a pointer points into: the list or map, as written.
 const Into = struct {
@@ -92,7 +107,7 @@ const Into = struct {
     slot_left: bool = false,
 };
 
-const Kind = enum { list, map };
+const Kind = enum { list, map, reader };
 
 /// What a path after a moving call is watched for: a use of `name`, the
 /// pointer, unless it is empty, before the end of `scope`, the block that
@@ -115,18 +130,12 @@ const Rule = struct {
         return r.t.?;
     }
 
-    /// The list or map a local's initializer points into: `&x.items[i]`,
-    /// `x.items[a..]`, `try x.addOne(gpa)` or `x.getPtr(k)`.
+    /// The list, map or reader a local's initializer points into:
+    /// `&x.items[i]`, `x.items[a..]`, `try x.addOne(gpa)`, `x.getPtr(k)` or
+    /// `x.buffered()`.
     fn pointsInto(r: *Rule, init: Node.Index) Allocator.Error!?Into {
         const tree = r.tree;
-        var n = init;
-        while (true) switch (tree.nodeTag(n)) {
-            .@"try" => n = tree.nodeData(n).node,
-            .grouped_expression, .unwrap_optional => n = tree.nodeData(n).node_and_token[0],
-            // `map.getPtr(k) orelse return`.
-            .@"orelse" => n = tree.nodeData(n).node_and_node[0],
-            else => break,
-        };
+        const n = unwrapped(tree, init);
         switch (tree.nodeTag(n)) {
             .address_of => {
                 const operand = tree.nodeData(n).node;
@@ -136,10 +145,20 @@ const Rule = struct {
             },
             .field_access => return .{ .owner = itemsOf(tree, n) orelse return null, .kind = .list },
             .slice_open, .slice, .slice_sentinel => {
-                return .{ .owner = itemsOf(tree, tree.fullSlice(n).?.ast.sliced) orelse return null, .kind = .list };
+                const sliced = tree.fullSlice(n).?.ast.sliced;
+                if (itemsOf(tree, sliced)) |owner| return .{ .owner = owner, .kind = .list };
+                // `(try in.peek(8))[0..4]`: a slice of a reader's view.
+                const into = try r.pointsInto(sliced) orelse return null;
+                return if (into.kind == .reader) into else null;
             },
-            else => {},
+            else => return r.madeBy(n),
         }
+    }
+
+    /// What `n`, a call such as `list.addOne(gpa)`, `map.getPtr(k)` or
+    /// `in.peek(4)`, makes a pointer into.
+    fn madeBy(r: *Rule, n: Node.Index) Allocator.Error!?Into {
+        const tree = r.tree;
         var buffer: [1]Node.Index = undefined;
         const call = tree.fullCall(&buffer, n) orelse return null;
         if (tree.nodeTag(call.ast.fn_expr) != .field_access) return null;
@@ -155,7 +174,39 @@ const Rule = struct {
             const grows_first = std.mem.startsWith(u8, name, "getOrPut") and !std.mem.endsWith(u8, name, "AssumeCapacity");
             return .{ .owner = owner, .kind = .map, .slot_left = grows_first };
         }
+        if (in(name, &reader_views)) {
+            if (!try r.isReader(owner, 0)) return null;
+            return .{ .owner = owner, .kind = .reader };
+        }
         return null;
+    }
+
+    /// Whether `place` is a reader whose buffer can move: the file shows
+    /// its type with `Reader` in the name and does not declare that type
+    /// itself, or it is the `interface` of a reader (`&fr.interface`, with
+    /// `fr` a `std.Io.File.Reader` or made by `file.reader(...)`), and it
+    /// was not made with `fixed`, whose buffer is the bytes it reads.
+    fn isReader(r: *Rule, place: Node.Index, depth: u8) Allocator.Error!bool {
+        const tree = r.tree;
+        if (depth > 4) return false;
+        if (tree.nodeTag(place) == .identifier) if ((try r.lazyTypes()).localInit(place)) |init| {
+            if (isFixed(tree, init)) return false;
+            const made = if (tree.nodeTag(init) == .address_of) tree.nodeData(init).node else init;
+            // `const in = &source.interface;`, or `&r` of a reader `r`.
+            if (interfaceOf(tree, made)) |holder| return r.readerNamed(holder, &.{ "Reader", "reader" });
+            if (tree.nodeTag(made) == .identifier) return r.isReader(made, depth + 1);
+        };
+        if (interfaceOf(tree, place)) |holder| return r.readerNamed(holder, &.{ "Reader", "reader" });
+        return r.readerNamed(place, &.{"Reader"});
+    }
+
+    /// Whether the file shows `place`'s type with one of `words` in its
+    /// name, and does not declare that type itself, as it would its own
+    /// `Reader` whose `take` may keep what it returns.
+    fn readerNamed(r: *Rule, place: Node.Index, words: []const []const u8) Allocator.Error!bool {
+        const t = try r.lazyTypes();
+        if (t.typeOf(place, 0)) |of| if (t.containerOf(types.pointee(r.tree, of) orelse of, 0) != null) return false;
+        return r.declaredAs(place, words);
     }
 
     /// Whether the type the file shows for `place`, written or, for a
@@ -280,10 +331,11 @@ const Rule = struct {
         if (tree.nodeTag(call.ast.fn_expr) != .field_access) return false;
         const owner, const method = tree.nodeData(call.ast.fn_expr).node_and_token;
         if (!std.mem.eql(u8, tree.getNodeSource(owner), tree.getNodeSource(into.owner))) return false;
-        return in(tree.tokenSlice(method), switch (into.kind) {
-            .list => &list_moves,
-            .map => &map_moves,
-        });
+        return switch (into.kind) {
+            .list => in(tree.tokenSlice(method), &list_moves),
+            .map => in(tree.tokenSlice(method), &map_moves),
+            .reader => readerReads(tree.tokenSlice(method)),
+        };
     }
 
     /// Whether `call`, a call that moves, comes after a statement that
@@ -370,14 +422,17 @@ const Rule = struct {
             .hint = if (pointer.len == 0) hint_loop else switch (into.kind) {
                 .list => hint_list,
                 .map => hint_map,
+                .reader => hint_reader,
             },
             .detail = .{ .grow = .{
                 .call = tree.getNodeSource(full.ast.fn_expr),
                 .moved = switch (into.kind) {
                     .list => try r.arena.print("`{s}.items`", .{owner}),
                     .map => try r.arena.print("`{s}`'s entries", .{owner}),
+                    .reader => try r.arena.print("`{s}`'s buffer", .{owner}),
                 },
                 .pointer = pointer,
+                .rebased = into.kind == .reader,
             } },
         });
     }
@@ -412,6 +467,51 @@ const map_moves = [_][]const u8{
     "getOrPutValue",       "getOrPutValueContext", "fetchPut",                   "fetchPutContext",
     "ensureTotalCapacity", "ensureUnusedCapacity", "ensureTotalCapacityContext", "ensureUnusedCapacityContext",
 };
+
+/// `n` without the `try`, parentheses, `.?` or `orelse` around it:
+/// `map.getPtr(k) orelse return`.
+fn unwrapped(tree: *const Ast, n: Node.Index) Node.Index {
+    var at = n;
+    while (true) switch (tree.nodeTag(at)) {
+        .@"try" => at = tree.nodeData(at).node,
+        .grouped_expression, .unwrap_optional => at = tree.nodeData(at).node_and_token[0],
+        .@"orelse" => at = tree.nodeData(at).node_and_node[0],
+        else => return at,
+    };
+}
+
+/// A reader's calls that return a slice of its buffer.
+const reader_views = [_][]const u8{
+    "buffered",               "peek",                   "peekGreedy",             "take",
+    "peekArray",              "takeArray",              "peekSentinel",           "takeSentinel",
+    "peekDelimiterInclusive", "takeDelimiterInclusive", "peekDelimiterExclusive", "takeDelimiterExclusive",
+    "takeDelimiter",          "peekStructPointer",      "takeStructPointer",
+};
+
+/// Whether `method`, called on a reader, can read more into its buffer,
+/// and so rebase it. `buffered` and `toss` only look or move the reader on.
+fn readerReads(method: []const u8) bool {
+    const reads = [_][]const u8{ "fill", "rebase", "peek", "take", "discard", "read", "stream", "append", "alloc" };
+    for (reads) |prefix| if (std.mem.startsWith(u8, method, prefix)) return true;
+    return false;
+}
+
+/// Whether `init` makes a reader with `fixed`, `.fixed(bytes)` or
+/// `std.Io.Reader.fixed(bytes)`, which reads `bytes` in place.
+fn isFixed(tree: *const Ast, init: Node.Index) bool {
+    var buffer: [1]Node.Index = undefined;
+    const call = tree.fullCall(&buffer, init) orelse return false;
+    const last = tree.lastToken(call.ast.fn_expr);
+    return tree.tokenTag(last) == .identifier and std.mem.eql(u8, tree.tokenSlice(last), "fixed");
+}
+
+/// `x` of `x.interface`, `x` a name or a field of one.
+fn interfaceOf(tree: *const Ast, node: Node.Index) ?Node.Index {
+    if (tree.nodeTag(node) != .field_access) return null;
+    const holder, const field = tree.nodeData(node).node_and_token;
+    if (!std.mem.eql(u8, tree.tokenSlice(field), "interface") or !isPlace(tree, holder)) return null;
+    return holder;
+}
 
 fn isNamed(tree: *const Ast, node: Node.Index, name: []const u8) bool {
     return tree.nodeTag(node) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), name);
@@ -611,6 +711,40 @@ test "not reported: AssumeCapacity, another branch, a continue, taken again, a c
         \\fn index(gpa: Allocator, list: *List) !void { var i: usize = 0; while (i < list.items.len) : (i += 1) { if (list.items[i] == 0) try list.append(gpa, 1); } }
         \\fn notlist(gpa: Allocator, pool: *Pool) !void { const p = pool.getPtr(1); try pool.put(2); p.* = 1; }
         \\fn unique(map: *std.AutoHashMap(u32, u32), k: u32) !u32 { const gop = try map.getOrPut(k); if (!gop.found_existing) { gop.value_ptr.* = 0; return k; } while (true) { gop.value_ptr.* += 1; const next = try map.getOrPut(k + gop.value_ptr.*); if (!next.found_existing) { next.value_ptr.* = 0; return k + gop.value_ptr.*; } } }
+    , "");
+}
+
+test "a slice of a reader's buffer kept across a call that can rebase it (#188)" {
+    try expectGrow(
+        \\fn kept(in: *std.Io.Reader) !u8 { const head = in.buffered(); try in.fill(4); return head[0]; }
+        \\fn peeked(in: *Io.Reader) !u8 { const a = try in.peek(2); const b = try in.takeByte(); return a[0] + b; }
+        \\fn taken(fr: *std.Io.File.Reader) ![]const u8 { const in = &fr.interface; const name = try in.take(4); _ = try in.discardShort(2); return name; }
+        \\fn sliced(in: *std.Io.Reader) !u8 { const a = (try in.peekGreedy(1))[0..1]; try in.fillMore(); return a[0]; }
+        \\fn made(file: File, io: Io, buf: []u8) !u8 { var fr = file.reader(io, buf); const line = (try fr.interface.takeDelimiter('\n')) orelse return 0; _ = try fr.interface.readSliceShort(buf); return line[0]; }
+        \\fn chunks(buf: []u8) !void { var source: std.testing.Reader = .init(buf, &.{}); const in = &source.interface; const head = in.buffered(); try in.fill(8); try expect(head); }
+    ,
+        \\1:67 in.fill `in`'s buffer head
+        \\2:73 in.takeByte `in`'s buffer a
+        \\3:112 in.discardShort `in`'s buffer name
+        \\4:81 in.fillMore `in`'s buffer a
+        \\5:154 fr.interface.readSliceShort `fr.interface`'s buffer line
+        \\6:143 in.fill `in`'s buffer head
+        \\
+    );
+}
+
+test "not reported: a fixed reader, toss, taken again, a length, another reader, a writer, a type the file declares" {
+    try expectGrow(
+        \\fn fixed(bytes: []const u8) !u8 { var in: std.Io.Reader = .fixed(bytes); const a = try in.take(2); const b = try in.take(2); return a[0] + b[0]; }
+        \\fn pointed(bytes: []const u8) !u8 { var r = std.Io.Reader.fixed(bytes); const in = &r; const a = try in.take(2); _ = try in.take(2); return a[0]; }
+        \\fn tossed(in: *std.Io.Reader) !u8 { const a = try in.peek(2); in.toss(2); return a[0]; }
+        \\fn again(in: *std.Io.Reader) !u8 { var a = in.buffered(); try in.fill(4); a = in.buffered(); return a[0]; }
+        \\fn length(in: *std.Io.Reader) !usize { const a = in.buffered(); try in.fill(4); return a.len; }
+        \\fn other(a: *std.Io.Reader, b: *std.Io.Reader) !u8 { const s = a.buffered(); try b.fill(4); return s[0]; }
+        \\fn passed(in: *std.Io.Reader) !u8 { const s = in.buffered(); try refill(in); return s[0]; }
+        \\fn writer(w: *std.Io.Writer) !u8 { const a = w.buffered(); try w.writeAll("x"); return a[0]; }
+        \\fn own(in: *Reader) !u8 { const a = try in.take(2); _ = try in.take(2); return a[0]; }
+        \\const Reader = struct { fn take(r: *Reader, n: usize) ![]const u8 { _ = r; _ = n; return "ab"; } };
     , "");
 }
 

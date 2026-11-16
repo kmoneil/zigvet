@@ -25,7 +25,6 @@ src/flush.zig	use	19	33	21	3	4	4
 src/freed.zig	check	18	48	30	4	2	2
 src/freed.zig	isView	24	27	38	3	3	3
 src/grow.zig	Rule.insertsOnlyToLeave	20	19	29	1	1	1
-src/grow.zig	Rule.pointsInto	20	19	32	2	1	1
 src/grow.zig	Rule.reached	26	57	37	4	2	2
 src/grow.zig	jumpTarget	14	26	19	3	3	3
 src/hoard.zig	Rule.once	16	28	26	3	2	2
