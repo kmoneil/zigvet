@@ -80,9 +80,13 @@ From v0.2.1 on, releases are also reproducible: a tag built with the Zig
 its `build.zig.zon` names as `minimum_zig_version`, from ziglang.org, gives
 the same bytes wherever it is built, so a release can be checked without
 trusting the workflow that made it. That is the Zig its CI and release ran
-(0.17.0 up to v0.24.0, 0.17.1 after); another Zig gives other bytes. CI
-builds every change on Linux and on macOS and compares them. To check one
-yourself:
+(0.17.0 up to v0.24.0, 0.17.1 after); another Zig gives other bytes, and so
+can the same version built elsewhere. Homebrew's Zig, built against its own
+LLVM, writes `Linker: Homebrew LLD` into the two Linux binaries where the
+release has `Linker: LLD`, so those two say FAILED while the macOS and
+Windows ones match (`strings -a zigvet-linux-arm64 | grep Linker:` shows
+which). CI builds every change on Linux and on macOS and compares them. To
+check one yourself:
 
 ```sh
 git clone --depth 1 --branch <tag> https://github.com/kmoneil/zigvet && cd zigvet
@@ -92,11 +96,9 @@ curl -fLO https://github.com/kmoneil/zigvet/releases/download/<tag>/SHA256SUMS
 shasum -a 256 --check SHA256SUMS
 ```
 
-It takes Zig as ziglang.org ships it: a Zig built against another LLVM,
-such as Homebrew's, writes its linker's name into the Linux binaries, so
-those two differ while the macOS and Windows ones still match. The release
-binaries carry no debug info, since it holds the paths of the machine that
-built them, so a panic prints its message but not a symbolized stack trace.
+The release binaries carry no debug info, since it holds the paths of the
+machine that built them, so a panic prints its message but not a symbolized
+stack trace.
 
 </details>
 
