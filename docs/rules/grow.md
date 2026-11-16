@@ -44,6 +44,27 @@ reader is at the start of its buffer or the fill needs no room. The fix is
 to take the slice again after the call, or to copy the bytes out before it
 when they must outlive it.
 
+## A slice a doc says stays valid
+
+The same bug spread over the methods of one type
+([#189](https://github.com/kmoneil/zigvet/issues/189)):
+
+```zig
+/// The string `id` names. Valid until `deinit`.
+pub fn get(t: *const Table, id: usize) []const u8 {
+    return t.spanOf(t.spans.items[id]); // a slice of t.bytes.items
+}
+pub fn intern(t: *Table, s: []const u8) !usize {
+    try t.bytes.appendSlice(t.gpa, s); // moves every slice get() returned
+```
+
+The doc's promise and the storage disagree: the first append that
+reallocates `bytes` frees what every earlier `get` returned. Each method is
+right alone, and tests pass until enough strings are interned to grow the
+list. The fix is to keep what is handed out where growing cannot move it
+(an arena, or each string allocated on its own), or to say in the doc that
+it is valid until the next `intern`.
+
 ## What grow reports
 
 A pointer local made with `&x.items[...]`, `x.items` or a slice of it,
@@ -80,6 +101,21 @@ nothing; a list, map or reader handed to a call, which only the callee
 can judge; and a type the file does not show, such as
 `std.SegmentedList`, whose elements never move.
 
+Across methods, a method of a struct whose doc comment says what it
+returns stays valid (until `deinit`, or the value is freed; for the life
+of the value; as long as it; or that it never moves), whose return value
+is a slice of `self.F.items` or a pointer into them, directly, through the
+branches of an `if` or `switch`, or through one helper of the same type
+that returns one (`self.spanOf(span)`), where `F` is an `ArrayList` field
+and another method calls a growing method on `self.F`. Not reported: a doc
+that also says what ends it (the next call, a change, growing, or the
+growing method by name); and a growing method that is not `pub`, unless a
+function outside the type calls both it and the method that hands out the
+slice. A method only the type itself calls grows the list when the type
+decides, in a phase it runs once (a checker recording what it found, a
+table filled before it is handed on), and the doc's promise may rest on
+that phase being over, which the syntax does not show.
+
 ## Found in real code
 
 Over Zig 0.17.0's standard library and compiler sources, the application
@@ -96,5 +132,15 @@ a chunk id from `takeArray(4)` across the `takeInt` after it, through a
 file reader with a 2048-byte buffer: an animated icon whose `anih` id is
 the last 4 bytes buffered has it read over by the refill, and is not
 seen as animated.
+
+Docs: the same code bases have about 300 doc comment lines that promise a
+lifetime this way, and grow reports none of them. It was written for an
+XML reader whose namespace table did this: `namespaceUri` ("Valid until
+`deinit`") returned a slice of the table's bytes and a `pub` method
+appended to them whenever a document declared a new URI, so a binding
+that held the root's URI across its children read freed memory after 64
+declarations. Before the growing method had to be `pub` or called beside
+the getter, a compiler's checker reported once, falsely: its private
+method fills the list during the check, and the getter is read after.
 
 [All rules](index.md)

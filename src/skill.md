@@ -151,7 +151,8 @@ can move them (`append`, `put`). It works while the list has room, which
 is most test runs, and reads freed memory once it grows. A slice of a
 `std.Io.Reader`'s buffer (`take`, `peek`, `buffered`) kept across a call
 that reads more (`fill`, `takeInt`) is the same: a refill moves the
-buffer's bytes and reads others into their place.
+buffer's bytes and reads others into their place. So is a method whose
+doc says its slice lives until `deinit` while another grows the list.
 
 ```zig
 fn bump(gpa: Allocator, list: *std.ArrayList(u32), x: u32) !void {
@@ -165,11 +166,23 @@ fn isAnih(in: *std.Io.Reader) !bool {
     _ = try in.takeInt(u32, .little);
     return std.mem.eql(u8, id, "anih");
 }
+
+const Names = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    pub fn add(n: *Names, gpa: Allocator, s: []const u8) !void {
+        try n.bytes.appendSlice(gpa, s);
+    }
+    /// All the names. Valid until `deinit`.
+    pub fn all(n: *const Names) []const u8 {
+        return n.bytes.items;
+    }
+};
 ```
 
 Keep the index and take the pointer again after the growth, or reserve
 first with `ensureUnusedCapacity` and grow with an `AssumeCapacity` call,
 which cannot move anything. Copy a reader's bytes out before reading on.
+Make a doc say what ends the slice.
 
 ```zig
 fn bump(gpa: Allocator, list: *std.ArrayList(u32), x: u32) !void {
@@ -182,6 +195,17 @@ fn isAnih(in: *std.Io.Reader) !bool {
     _ = try in.takeInt(u32, .little);
     return std.mem.eql(u8, &id, "anih");
 }
+
+const Names = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    pub fn add(n: *Names, gpa: Allocator, s: []const u8) !void {
+        try n.bytes.appendSlice(gpa, s);
+    }
+    /// All the names. Valid until the next `add`.
+    pub fn all(n: *const Names) []const u8 {
+        return n.bytes.items;
+    }
+};
 ```
 
 ### copy
