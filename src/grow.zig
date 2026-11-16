@@ -19,6 +19,11 @@
 //! rebases, moving what it has not handed out yet to the start of its
 //! buffer and reading new bytes in after.
 //!
+//! Across the methods of one type (#189): a method whose doc comment says
+//! the slice it returns stays valid (until `deinit`, for the value's life,
+//! never moves), while another method grows the list it is a slice of. See
+//! `promised` for what it reads.
+//!
 //! What points in is a local made with `&x.items[...]`, `x.items` or a
 //! slice of it, `x.addOne(...)` and its kind when the file shows `x` is an
 //! `ArrayList`, or `x.getPtr(...)`, `x.getOrPut(...)`, `x.getEntry(...)`
@@ -79,6 +84,8 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
             .if_simple, .@"if" => try rule.captured(node),
             else => {},
         }
+        var container_buffer: [2]Node.Index = undefined;
+        if (tree.fullContainerDecl(&container_buffer, node)) |container| try rule.promised(node, container.ast.members);
         var buffer: [2]Node.Index = undefined;
         const statements = tree.blockStatements(&buffer, node) orelse continue;
         for (statements, 0..) |statement, at| {
@@ -118,6 +125,9 @@ const Watch = struct {
     scope: Node.Index,
     loop: bool,
 };
+
+/// A method that grows a list field, and the call in it that does.
+const Grower = struct { method: Node.Index, call: Node.Index };
 
 const Rule = struct {
     arena: Allocator,
@@ -412,6 +422,146 @@ const Rule = struct {
         return false;
     }
 
+    /// Methods of `container` that hand out a slice of a list field's
+    /// items, and say in their doc comment that it stays valid (until
+    /// `deinit`, for the value's life), while another method of the type
+    /// grows that list (#189). Each is right alone; the pair is the bug.
+    fn promised(r: *Rule, container: Node.Index, members: []const Node.Index) Allocator.Error!void {
+        const tree = r.tree;
+        for (members) |member| {
+            if (tree.nodeTag(member) != .fn_decl) continue;
+            const doc = try docComment(r.arena, tree, member) orelse continue;
+            if (!promisesToKeep(doc)) continue;
+            var values: std.ArrayList(Node.Index) = .empty;
+            try returned(r.arena, tree, member, &values);
+            for (values.items) |value| {
+                const field = r.handsOut(members, member, value, 1) orelse continue;
+                if (!try r.isListField(container, field)) continue;
+                const grows = try r.grower(members, field) orelse continue;
+                if (honest(doc, fnName(tree, grows.method))) continue;
+                if (!try r.isOpen(container, member, grows.method)) continue;
+                try r.addPromise(member, value, field, grows);
+                break;
+            }
+        }
+    }
+
+    /// The list field whose items `value`, returned from `method`, is a
+    /// slice of or points into: `self.names.items`, `self.bytes.items[a..]`,
+    /// `&self.nodes.items[i]`, or, `depth` times, a call to another method
+    /// of the type that returns one (`self.spanOf(span)`).
+    fn handsOut(r: *Rule, members: []const Node.Index, method: Node.Index, value: Node.Index, depth: u8) ?Ast.TokenIndex {
+        const tree = r.tree;
+        const self = receiver(tree, method) orelse return null;
+        var n = value;
+        while (tree.fullSlice(n)) |slice| n = slice.ast.sliced;
+        if (tree.nodeTag(n) == .address_of and tree.nodeTag(tree.nodeData(n).node) == .array_access) {
+            n = tree.nodeData(tree.nodeData(n).node).node_and_node[0];
+        }
+        if (itemsOf(tree, n)) |owner| return fieldOf(tree, owner, self);
+        if (depth == 0) return null;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, value) orelse return null;
+        if (tree.nodeTag(call.ast.fn_expr) != .field_access) return null;
+        const on, const name = tree.nodeData(call.ast.fn_expr).node_and_token;
+        if (!isNamed(tree, on, self)) return null;
+        const helper = memberFnIn(tree, members, tree.tokenSlice(name)) orelse return null;
+        var values: std.ArrayList(Node.Index) = .empty;
+        returned(r.arena, tree, helper, &values) catch return null;
+        for (values.items) |inner| if (r.handsOut(members, helper, inner, depth - 1)) |field| return field;
+        return null;
+    }
+
+    /// Whether the type declares `field` as an `ArrayList`.
+    fn isListField(r: *Rule, container: Node.Index, field: Ast.TokenIndex) Allocator.Error!bool {
+        const tree = r.tree;
+        const of = types.fieldType(tree, container, tree.tokenSlice(field)) orelse return false;
+        const text = tree.getNodeSource(of);
+        const head = text[0 .. std.mem.findScalar(u8, text, '(') orelse text.len];
+        return std.mem.find(u8, head, "ArrayList") != null or std.mem.find(u8, head, "array_list") != null;
+    }
+
+    /// The first method among `members` that calls a growing method on
+    /// its receiver's `field`: `self.bytes.appendSlice(...)`.
+    fn grower(r: *Rule, members: []const Node.Index, field: Ast.TokenIndex) Allocator.Error!?Grower {
+        const tree = r.tree;
+        const name = tree.tokenSlice(field);
+        for (members) |member| {
+            if (tree.nodeTag(member) != .fn_decl) continue;
+            const self = receiver(tree, member) orelse continue;
+            var nodes: std.ArrayList(Node.Index) = .empty;
+            try within(r.arena, tree, tree.nodeData(member).node_and_node[1], &nodes);
+            for (nodes.items) |node| {
+                var buffer: [1]Node.Index = undefined;
+                const call = tree.fullCall(&buffer, node) orelse continue;
+                if (tree.nodeTag(call.ast.fn_expr) != .field_access) continue;
+                const owner, const method = tree.nodeData(call.ast.fn_expr).node_and_token;
+                if (!in(tree.tokenSlice(method), &list_moves)) continue;
+                const of = fieldOf(tree, owner, self) orelse continue;
+                if (std.mem.eql(u8, tree.tokenSlice(of), name)) return .{ .method = member, .call = node };
+            }
+        }
+        return null;
+    }
+
+    /// Whether whoever holds what `getter` returns can grow the list with
+    /// `grower`: it is `pub`, or a function outside `container` calls both.
+    /// A method only the type itself calls grows the list when the type
+    /// decides (a phase it runs once, as a checker records what it found,
+    /// or a table filled before it is handed on), and the doc's promise may
+    /// rest on that phase being over, which the syntax does not show.
+    fn isOpen(r: *Rule, container: Node.Index, getter: Node.Index, grower_fn: Node.Index) Allocator.Error!bool {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        if (tree.fullFnProto(&buffer, tree.nodeData(grower_fn).node_and_node[0]).?.visib_token != null) return true;
+        const parents = (try r.lazyTypes()).parents;
+        for (0..tree.nodes.len) |i| {
+            const node: Node.Index = @fromBackingInt(@intCast(i));
+            if (!try r.callsOn(node, fnName(tree, grower_fn), container) or inside(parents, node, container)) continue;
+            const caller = enclosingFn(tree, parents, node) orelse continue;
+            var nodes: std.ArrayList(Node.Index) = .empty;
+            const body = switch (tree.nodeTag(caller)) {
+                .test_decl => tree.nodeData(caller).opt_token_and_node[1],
+                else => tree.nodeData(caller).node_and_node[1],
+            };
+            try within(r.arena, tree, body, &nodes);
+            for (nodes.items) |n| if (try r.callsOn(n, fnName(tree, getter), container)) return true;
+        }
+        return false;
+    }
+
+    /// Whether `node` calls a method named `name`, on a value the file does
+    /// not show the type of, or shows is `container`.
+    fn callsOn(r: *Rule, node: Node.Index, name: []const u8, container: Node.Index) Allocator.Error!bool {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node) orelse return false;
+        if (tree.nodeTag(call.ast.fn_expr) != .field_access) return false;
+        const on, const method = tree.nodeData(call.ast.fn_expr).node_and_token;
+        if (!std.mem.eql(u8, tree.tokenSlice(method), name)) return false;
+        const t = try r.lazyTypes();
+        const of = t.typeOf(on, 0) orelse return true;
+        const named = t.containerOf(types.pointee(tree, of) orelse of, 0) orelse return true;
+        return named == container;
+    }
+
+    fn addPromise(r: *Rule, method: Node.Index, value: Node.Index, field: Ast.TokenIndex, grows: Grower) Allocator.Error!void {
+        const tree = r.tree;
+        const grower_name = fnName(tree, grows.method);
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, grows.call).?;
+        try r.findings.append(r.arena, .{
+            .offset = tree.tokenStart(tree.firstToken(value)),
+            .hint = try r.arena.print("keep what it returns where growing the list cannot move it (an arena, or each one allocated on its own), or say in its doc that it is valid until the next `{s}`", .{grower_name}),
+            .detail = .{ .grow = .{
+                .call = tree.getNodeSource(call.ast.fn_expr),
+                .moved = try r.arena.print("`{s}.{s}.items`", .{ receiver(tree, method).?, tree.tokenSlice(field) }),
+                .pointer = fnName(tree, method),
+                .grower = grower_name,
+            } },
+        });
+    }
+
     fn add(r: *Rule, call: Node.Index, into: Into, pointer: []const u8) Allocator.Error!void {
         const tree = r.tree;
         var buffer: [1]Node.Index = undefined;
@@ -511,6 +661,113 @@ fn interfaceOf(tree: *const Ast, node: Node.Index) ?Node.Index {
     const holder, const field = tree.nodeData(node).node_and_token;
     if (!std.mem.eql(u8, tree.tokenSlice(field), "interface") or !isPlace(tree, holder)) return null;
     return holder;
+}
+
+/// The doc comment above `fn_decl`, its `///` lines joined and lowercased,
+/// or null for none.
+fn docComment(arena: Allocator, tree: *const Ast, fn_decl: Node.Index) Allocator.Error!?[]const u8 {
+    var buffer: [1]Node.Index = undefined;
+    const first = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?.firstToken();
+    var top = first;
+    while (top > 0 and tree.tokenTag(top - 1) == .doc_comment) top -= 1;
+    if (top == first) return null;
+    var text: std.ArrayList(u8) = .empty;
+    for (top..first) |token| {
+        for (tree.tokenSlice(@intCast(token))[3..]) |c| try text.append(arena, std.ascii.toLower(c));
+        try text.append(arena, ' ');
+    }
+    return text.items;
+}
+
+/// Whether a doc comment, lowercased, says what the function returns
+/// stays valid: until `deinit` (or the value is freed), for the value's
+/// life, or that it never moves.
+fn promisesToKeep(doc: []const u8) bool {
+    if (std.mem.find(u8, doc, "until")) |at| {
+        for ([_][]const u8{ "deinit", "freed", "destroy" }) |end| if (std.mem.find(u8, doc[at..], end) != null) return true;
+    }
+    for ([_][]const u8{ "lifetime", "for the life", "as long as", "never move" }) |phrase| {
+        if (std.mem.find(u8, doc, phrase) != null) return true;
+    }
+    return false;
+}
+
+/// Whether a doc comment, lowercased, also says what ends the slice short
+/// of that: the next call, a change to the value, or `grower` by name.
+fn honest(doc: []const u8, grower: []const u8) bool {
+    const ends = [_][]const u8{ "next", "modif", "mutat", "chang", "resiz", "grow", "append", "insert", "invalidat" };
+    for (ends) |end| if (std.mem.find(u8, doc, end) != null) return true;
+    var lower: [64]u8 = undefined;
+    if (grower.len > lower.len) return false;
+    return std.mem.find(u8, doc, std.ascii.lowerString(&lower, grower)) != null;
+}
+
+/// The values `fn_decl` can return: each `return`'s operand, through a
+/// `try`, parentheses and the branches of an `if` or `switch`.
+fn returned(arena: Allocator, tree: *const Ast, fn_decl: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
+    var nodes: std.ArrayList(Node.Index) = .empty;
+    try within(arena, tree, tree.nodeData(fn_decl).node_and_node[1], &nodes);
+    for (nodes.items) |node| {
+        if (tree.nodeTag(node) != .@"return") continue;
+        try branches(arena, tree, tree.nodeData(node).opt_node.unwrap() orelse continue, out);
+    }
+}
+
+fn branches(arena: Allocator, tree: *const Ast, node: Node.Index, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
+    switch (tree.nodeTag(node)) {
+        .grouped_expression => return branches(arena, tree, tree.nodeData(node).node_and_token[0], out),
+        .@"try" => return branches(arena, tree, tree.nodeData(node).node, out),
+        .if_simple, .@"if" => {
+            const full = tree.fullIf(node).?;
+            try branches(arena, tree, full.ast.then_expr, out);
+            if (full.ast.else_expr.unwrap()) |other| try branches(arena, tree, other, out);
+        },
+        .@"switch", .switch_comma => for (tree.fullSwitch(node).?.ast.cases) |case| {
+            try branches(arena, tree, tree.fullSwitchCase(case).?.ast.target_expr, out);
+        },
+        else => try out.append(arena, node),
+    }
+}
+
+/// The name of `fn_decl`'s first parameter, its receiver as a method.
+fn receiver(tree: *const Ast, fn_decl: Node.Index) ?[]const u8 {
+    var buffer: [1]Node.Index = undefined;
+    var params = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?.iterate(tree);
+    const first = params.next() orelse return null;
+    return tree.tokenSlice(first.name_token orelse return null);
+}
+
+/// `F` of `self.F`, with `self` the name given.
+fn fieldOf(tree: *const Ast, node: Node.Index, self: []const u8) ?Ast.TokenIndex {
+    if (tree.nodeTag(node) != .field_access) return null;
+    const on, const field = tree.nodeData(node).node_and_token;
+    return if (isNamed(tree, on, self)) field else null;
+}
+
+/// The function `name` among `members`.
+fn memberFnIn(tree: *const Ast, members: []const Node.Index, name: []const u8) ?Node.Index {
+    for (members) |member| {
+        if (tree.nodeTag(member) == .fn_decl and std.mem.eql(u8, fnName(tree, member), name)) return member;
+    }
+    return null;
+}
+
+/// The function or test `node` is in.
+fn enclosingFn(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) ?Node.Index {
+    var up = parents[@backingInt(node)].unwrap();
+    while (up) |parent| : (up = parents[@backingInt(parent)].unwrap()) {
+        switch (tree.nodeTag(parent)) {
+            .fn_decl, .test_decl => return parent,
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn fnName(tree: *const Ast, fn_decl: Node.Index) []const u8 {
+    var buffer: [1]Node.Index = undefined;
+    const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
+    return if (proto.name_token) |token| tree.tokenSlice(token) else "";
 }
 
 fn isNamed(tree: *const Ast, node: Node.Index, name: []const u8) bool {
@@ -746,6 +1003,87 @@ test "not reported: a fixed reader, toss, taken again, a length, another reader,
         \\fn own(in: *Reader) !u8 { const a = try in.take(2); _ = try in.take(2); return a[0]; }
         \\const Reader = struct { fn take(r: *Reader, n: usize) ![]const u8 { _ = r; _ = n; return "ab"; } };
     , "");
+}
+
+test "a method whose doc says the slice it returns stays valid, and a method that grows the list (#189)" {
+    try expectGrow(
+        \\const Table = struct {
+        \\    gpa: Allocator,
+        \\    bytes: std.ArrayList(u8) = .empty,
+        \\    spans: std.ArrayList(Span) = .empty,
+        \\    pub fn intern(t: *Table, s: []const u8) !usize { try t.bytes.appendSlice(t.gpa, s); try t.spans.append(t.gpa, .{ .start = 0, .len = s.len }); return t.spans.items.len - 1; }
+        \\    /// The string `id` names. Valid until `deinit`.
+        \\    fn get(t: *const Table, id: usize) []const u8 { return t.spanOf(t.spans.items[id]); }
+        \\    fn spanOf(t: *const Table, s: Span) []const u8 { return t.bytes.items[s.start..][0..s.len]; }
+        \\    /// The URI of `ns`, for the life of the table.
+        \\    pub fn uri(t: *const Table, ns: u32) []const u8 { return switch (ns) { 0 => "", else => |i| t.spanOf(t.spans.items[i]) }; }
+        \\    /// Every span. Never moves.
+        \\    pub fn all(t: *const Table) []const Span { return t.spans.items; }
+        \\    /// The first span; lives until the table is deinit'd.
+        \\    pub fn first(t: *Table) *Span { return &t.spans.items[0]; }
+        \\};
+    ,
+        \\7:60 t.bytes.appendSlice `t.bytes.items` get
+        \\10:97 t.bytes.appendSlice `t.bytes.items` uri
+        \\12:55 t.spans.append `t.spans.items` all
+        \\14:44 t.spans.append `t.spans.items` first
+        \\
+    );
+}
+
+test "not reported: a doc that names what ends it, no doc, no method that grows it, not a list" {
+    try expectGrow(
+        \\const Table = struct {
+        \\    bytes: std.ArrayList(u8) = .empty,
+        \\    fixed: std.ArrayList(u8) = .empty,
+        \\    raw: []u8,
+        \\    seg: std.SegmentedList(u8, 0) = .{},
+        \\    pub fn intern(t: *Table, gpa: Allocator, s: []const u8) !void { try t.bytes.appendSlice(gpa, s); t.fixed.appendSliceAssumeCapacity(s); try t.seg.append(gpa, 1); }
+        \\    fn init(gpa: Allocator, s: []const u8) !Table { var t: Table = .{ .raw = &.{} }; try t.fixed.appendSlice(gpa, s); return t; }
+        \\    /// Valid until `deinit` or the next `intern`.
+        \\    fn named(t: *const Table) []const u8 { return t.bytes.items; }
+        \\    /// Valid until `deinit`; invalidated when the table changes.
+        \\    fn changed(t: *const Table) []const u8 { return t.bytes.items; }
+        \\    fn undocumented(t: *const Table) []const u8 { return t.bytes.items; }
+        \\    /// Valid until `deinit`.
+        \\    fn grownAtInit(t: *const Table) []const u8 { return t.fixed.items; }
+        \\    /// Valid until `deinit`.
+        \\    fn slice(t: *const Table) []u8 { return t.raw; }
+        \\    /// Valid until `deinit`.
+        \\    fn byte(t: *const Table, i: usize) u8 { return t.bytes.items[i]; }
+        \\    /// Valid until `deinit`.
+        \\    fn other(t: *const Table, o: *const Table) []const u8 { _ = t; return o.bytes.items; }
+        \\};
+        \\const Checker = struct {
+        \\    found: std.ArrayList(u32) = .empty,
+        \\    pub fn check(c: *Checker, gpa: Allocator) !void { try c.record(gpa); }
+        \\    fn record(c: *Checker, gpa: Allocator) !void { try c.found.append(gpa, 1); }
+        \\    /// What checking found, valid until `deinit`.
+        \\    pub fn results(c: *const Checker) []const u32 { return c.found.items; }
+        \\};
+    , "");
+}
+
+test "a method that grows the list, not pub: reported when a function outside the type also calls the getter (#189)" {
+    try expectGrow(
+        \\const Rows = struct {
+        \\    rows: std.ArrayList(u32) = .empty,
+        \\    fn add(p: *Rows, gpa: Allocator) !void { try p.rows.append(gpa, 1); }
+        \\    /// The rows, valid until `deinit`.
+        \\    fn all(p: *const Rows) []const u32 { return p.rows.items; }
+        \\};
+        \\test { var p: Rows = .{}; try p.add(std.testing.allocator); _ = p.all(); }
+        \\const Filled = struct {
+        \\    rows: std.ArrayList(u32) = .empty,
+        \\    fn add(f: *Filled, gpa: Allocator) !void { try f.rows.append(gpa, 1); }
+        \\    /// The rows, valid until `deinit`.
+        \\    pub fn all(f: *const Filled) []const u32 { return f.rows.items; }
+        \\};
+        \\fn fill(f: *Filled, gpa: Allocator) !void { try f.add(gpa); }
+    ,
+        \\5:49 p.rows.append `p.rows.items` all
+        \\
+    );
 }
 
 test "not reported: the list stored again before the call that grows it (#95)" {

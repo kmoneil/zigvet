@@ -202,6 +202,9 @@ pub const Finding = struct {
         /// A reader's buffer, whose bytes move and have others read over
         /// their old place, rather than being freed (#188).
         rebased: bool = false,
+        /// The method that grows the list, when `pointer` names a method
+        /// whose doc says the slice it returns stays valid (#189).
+        grower: []const u8 = "",
     };
 
     pub const Copy = struct {
@@ -389,6 +392,10 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .grow => |g| if (g.pointer.len == 0)
             try w.print("`{s}` can move {s}, and the `for` around it walks on through the old memory on its next turn", .{
                 g.call, g.moved,
+            })
+        else if (g.grower.len > 0)
+            try w.print("'{s}' returns a slice of {s} and its doc says it stays valid, but `{s}` in '{s}' can move them, and what it returned then points at freed memory", .{
+                g.pointer, g.moved, g.call, g.grower,
             })
         else if (g.rebased)
             try w.print("`{s}` can move the bytes in {s} and read others into their place, and '{s}', taken before it, still points there where it is used after", .{
