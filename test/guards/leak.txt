@@ -4,8 +4,12 @@
 file src/leak.zig
 
 == a defer or errdefer that names the local covers what follows
--                if (mentions(tree, later, name)) {
-+                if (false) {
+-                if (deferred(tree, later, name)) {
++                if (false and deferred(tree, later, name)) {
+
+== a defer or errdefer in a block around the failure covers it (#183)
+-                    if (deferred(tree, s, name)) return true;
++                    if (false and deferred(tree, s, name)) return true;
 
 == a local assigned to between
 -            if (try assigns(arena, tree, between, name)) continue;

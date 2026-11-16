@@ -50,7 +50,9 @@ fails while filling it leaves nothing to release.
 
 Not reported: a local a `defer` or `errdefer` names before the failure,
 whether it releases it or hands it back
-(`errdefer self.defs.restore(&snapshot);`); one assigned to between, or
+(`errdefer self.defs.restore(&snapshot);`), in its own block or in a
+block around the failure (`{ errdefer close(fd); try write(fd); }`,
+which runs when the error leaves that block); one assigned to between, or
 stored on the failing path (`self.stmt = stmt;`); a failure in a `return`
 that hands the local on (`return try wrap(face);`); one made from
 something else, a name, a field, a call that cannot fail
