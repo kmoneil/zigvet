@@ -654,6 +654,7 @@ test {
     _ = @import("race.zig");
     _ = @import("kept.zig");
     _ = @import("narrow.zig");
+    _ = @import("counter.zig");
     _ = @import("leak.zig");
     _ = @import("owner.zig");
     _ = @import("refill.zig");
