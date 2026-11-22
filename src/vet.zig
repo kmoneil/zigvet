@@ -30,6 +30,7 @@ const sweep = @import("sweep.zig");
 const unlock = @import("unlock.zig");
 const wipe = @import("wipe.zig");
 const refill = @import("refill.zig");
+const narrow = @import("narrow.zig");
 const wrap = @import("wrap.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
@@ -103,6 +104,7 @@ pub fn findings(arena: Allocator, tree: *const Ast, across: Across) Allocator.Er
     try positional.check(arena, tree, &all);
     try race.check(arena, tree, &all);
     try wrap.check(arena, tree, &all);
+    try narrow.check(arena, tree, &all);
     return keep(arena, tree.source, all.items);
 }
 
@@ -208,7 +210,7 @@ test "an allow comment that suppresses nothing is reported, with why" {
     try std.testing.expectEqualStrings(
         \\a.zig:2:5: allow: suppresses nothing: no escape finding on the line below it
         \\    hint: delete it, or move it directly above the line it excuses
-        \\a.zig:6:5: allow: no rule named 'escpae' (rules: escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap)
+        \\a.zig:6:5: allow: no rule named 'escpae' (rules: escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow)
         \\    hint: write it as `// zigvet: allow <rule> <reason>`
         \\a.zig:7:12: escape: anonymous array made here leaves typo through return
         \\    hint: make it comptime-known (`comptime` on the runtime elements) or a container-level const

@@ -85,6 +85,8 @@ first trips its rule, and the fix reports nothing.
   whether it is null by value.
 - wrap: a test for unsigned wraparound after a plain `+`, which panics
   rather than wraps.
+- narrow: a `u8` or `u16` offset plus a constant as an index, computed
+  in the narrow type, where the same function widens it elsewhere.
 - cached: a build script lists a directory to decide what to build, and
   never tells Zig's configure cache.
 - unrun: a file whose tests never run, because nothing the test build
@@ -727,6 +729,36 @@ fn take(src: []const u8, off: *usize, n: u32) ?[]const u8 {
     const s = src[off.*..end];
     off.* = end;
     return s;
+}
+```
+
+### narrow
+
+An offset declared `u8` or `u16` plus a constant, as a slice's bound or
+an index. Zig computes `offset + 4` in `u16` and widens only the result,
+so it overflows at 0xFFFC, a panic in Debug and ReleaseSafe and the wrong
+bytes in ReleaseFast, though the bounds check above, widened, passes.
+
+```zig
+const std = @import("std");
+
+pub fn tagged(sub: []const u8, offset: u16) ?u32 {
+    if (offset == 0 or @as(usize, offset) + 6 > sub.len) return null;
+    if (std.mem.readInt(u16, sub[offset + 4 ..][0..2], .big) != 0x8000) return null;
+    return std.mem.readInt(u32, sub[offset..][0..4], .big);
+}
+```
+
+Widen before the arithmetic, `@as(usize, offset) + 4`, or take the offset
+as a `usize`, so no sum of it is computed narrow.
+
+```zig
+const std = @import("std");
+
+pub fn tagged(sub: []const u8, offset: usize) ?u32 {
+    if (offset == 0 or offset + 6 > sub.len) return null;
+    if (std.mem.readInt(u16, sub[offset + 4 ..][0..2], .big) != 0x8000) return null;
+    return std.mem.readInt(u32, sub[offset..][0..4], .big);
 }
 ```
 

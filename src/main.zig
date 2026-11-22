@@ -653,6 +653,7 @@ test {
     _ = @import("positional.zig");
     _ = @import("race.zig");
     _ = @import("kept.zig");
+    _ = @import("narrow.zig");
     _ = @import("leak.zig");
     _ = @import("owner.zig");
     _ = @import("refill.zig");
