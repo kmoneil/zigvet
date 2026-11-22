@@ -1,0 +1,35 @@
+# wrap's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/wrap.zig
+
+== the test compares the sum with one of its own operands
+-        if (!sameTokens(tree, operand, unparen(tree, a)) and !sameTokens(tree, operand, unparen(tree, b))) continue;
++        if (false and !sameTokens(tree, operand, unparen(tree, a)) and !sameTokens(tree, operand, unparen(tree, b))) continue;
+
+== nothing changed between the sum and the test
+-        if (changedBetween(tree, t.?.parents, function, sum.add, node, operand, sum.local)) continue;
++        if (false and changedBetween(tree, t.?.parents, function, sum.add, node, operand, sum.local)) continue;
+
+== a loop around the test and not the sum counts whole
+-                if (sum_at >= first and sum_at <= last) continue;
+-                start = @min(start, first);
++                if (sum_at >= first and sum_at <= last) continue;
++                if (true) continue;
++                start = @min(start, first);
+
+== the sum shown unsigned
+-    return sign == .unsigned;
++    return sign != .signed;
+
+== nothing in the sum shown signed
+-    var sign = ints.signOf(t, a, 0).with(ints.signOf(t, b, 0));
++    var sign: ints.Sign = if (ints.signOf(t, a, 0) == .unsigned or ints.signOf(t, b, 0) == .unsigned) .unsigned else .unknown;
+
+== the local reassigned counts
+-        if (local) |l| if (overlaps(tree, unparen(tree, target), l)) return true;
++        if (local) |l| if (false and overlaps(tree, unparen(tree, target), l)) return true;
+
+== an address taken counts as a change
+-            .address_of => tree.nodeData(node).node,
++            .address_of => continue,
