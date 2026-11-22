@@ -4,9 +4,10 @@ zigvet builds with Zig 0.17.1 and has no dependencies. CI and the release
 install the Zig `build.zig.zon` names as `minimum_zig_version`, the one
 place it is pinned. `zig build` leaves
 the binary in `zig-out/bin/`, `zig build test` runs every test,
-`zig build lint` runs zigvet over its own `src/`, and
+`zig build lint` runs zigvet over its own `src/`,
 `zig build complexity` runs [gnarl](https://github.com/kmoneil/gnarl)'s
-complexity check. `zig build test` runs the last two as well, so it needs
+complexity check, and `zig build fmt` fails if `zig fmt` would change a
+file. `zig build test` runs the last three as well, so it needs
 `gnarl` on the PATH: the release `complexity.zon`'s `.gnarl` names, or a
 later one that counts the same, from gnarl's releases or
 `brew install kmoneil/tap/gnarl`. Any other refuses to check and names both

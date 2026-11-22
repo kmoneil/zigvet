@@ -29,8 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      # The paths are build.zig's, which `zig build test` checks too.
       - name: zig fmt
-        run: zig fmt --check build.zig build.zig.zon src test
+        run: zig build fmt
       # zigvet over its own source, the way a consuming repo runs it. The
       # build also refuses any dependency in build.zig.zon.
       - name: zigvet over src/

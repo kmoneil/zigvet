@@ -64,6 +64,16 @@ pub fn build(b: *std.Build) void {
     complexity.has_side_effects = true;
     b.step("complexity", "Fail a function newly over its complexity limit (gnarl, from the PATH)").dependOn(&complexity.step);
 
+    // `zig fmt --check` over what CI's format job checks, this list being
+    // the one it reads. `zig build test` runs it too, so a file zig fmt
+    // would change fails here rather than first in CI. Not in a consuming
+    // repo's build, which gets no `test/`.
+    const fmt = b.addFmt(.{
+        .paths = &.{ b.path("build.zig"), b.path("build.zig.zon"), b.path("src"), b.path("test") },
+        .check = true,
+    });
+    b.step("fmt", "Fail if zig fmt would change a file").dependOn(&fmt.step);
+
     // The tests include the case corpus under test/cases/, which runs the
     // compiler over each case and reads the cases at run time: it needs the
     // compiler's path, the repository root as its working directory, and to
@@ -80,10 +90,11 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
     run_tests.setCwd(b.path("."));
     run_tests.has_side_effects = true;
-    const test_step = b.step("test", "Run unit tests, the case corpus, zigvet over src/ and gnarl's check");
+    const test_step = b.step("test", "Run unit tests, the case corpus, zigvet over src/, gnarl's check and zig fmt --check");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&lint.step);
     test_step.dependOn(&complexity.step);
+    test_step.dependOn(&fmt.step);
 
     // `zig build release`: every release binary, ReleaseSafe so the checks
     // that make a crash a report rather than a wrong answer stay in, into
