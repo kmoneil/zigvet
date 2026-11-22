@@ -22,3 +22,15 @@ file src/escape.zig
 == init or fixed only through a Writer or a Reader
 -                    if (!std.mem.eql(u8, namespace, "Writer") and !std.mem.eql(u8, namespace, "Reader")) return null;
 +                    if (false and !std.mem.eql(u8, namespace, "Writer") and !std.mem.eql(u8, namespace, "Reader")) return null;
+
+== an allocating std function only through its namespace
+-                if (!isOneOf(namespace, f.namespaces)) return null;
++                if (false and !isOneOf(namespace, f.namespaces)) return null;
+
+== the file's own method, not an allocating std one
+-        if (r.types.callee(callee) != null) return null;
++        if (false and r.types.callee(callee) != null) return null;
+
+== only std's allocators over a buffer
+-    if (std.mem.eql(u8, type_name, "FixedBufferAllocator") or std.mem.eql(u8, type_name, "BufferFirstAllocator")) return .buffer;
++    if (true or std.mem.eql(u8, type_name, "FixedBufferAllocator") or std.mem.eql(u8, type_name, "BufferFirstAllocator")) return .buffer;
