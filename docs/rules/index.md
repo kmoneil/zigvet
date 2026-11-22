@@ -63,6 +63,7 @@ seldom take.
 | Rule | Catches | What goes wrong |
 |---|---|---|
 | [wrap](wrap.md) | A test for unsigned wraparound after a plain `+` (`end < start` after `end = start + n`) | `+` panics rather than wraps, so the test is never true: on wasm32 the input it was written for panics |
+| [narrow](narrow.md) | A `u8` or `u16` offset plus a constant as an index (`sub[offset + 4 ..]`), where the function widens or bounds-checks the offset elsewhere | Computed in the narrow type, it overflows at 0xFFFC though the widened check passed: a panic, or the wrong bytes in ReleaseFast |
 
 ## Builds and tests
 

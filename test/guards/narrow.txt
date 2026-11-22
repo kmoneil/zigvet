@@ -1,0 +1,24 @@
+# narrow's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/narrow.zig
+
+== narrower than 32 bits
+-            if (bits >= 32) continue;
++            if (bits >= 64) continue;
+
+== the function says the operand is an offset into a slice
+-            .nothing => {},
++            .nothing => offset = true,
+
+== a constant bound keeps it out
+-            .bounded => return false,
++            .bounded => {},
+
+== widened to a wider type only
+-    if (!wider(tree, to, bits)) return .nothing;
++    if (false and !wider(tree, to, bits)) return .nothing;
+
+== the same tokens as the operand
+-    return if (sameTokens(tree, ints.unparen(tree, value), x)) .offset else .nothing;
++    return if (true or sameTokens(tree, ints.unparen(tree, value), x)) .offset else .nothing;

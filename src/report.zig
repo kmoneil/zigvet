@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -63,6 +63,7 @@ pub const Finding = struct {
         positional: Positional,
         race: Race,
         wrap: Wrap,
+        narrow: Narrow,
         allow: Allow,
     };
 
@@ -289,6 +290,18 @@ pub const Finding = struct {
         sum: []const u8,
     };
 
+    pub const Narrow = struct {
+        /// The sum or product, as written: `offset + 4`.
+        expression: []const u8,
+        /// Its narrow operand, as written: `offset`.
+        operand: []const u8,
+        /// The operand's type, as written: `u16`.
+        type: []const u8,
+        /// The first value of the operand at which it overflows, when the
+        /// constant reads as a number.
+        overflows_at: ?u64,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -327,6 +340,7 @@ pub const Finding = struct {
             .positional => .positional,
             .race => .race,
             .wrap => .wrap,
+            .narrow => .narrow,
             .allow => null,
         };
     }
@@ -449,6 +463,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .wrap => |wr| try w.print("`{s}` tests whether `{s}` wrapped, but `+` does not wrap: an overflow panics in Debug and ReleaseSafe and is undefined in ReleaseFast, so the test is never true", .{
             wr.check, wr.sum,
         }),
+        .narrow => |n| try writeNarrow(w, n),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
@@ -469,6 +484,13 @@ fn writeFreed(w: *Writer, f: Finding.Freed) Writer.Error!void {
     } else {
         try w.print(", which `defer {s}` above frees before the caller gets it", .{f.release});
     }
+}
+
+/// narrow's message: where the sum overflows, when the constant shows it.
+fn writeNarrow(w: *Writer, n: Finding.Narrow) Writer.Error!void {
+    try w.print("`{s}` is computed in {s}, `{s}`'s type, ", .{ n.expression, n.type, n.operand });
+    if (n.overflows_at) |at| try w.print("and overflows from `{s}` = {d}, ", .{ n.operand, at }) else try w.writeAll("and can overflow ");
+    try w.writeAll("before it is widened to the `usize` the index takes");
 }
 
 fn writeFit(w: *Writer, f: Finding.Fit) Writer.Error!void {
