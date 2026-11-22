@@ -60,8 +60,8 @@ Leaving the function:
   holds it (`whole[i]` of `const whole = [_][]const T{ &.{}, &.{f()} };`),
   a `std` call that returns part of its argument
   (`std.fmt.bufPrint(&buf, ...)`, `std.mem.trim(u8, &buf, " ")`), a `std`
-  reader or writer made over it (`file.writer(io, &buf)`), or one of
-  the file's own that does, such as `return id.slice();` with `id` held by
+  reader or writer made over it (`file.writer(io, &buf)`), memory from an
+  allocator made over it (below), or one of the file's own that does, such as `return id.slice();` with `id` held by
   value and `fn slice(self: *const Id) []const u8 { return self.bytes[0..self.len]; }`,
   or one of the file's own whose result holds a copy of the argument, such
   as `return ctx.render(.{ .errors = &errs });` with a `render` that copies
@@ -73,6 +73,34 @@ Leaving the function:
   captures only (below): a named local stored outward is usually
   deliberate (a context pointer for the length of a call, a thread's
   `current`), and a store a `defer` undoes is not reported at all.
+
+A `std.heap.FixedBufferAllocator` or `BufferFirstAllocator` keeps the
+buffer it is given, so what it hands out over the function's own memory is
+a slice of that memory:
+
+```zig
+fn greeting(name: []const u8) ![]u8 {
+    var buf: [64]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    return std.fmt.allocPrint(fba.allocator(), "hello {s}", .{name});
+}
+```
+
+Reported at `&buf`, returned or stored through a parameter
+(`h.items = try fba.allocator().alloc(u32, 8);`), as a temporary is, since
+memory allocated is meant to outlive the call: what one of
+`std.mem.Allocator`'s methods hands out (`alloc`, `create`, `dupe`,
+`print`, `realloc` and their variants) called on the local's
+`allocator()`, on a local holding it (`const a = fba.allocator();`), or on
+an `ArenaAllocator` made over it, whose first nodes come from the buffer;
+and what `std.fmt.allocPrint`, `std.mem.join`, `concat` and
+`replaceOwned`, `std.fs.path.join` and a list's `toOwnedSlice(a)` allocate
+with one. The allocator is known by its type's name: in the local's
+annotation (`var fba: std.heap.FixedBufferAllocator = .init(&buf);`) or
+the `init` called through it (`FixedBufferAllocator.init(&buf)`). Not
+reported: memory from it used and dropped inside the function, the point of
+the pattern, and an allocator over a buffer the caller passed in
+([#196](https://github.com/kmoneil/zigvet/issues/196)).
 
 A capture held by value in a loop, `for (topics) |topic|`, is a copy made
 for one turn, which the next turn writes over. What points into it is

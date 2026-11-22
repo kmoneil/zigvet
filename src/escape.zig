@@ -11,7 +11,8 @@
 //! leaves whole (`s.w = .fixed(&s.buf); return s;`), the `std` calls that
 //! return a view of an argument (`std.fmt.bufPrint`, `std.mem.sliceTo`,
 //! ...) or hold the buffer they are given (`std.Io.Writer.fixed`,
-//! `file.writer(io, &buf)`), and the file's own functions
+//! `file.writer(io, &buf)`), memory handed out by an allocator made over a
+//! buffer (`std.heap.FixedBufferAllocator.init(&buf)`), and the file's own functions
 //! that return part of what a pointer parameter points at, or whose result
 //! holds a copy of an argument or of the receiver
 //! (`ctx.render(.{ .errors = &errs })`, `buffer.reader()`), and reports a
@@ -117,6 +118,7 @@ const hint_literal = "make it comptime-known (`comptime` on the runtime elements
 const hint_storage = "return the value itself, have the caller pass in the memory, or allocate it";
 const hint_storage_comptime = hint_storage ++ "; if it only runs at compile time, say so with `return comptime blk: { ... }`";
 const hint_turn = "copy what it points at, or use it only within the turn";
+const hint_allocator = "allocate what leaves with the caller's allocator, and use this one only for what is dropped before returning";
 
 const Rule = struct {
     arena: Allocator,
@@ -818,19 +820,28 @@ const Rule = struct {
                     if (store.binding != index) continue;
                     if (try r.leafSource(store.value, depth + 1)) |source| return source;
                 }
-                return null;
+                // An allocator made over the function's own memory, itself
+                // leaving: `var fba: FixedBufferAllocator = .init(&buf);`.
+                return r.allocatorHeld(index, depth + 1);
             },
             .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => {
                 const operand = pointerPreservingOperand(tree, node) orelse return null;
                 return r.stackSource(operand, depth);
             },
-            .call_one, .call_one_comma, .call, .call_comma => {
-                if (r.viewedArgument(node)) |argument| return r.stackSource(argument, depth);
-                if (r.bufferArgument(node)) |argument| return r.stackSource(argument, depth);
-                return r.ownViewSource(node, depth);
-            },
+            .call_one, .call_one_comma, .call, .call_comma => r.callSource(node, depth),
             else => null,
         };
+    }
+
+    /// A call's result, when it points into stack memory: a `std` call
+    /// that returns a view of an argument, holds the buffer it is given or
+    /// allocates from an allocator over the function's own memory, or one
+    /// of the file's own (`ownViewSource`).
+    fn callSource(r: *Rule, node: Node.Index, depth: u8) Allocator.Error!?Source {
+        if (r.viewedArgument(node)) |argument| return r.stackSource(argument, depth);
+        if (r.bufferArgument(node)) |argument| return r.stackSource(argument, depth);
+        if (try r.allocatedSource(node, depth)) |source| return source;
+        return r.ownViewSource(node, depth);
     }
 
     /// What is read out of a local made with an initializer, an element
@@ -1165,6 +1176,115 @@ const Rule = struct {
             else => return null,
         }
         return arguments[arguments.len - 1];
+    }
+
+    /// The stack memory a call's result is allocated from (#196): an
+    /// `Allocator` method that hands out memory (`a.alloc(u8, n)`,
+    /// `a.dupe(u8, s)`) called on an allocator over the function's own
+    /// memory (`allocatorSource`), or a `std` function that allocates its
+    /// result with one it is given (`std.fmt.allocPrint(fba.allocator(),
+    /// ...)`). Not a function of the file's own. The memory is reported
+    /// stored outward as well as returned, as a temporary is: memory
+    /// allocated is meant to outlive the call.
+    fn allocatedSource(r: *Rule, node: Node.Index, depth: u8) Allocator.Error!?Source {
+        const tree = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node).?;
+        const callee = call.ast.fn_expr;
+        if (tree.nodeTag(callee) != .field_access) return null;
+        const receiver, const field = tree.nodeData(callee).node_and_token;
+        const name = tree.tokenSlice(field);
+        const allocator = if (std_allocating_methods.has(name)) receiver else allocator: {
+            const f = std_allocating_fns.get(name) orelse return null;
+            if (f.namespaces.len > 0) {
+                const namespace = lastName(tree, receiver) orelse return null;
+                if (!isOneOf(namespace, f.namespaces)) return null;
+            }
+            if (f.argument >= call.ast.params.len) return null;
+            break :allocator call.ast.params[f.argument];
+        };
+        // Asked last, as it looks the receiver's type up.
+        if (r.types.callee(callee) != null) return null;
+        const source = try r.allocatorSource(allocator, depth) orelse return null;
+        return .{
+            .token = source.token,
+            .what = try r.arena.print("memory from an allocator over {s}", .{bufferNamed(source.what)}),
+            .hint = hint_allocator,
+            .temporary = true,
+            .capture = source.capture,
+        };
+    }
+
+    /// The stack memory an `Allocator` hands out, when `node` is one over
+    /// the function's own memory: `fba.allocator()` of a local
+    /// `FixedBufferAllocator` or `BufferFirstAllocator` made over it (both
+    /// keep the buffer they are given), of a local `ArenaAllocator` made
+    /// over such an allocator, whose first nodes come from that buffer, or
+    /// a local holding one (`const a = fba.allocator();`).
+    fn allocatorSource(r: *Rule, node: Node.Index, depth: u8) Allocator.Error!?Source {
+        const tree = r.tree;
+        if (depth > 4) return null;
+        switch (tree.nodeTag(node)) {
+            .grouped_expression => return r.allocatorSource(tree.nodeData(node).node_and_token[0], depth),
+            .identifier => {
+                const index = r.localIndex(node) orelse return null;
+                var values: std.ArrayList(Node.Index) = .empty;
+                try r.madeValues(index, &values);
+                for (values.items) |value| if (try r.allocatorSource(value, depth + 1)) |source| return source;
+                return null;
+            },
+            .call_one, .call_one_comma, .call, .call_comma => {
+                var buffer: [1]Node.Index = undefined;
+                const call = tree.fullCall(&buffer, node).?;
+                if (call.ast.params.len != 0 or tree.nodeTag(call.ast.fn_expr) != .field_access) return null;
+                const receiver, const field = tree.nodeData(call.ast.fn_expr).node_and_token;
+                const name = tree.tokenSlice(field);
+                if (!std.mem.eql(u8, name, "allocator") and !std.mem.eql(u8, name, "threadSafeAllocator")) return null;
+                if (tree.nodeTag(receiver) != .identifier) return null;
+                return r.allocatorHeld(r.localIndex(receiver) orelse return null, depth + 1);
+            },
+            else => return null,
+        }
+    }
+
+    /// The stack memory what binding `index`, a local, allocates from,
+    /// when it is an allocator made over the function's own memory, at its
+    /// declaration or in a store of the whole local: `.init(&buf)` of a
+    /// `FixedBufferAllocator` or `BufferFirstAllocator`, or
+    /// `ArenaAllocator.init(child)` of a child that is one (`allocatorSource`).
+    fn allocatorHeld(r: *Rule, index: u32, depth: u8) Allocator.Error!?Source {
+        const tree = r.tree;
+        const binding = r.bindings.items[index];
+        var values: std.ArrayList(Node.Index) = .empty;
+        try r.madeValues(index, &values);
+        for (values.items) |value| {
+            var buffer: [1]Node.Index = undefined;
+            const call = tree.fullCall(&buffer, value) orelse continue;
+            if (call.ast.params.len == 0) continue;
+            const made = allocatorMade(tree, call.ast.fn_expr, binding.type_expr) orelse continue;
+            const source = switch (made) {
+                .buffer => try r.stackSource(call.ast.params[0], depth),
+                .arena => try r.allocatorSource(call.ast.params[0], depth),
+            };
+            if (source) |s| return s;
+        }
+        return null;
+    }
+
+    /// The binding a name resolves to, when it is a local known only at
+    /// run time.
+    fn localIndex(r: *const Rule, node: Node.Index) ?u32 {
+        const index = r.resolved.get(node) orelse return null;
+        const binding = r.bindings.items[index];
+        if (binding.kind != .local or binding.is_comptime) return null;
+        return index;
+    }
+
+    /// Appends what binding `index`, a local, is given whole: its
+    /// initializer and what is stored to it, as `leaves` finds them.
+    fn madeValues(r: *Rule, index: u32, out: *std.ArrayList(Node.Index)) Allocator.Error!void {
+        if (r.bindings.items[index].init.unwrap()) |init| try r.leaves(init, out);
+        for (r.stores.items) |store| if (store.binding == index and !store.part) try r.leaves(store.value, out);
     }
 
     /// The first stack source among the expressions `node` can evaluate to,
@@ -1511,6 +1631,75 @@ const std_buffer_fns: std.StaticStringMap(BufferFn) = .initComptime(.{
     .{ "writer", BufferFn.method },
     .{ "writerStreaming", BufferFn.method },
 });
+
+/// `std.mem.Allocator`'s methods that hand out memory from it.
+const std_allocating_methods: std.StaticStringMap(void) = .initComptime(.{
+    .{"alignedAlloc"}, .{"alignedCreate"}, .{"alloc"},        .{"allocSentinel"}, .{"allocWithOptions"},
+    .{"create"},       .{"dupe"},          .{"dupeSentinel"}, .{"print"},         .{"printSentinel"},
+    .{"realloc"},      .{"remap"},
+});
+
+/// `std` functions whose result is allocated with the allocator they are
+/// given: which argument it is, and the namespaces they are called
+/// through, or none for a method of a list (`list.toOwnedSlice(gpa)`).
+const std_allocating_fns: std.StaticStringMap(AllocatingFn) = .initComptime(.{
+    .{ "allocPrint", AllocatingFn{ .namespaces = &.{"fmt"}, .argument = 0 } },
+    .{ "allocPrintSentinel", AllocatingFn{ .namespaces = &.{"fmt"}, .argument = 0 } },
+    .{ "concat", AllocatingFn{ .namespaces = &.{"mem"}, .argument = 0 } },
+    .{ "concatWithSentinel", AllocatingFn{ .namespaces = &.{"mem"}, .argument = 0 } },
+    .{ "join", AllocatingFn{ .namespaces = &.{ "mem", "path" }, .argument = 0 } },
+    .{ "joinZ", AllocatingFn{ .namespaces = &.{ "mem", "path" }, .argument = 0 } },
+    .{ "replaceOwned", AllocatingFn{ .namespaces = &.{"mem"}, .argument = 1 } },
+    .{ "toOwnedSlice", AllocatingFn{ .namespaces = &.{}, .argument = 0 } },
+    .{ "toOwnedSliceSentinel", AllocatingFn{ .namespaces = &.{}, .argument = 0 } },
+});
+
+const AllocatingFn = struct {
+    namespaces: []const []const u8,
+    argument: usize,
+};
+
+/// What a call made, when it is the `init` of one of `std.heap`'s
+/// allocators that hand out memory of what they are given, through the
+/// type's name (`FixedBufferAllocator.init(&buf)`) or a local's type
+/// (`var fba: std.heap.FixedBufferAllocator = .init(&buf);`, the type
+/// `type_expr`): of a buffer, their first argument, or, an arena, of the
+/// child allocator.
+fn allocatorMade(tree: *const Ast, fn_expr: Node.Index, type_expr: Node.OptionalIndex) ?enum { buffer, arena } {
+    const type_name = switch (tree.nodeTag(fn_expr)) {
+        .enum_literal => if (std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(fn_expr)), "init"))
+            lastName(tree, type_expr.unwrap() orelse return null) orelse return null
+        else
+            return null,
+        .field_access => name: {
+            const receiver, const field = tree.nodeData(fn_expr).node_and_token;
+            if (!std.mem.eql(u8, tree.tokenSlice(field), "init")) return null;
+            break :name lastName(tree, receiver) orelse return null;
+        },
+        else => return null,
+    };
+    if (std.mem.eql(u8, type_name, "FixedBufferAllocator") or std.mem.eql(u8, type_name, "BufferFirstAllocator")) return .buffer;
+    if (std.mem.eql(u8, type_name, "ArenaAllocator")) return .arena;
+    return null;
+}
+
+/// The last name of `std.heap.FixedBufferAllocator` or `fmt`.
+fn lastName(tree: *const Ast, node: Node.Index) ?[]const u8 {
+    return switch (tree.nodeTag(node)) {
+        .identifier => tree.tokenSlice(tree.nodeMainToken(node)),
+        .field_access => tree.tokenSlice(tree.nodeData(node).node_and_token[1]),
+        else => null,
+    };
+}
+
+/// What a source names as the buffer itself: `local 'buf'` of
+/// `address of local 'buf'`.
+fn bufferNamed(what: []const u8) []const u8 {
+    for ([_][]const u8{ "address of ", "slice of " }) |prefix| {
+        if (std.mem.startsWith(u8, what, prefix)) return what[prefix.len..];
+    }
+    return what;
+}
 
 const BufferFn = enum {
     /// Called through the type it makes, a `Writer` or a `Reader`:
@@ -2133,6 +2322,35 @@ test "through a std call that returns a view of an argument" {
         \\5:91 address of local 'buf' -> viaLocal through return
         \\9:85 address of local 'buf' -> memPrint through return
         \\10:94 address of local 'buf' -> memSentinel through return
+        \\
+    );
+}
+
+test "memory from an allocator over a local buffer (#196)" {
+    try expectEscapes(
+        \\const std = @import("std");
+        \\const heap = std.heap;
+        \\fn printed(n: u32) ![]u8 { var buf: [64]u8 = undefined; var fba: heap.FixedBufferAllocator = .init(&buf); return std.fmt.allocPrint(fba.allocator(), "{d}", .{n}); }
+        \\fn first(gpa: A, s: []const u8) ![]u8 { var buf: [64]u8 = undefined; var b = heap.BufferFirstAllocator.init(&buf, gpa); return b.allocator().dupe(u8, s); }
+        \\fn stored(h: *H) !void { var buf: [64]u8 = undefined; var fba: heap.FixedBufferAllocator = .init(&buf); h.items = try fba.allocator().alloc(u32, 8); }
+        \\fn local(s: []const u8) ![]u8 { var buf: [64]u8 = undefined; var fba: heap.FixedBufferAllocator = .init(&buf); const a = fba.allocator(); return a.dupe(u8, s); }
+        \\fn arena(gpa: A) ![]u8 { var buf: [64]u8 = undefined; var b: heap.BufferFirstAllocator = .init(&buf, gpa); var ar = heap.ArenaAllocator.init(b.allocator()); return ar.allocator().alloc(u8, 4); }
+        \\fn owned(list: *L) ![]u8 { var buf: [64]u8 = undefined; var fba: heap.FixedBufferAllocator = .init(&buf); return list.toOwnedSlice(fba.allocator()); }
+        \\fn whole() heap.FixedBufferAllocator { var buf: [64]u8 = undefined; const fba: heap.FixedBufferAllocator = .init(&buf); return fba; }
+        \\fn dropped(n: u32) !usize { var buf: [64]u8 = undefined; var fba: heap.FixedBufferAllocator = .init(&buf); return (try std.fmt.allocPrint(fba.allocator(), "{d}", .{n})).len; }
+        \\fn callers(buf: []u8, s: []const u8) ![]u8 { var fba: heap.FixedBufferAllocator = .init(buf); return fba.allocator().dupe(u8, s); }
+        \\fn other(s: []const u8) ![]u8 { var buf: [64]u8 = undefined; var p: Pool = .init(&buf); return p.allocator().dupe(u8, s); }
+        \\fn notStd(s: []const u8) ![]u8 { var buf: [64]u8 = undefined; var fba: heap.FixedBufferAllocator = .init(&buf); return log.allocPrint(fba.allocator(), s); }
+        \\const Own = struct { fn toOwnedSlice(o: *Own, a: A) []const u8 { _ = o; _ = a; return "x"; } };
+        \\fn own() []const u8 { var buf: [64]u8 = undefined; var fba: heap.FixedBufferAllocator = .init(&buf); var o: Own = .{}; return o.toOwnedSlice(fba.allocator()); }
+    ,
+        \\3:100 memory from an allocator over local 'buf' -> printed through return
+        \\4:109 memory from an allocator over local 'buf' -> first through return
+        \\5:98 memory from an allocator over local 'buf' -> stored through field
+        \\6:105 memory from an allocator over local 'buf' -> local through return
+        \\7:96 memory from an allocator over local 'buf' -> arena through return
+        \\8:100 memory from an allocator over local 'buf' -> owned through return
+        \\9:114 address of local 'buf' -> whole through return
         \\
     );
 }

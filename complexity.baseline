@@ -13,7 +13,7 @@ src/escape.zig	Rule.function	23	42	50	4	1	1
 src/escape.zig	Rule.heldSource	24	52	27	5	3	3
 src/escape.zig	Rule.isComptime	39	62	124	4	1	1
 src/escape.zig	Rule.ownViewSource	30	62	39	5	2	2
-src/escape.zig	Rule.stackSource	24	30	37	3	2	2
+src/escape.zig	Rule.stackSource	22	26	34	3	2	2
 src/escape.zig	Rule.walk	33	42	108	3	1	1
 src/escape.zig	countsAtComptime	11	26	14	5	2	2
 src/fit.zig	Placeholders.parse	24	27	35	2	1	1
