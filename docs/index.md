@@ -93,5 +93,6 @@ page shows them all with what goes wrong.
   [flush](rules/flush.md), [positional](rules/positional.md),
   [wipe](rules/wipe.md)
 - **Data races:** [race](rules/race.md)
+- **Arithmetic:** [wrap](rules/wrap.md)
 - **Builds and tests:** [cached](rules/cached.md), [unrun](rules/unrun.md),
   [hoard](rules/hoard.md)

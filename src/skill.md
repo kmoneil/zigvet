@@ -83,6 +83,8 @@ first trips its rule, and the fix reports nothing.
   which release builds drop.
 - race: a container-level optional holding atomics or a lock, asked
   whether it is null by value.
+- wrap: a test for unsigned wraparound after a plain `+`, which panics
+  rather than wraps.
 - cached: a build script lists a directory to decide what to build, and
   never tells Zig's configure cache.
 - unrun: a file whose tests never run, because nothing the test build
@@ -693,6 +695,38 @@ fn state() *Registry {
     if (registry) |*r| return r;
     registry = .{};
     return &registry.?;
+}
+```
+
+### wrap
+
+A test for unsigned wraparound, `end < start`, after a plain `+`. Zig's
+`+` does not wrap: an overflow panics in Debug and ReleaseSafe and is
+undefined in ReleaseFast, so the test is never true, and on a 32-bit
+target (wasm32) the input it was written for panics instead.
+
+```zig
+fn take(src: []const u8, off: *usize, n: u32) ?[]const u8 {
+    const end = off.* + n;
+    if (end < off.* or end > src.len) return null;
+    const s = src[off.*..end];
+    off.* = end;
+    return s;
+}
+```
+
+Test before adding: `std.math.add` and `@addWithOverflow` say when the
+sum overflows. Or sum in a wider type and compare that.
+
+```zig
+const std = @import("std");
+
+fn take(src: []const u8, off: *usize, n: u32) ?[]const u8 {
+    const end = std.math.add(usize, off.*, n) catch return null;
+    if (end > src.len) return null;
+    const s = src[off.*..end];
+    off.* = end;
+    return s;
 }
 ```
 

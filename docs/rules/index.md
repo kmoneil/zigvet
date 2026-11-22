@@ -58,6 +58,12 @@ seldom take.
 |---|---|---|
 | [race](race.md) | A container-level optional tested by value (`g == null`, `if (g) \|v\|`) when what it holds has a lock or atomics in it | Debug copies all of it to read the tag, a plain read racing other threads' atomic writes, and ThreadSanitizer reports it |
 
+## Arithmetic
+
+| Rule | Catches | What goes wrong |
+|---|---|---|
+| [wrap](wrap.md) | A test for unsigned wraparound after a plain `+` (`end < start` after `end = start + n`) | `+` panics rather than wraps, so the test is never true: on wasm32 the input it was written for panics |
+
 ## Builds and tests
 
 | Rule | Catches | What goes wrong |

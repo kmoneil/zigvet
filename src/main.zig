@@ -649,6 +649,7 @@ test {
     _ = @import("freed.zig");
     _ = @import("grow.zig");
     _ = @import("hoard.zig");
+    _ = @import("ints.zig");
     _ = @import("positional.zig");
     _ = @import("race.zig");
     _ = @import("kept.zig");
@@ -666,4 +667,5 @@ test {
     _ = @import("vet.zig");
     _ = @import("walk.zig");
     _ = @import("wipe.zig");
+    _ = @import("wrap.zig");
 }
