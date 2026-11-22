@@ -87,6 +87,8 @@ first trips its rule, and the fix reports nothing.
   rather than wraps.
 - narrow: a `u8` or `u16` offset plus a constant as an index, computed
   in the narrow type, where the same function widens it elsewhere.
+- counter: a `u8` or `u16` counter stepped while it is less than the
+  `.len` of the slice it walks, which overflows on a longer slice.
 - cached: a build script lists a directory to decide what to build, and
   never tells Zig's configure cache.
 - unrun: a file whose tests never run, because nothing the test build
@@ -759,6 +761,35 @@ pub fn tagged(sub: []const u8, offset: usize) ?u32 {
     if (offset == 0 or offset + 6 > sub.len) return null;
     if (std.mem.readInt(u16, sub[offset + 4 ..][0..2], .big) != 0x8000) return null;
     return std.mem.readInt(u32, sub[offset..][0..4], .big);
+}
+```
+
+### counter
+
+A counter declared `u8` or `u16`, stepped in a `while` loop that walks a
+slice and stops at its `.len`. The comparison widens the counter, so on a
+slice longer than the type counts it holds at 255 (or 65535), and the
+step overflows: a panic in Debug and ReleaseSafe, and in ReleaseFast a
+counter that wraps to 0 and a loop that may never end.
+
+```zig
+pub fn headingLevel(line: []const u8) ?u8 {
+    var level: u8 = 0;
+    while (level < line.len and line[level] == '#') level += 1;
+    if (level == 0 or level > 6) return null;
+    return level;
+}
+```
+
+Count in a `usize` and narrow the result once it is checked, or bound the
+counter by its type as well as by the `.len`.
+
+```zig
+pub fn headingLevel(line: []const u8) ?u8 {
+    var level: usize = 0;
+    while (level < line.len and line[level] == '#') level += 1;
+    if (level == 0 or level > 6) return null;
+    return @intCast(level);
 }
 ```
 

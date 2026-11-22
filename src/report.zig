@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -64,6 +64,7 @@ pub const Finding = struct {
         race: Race,
         wrap: Wrap,
         narrow: Narrow,
+        counter: Counter,
         allow: Allow,
     };
 
@@ -302,6 +303,22 @@ pub const Finding = struct {
         overflows_at: ?u64,
     };
 
+    pub const Counter = struct {
+        /// The counter, as written: `level`.
+        counter: []const u8,
+        /// Its type, as written: `u8`.
+        type: []const u8,
+        /// The loop's test of it against a `.len`, as written:
+        /// `level < line.len`.
+        check: []const u8,
+        /// The `.len`, as written: `line.len`.
+        len: []const u8,
+        /// The step that overflows, as written: `level += 1`.
+        step: []const u8,
+        /// The largest value its type holds: 255.
+        max: u64,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -341,6 +358,7 @@ pub const Finding = struct {
             .race => .race,
             .wrap => .wrap,
             .narrow => .narrow,
+            .counter => .counter,
             .allow => null,
         };
     }
@@ -464,6 +482,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
             wr.check, wr.sum,
         }),
         .narrow => |n| try writeNarrow(w, n),
+        .counter => |c| try writeCounter(w, c),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
@@ -484,6 +503,13 @@ fn writeFreed(w: *Writer, f: Finding.Freed) Writer.Error!void {
     } else {
         try w.print(", which `defer {s}` above frees before the caller gets it", .{f.release});
     }
+}
+
+/// counter's message: the value at which the test still holds and the
+/// step overflows.
+fn writeCounter(w: *Writer, c: Finding.Counter) Writer.Error!void {
+    try w.print("`{s}` is a {s}, and `{s}` can be more than {d}: ", .{ c.counter, c.type, c.len, c.max });
+    try w.print("`{s}` still holds at {d}, so `{s}` overflows", .{ c.check, c.max, c.step });
 }
 
 /// narrow's message: where the sum overflows, when the constant shows it.

@@ -1,0 +1,40 @@
+# counter's guards: each what keeps a report out, and the edit that takes
+# it away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/counter.zig
+
+== narrower than 32 bits
+-    if (bits >= 32) return null;
++    if (bits >= 64) return null;
+
+== an array's length, known where the code is written
+-    if (arrayLen(t.*.?, len)) return null;
++    if (false and arrayLen(t.*.?, len)) return null;
+
+== the loop walks the slice whose length it compares
+-    if (!walks(tree, loop, x, len)) return null;
++    if (false and !walks(tree, loop, x, len)) return null;
+
+== a constant bound in the loop keeps it out
+-    if (boundedIn(tree, loop, x, max)) return null;
++    if (false and boundedIn(tree, loop, x, max)) return null;
+
+== only a constant the type holds bounds it
+-    return value <= max;
++    return value <= max or true;
+
+== the same slice the loop compares the length of
+-            return sameTokens(tree, ints.unparen(tree, lhs), sliced) and mentions(tree, index, x);
++            return (sameTokens(tree, ints.unparen(tree, lhs), sliced) or true) and mentions(tree, index, x);
+
+== indexed with the counter
+-            return sameTokens(tree, ints.unparen(tree, lhs), sliced) and mentions(tree, index, x);
++            return sameTokens(tree, ints.unparen(tree, lhs), sliced) and (mentions(tree, index, x) or true);
+
+== a plain += only, not +%=
+-        if (tree.nodeTag(node) != .assign_add) continue;
++        if (tree.nodeTag(node) != .assign_add and tree.nodeTag(node) != .assign_add_wrap) continue;
+
+== one report for a step two loops share
+-            if ((try reported.getOrPut(arena, finding.offset)).found_existing) continue;
++            if (false and (try reported.getOrPut(arena, finding.offset)).found_existing) continue;

@@ -21,7 +21,7 @@ but silent wrongness.
 [The rules](rules/index.md){: .btn .mr-2 }
 [GitHub](https://github.com/kmoneil/zigvet){: .btn }
 
-- **Twenty-two rules.** Eighteen have found real bugs: in Zig's own standard
+- **Twenty-five rules.** Twenty-one have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -93,6 +93,7 @@ page shows them all with what goes wrong.
   [flush](rules/flush.md), [positional](rules/positional.md),
   [wipe](rules/wipe.md)
 - **Data races:** [race](rules/race.md)
-- **Arithmetic:** [wrap](rules/wrap.md), [narrow](rules/narrow.md)
+- **Arithmetic:** [wrap](rules/wrap.md), [narrow](rules/narrow.md),
+  [counter](rules/counter.md)
 - **Builds and tests:** [cached](rules/cached.md), [unrun](rules/unrun.md),
   [hoard](rules/hoard.md)

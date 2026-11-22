@@ -16,7 +16,7 @@ a buffered writer never flushed, tests that never run. `go vet` is the
 closest analog: not style, which `zig fmt` and the existing linters cover,
 but silent wrongness.
 
-- **Twenty-two rules.** Eighteen have found real bugs: in Zig's own standard
+- **Twenty-five rules.** Twenty-one have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -226,6 +226,7 @@ seldom take.
 |---|---|---|
 | [wrap](docs/rules/wrap.md) | A test for unsigned wraparound after a plain `+` (`end < start` after `end = start + n`) | `+` panics rather than wraps, so the test is never true: on wasm32 the input it was written for panics |
 | [narrow](docs/rules/narrow.md) | A `u8` or `u16` offset plus a constant as an index (`sub[offset + 4 ..]`), where the function widens or bounds-checks the offset elsewhere | Computed in the narrow type, it overflows at 0xFFFC though the widened check passed: a panic, or the wrong bytes in ReleaseFast |
+| [counter](docs/rules/counter.md) | A `u8` or `u16` counter stepped while it is less than the `.len` of the slice it walks (`while (level < line.len and line[level] == '#') level += 1`) | The test still holds at 255, so the step overflows on a longer slice: a panic, or in ReleaseFast a loop that may never end |
 
 ### Builds and tests
 
