@@ -113,12 +113,13 @@ twice, its type declared in another file.
 
 Under a defer: over Zig 0.17.1's standard library and compiler sources
 and the fourteen public projects, nothing. Before the exemptions above,
-the shape matched 50 places there and in the application repos: 32 give
-the name something new on the next line, 4 exit a forked child, and 11
-more are safe to run twice, by a function that nulls what it frees, a
-queue's close, or a value made again through its address. In the
-application repos, 2: the listener test above, in a copy of the framework
-another repo keeps, and a test that closes a socket twice on purpose to
-show its close can be repeated, the type declared in another file.
+the shape matched 48 places there and in the application repos: 32 give
+the name something new on the next line, 4 exit a forked child, and 9
+are safe to run twice, by a function that nulls what it frees, a queue's
+close, or a value made again through its address. That leaves 3 reports,
+at two places in the application repos: the listener test above, in a
+copy of the framework that another repo keeps, and a test that closes a
+socket twice on purpose, to show that its close can be repeated, the
+type declared in another file.
 
 [All rules](index.md)
