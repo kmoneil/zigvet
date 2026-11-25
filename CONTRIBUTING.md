@@ -53,7 +53,12 @@ then `// error` and the expected `// :line:col: error: ...` lines, or
 `// compile` for code that must not be reported. The run also compiles
 every case with the Zig compiler and fails if it rejects one, so each case
 is checked to be code Zig accepts. If a later Zig release starts catching a
-shape, its case fails and the rule should drop it.
+shape, its case fails and the rule should drop it. Each case is compiled
+for the host and for each system CI tests on that the host is not
+(x86_64 Linux, aarch64 macOS, x86_64 Windows), so a case only Windows
+rejects fails on a Mac too, not first in CI
+([#210](https://github.com/kmoneil/zigvet/issues/210)). The compiles run
+at once, as many as there are CPUs.
 
 ### When findings move
 

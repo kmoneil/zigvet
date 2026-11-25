@@ -9,12 +9,15 @@
 //! or with `// compile`, for code it must report nothing in. Either way the
 //! Zig compiler must accept the case. That is the admission test, checked
 //! rather than assumed: a case that stops compiling under a later Zig means
-//! upstream now catches the shape, and the rule should drop it.
+//! upstream now catches the shape, and the rule should drop it. It is
+//! checked for the host and for each system CI tests on, so a case one of
+//! them rejects fails a local run too, not first in CI (#210).
 //!
 //! Run by `zig build test`, which supplies the compiler's path and runs
 //! from the repository root.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Ast = std.zig.Ast;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -24,6 +27,14 @@ const report = @import("report.zig");
 const vet = @import("vet.zig");
 
 const cases_dir = "test/cases";
+
+/// The systems CI runs `zig build test` on (.github/workflows/ci.yml): what
+/// the test binary is built for there, and the `-target` that names it.
+const ci_systems = [_]struct { arch: std.Target.Cpu.Arch, os: std.Target.Os.Tag, target: []const u8 }{
+    .{ .arch = .x86_64, .os = .linux, .target = "x86_64-linux" },
+    .{ .arch = .aarch64, .os = .macos, .target = "aarch64-macos" },
+    .{ .arch = .x86_64, .os = .windows, .target = "x86_64-windows" },
+};
 
 test "every case under test/cases" {
     const io = std.testing.io;
@@ -47,8 +58,8 @@ test "every case under test/cases" {
     for (paths.items) |path| {
         const source = try dir.readFileAllocOptions(io, path, arena, .limited(1 << 20), .of(u8), 0);
         if (!try reportsAsExpected(arena, path, source)) failed += 1;
-        if (!try compilerAccepts(arena, io, path)) failed += 1;
     }
+    failed += try compilerRejects(arena, io, paths.items);
     if (failed > 0) {
         std.debug.print("{d} check(s) failed over {d} cases\n", .{ failed, paths.items.len });
         return error.TestUnexpectedResult;
@@ -151,15 +162,69 @@ fn expectations(arena: Allocator, source: []const u8) error{ OutOfMemory, NoHead
     return error.NoHeader;
 }
 
-fn compilerAccepts(arena: Allocator, io: Io, path: []const u8) !bool {
-    const full_path = try std.fs.path.join(arena, &.{ cases_dir, path });
-    const result = try std.process.run(arena, io, .{
-        .argv = &.{ test_options.zig_exe, "build-obj", "-fno-emit-bin", full_path },
-    });
-    if (result.term.success()) return true;
-    std.debug.print("{s}: the Zig compiler rejects it, so it is not a case zigvet needs:\n{s}\n", .{ full_path, result.stderr });
-    return false;
+/// Compiles each case for the host and for each system in `ci_systems` the
+/// host is not, all at once (the test runner's Io caps it at the CPU
+/// count), and prints each run that rejects its case. Returns how many did.
+/// One at a time, the host's compiles alone took longer than all of them
+/// take together.
+fn compilerRejects(arena: Allocator, io: Io, paths: []const []const u8) !usize {
+    var targets: std.ArrayList(?[]const u8) = .empty;
+    try targets.append(arena, null);
+    for (ci_systems) |system| {
+        if (system.arch == builtin.cpu.arch and system.os == builtin.os.tag) continue;
+        try targets.append(arena, system.target);
+    }
+    const compiles = try arena.alloc(Compile, paths.len * targets.items.len);
+    for (paths, 0..) |path, i| {
+        const full_path = try std.fs.path.join(arena, &.{ cases_dir, path });
+        for (targets.items, 0..) |target, j| compiles[i * targets.items.len + j] = .{ .path = full_path, .target = target };
+    }
+    var group: Io.Group = .init;
+    for (compiles) |*compile| group.async(io, Compile.run, .{ compile, io });
+    try group.await(io);
+
+    var rejected: usize = 0;
+    var failure: ?Compile.Error = null;
+    for (compiles) |compile| {
+        if (compile.failure) |err| failure = failure orelse err;
+        const stderr = compile.rejected orelse continue;
+        defer std.testing.allocator.free(stderr);
+        rejected += 1;
+        if (compile.target) |target| {
+            std.debug.print("{s}: the Zig compiler rejects it for {s}, a system CI tests on:\n{s}\n", .{ compile.path, target, stderr });
+        } else {
+            std.debug.print("{s}: the Zig compiler rejects it, so it is not a case zigvet needs:\n{s}\n", .{ compile.path, stderr });
+        }
+    }
+    if (failure) |err| return err;
+    return rejected;
 }
+
+/// One run of the compiler over one case, for the host or for a target.
+/// Run on a thread of its own, so it allocates with std.testing.allocator,
+/// which may be shared between threads, rather than the test's arena.
+const Compile = struct {
+    path: []const u8,
+    /// A `-target`, or null for the host.
+    target: ?[]const u8,
+    /// What the compiler printed when it rejected the case, or null.
+    rejected: ?[]u8 = null,
+    /// Why the compiler could not be run, or null.
+    failure: ?Error = null,
+
+    const Error = std.process.RunError;
+
+    fn run(compile: *Compile, io: Io) void {
+        const gpa = std.testing.allocator;
+        const argv: [6][]const u8 = .{ test_options.zig_exe, "build-obj", "-fno-emit-bin", compile.path, "-target", compile.target orelse "" };
+        const result = std.process.run(gpa, io, .{ .argv = argv[0..if (compile.target == null) 4 else 6] }) catch |err| {
+            compile.failure = err;
+            return;
+        };
+        gpa.free(result.stdout);
+        if (result.term.success()) gpa.free(result.stderr) else compile.rejected = result.stderr;
+    }
+};
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
