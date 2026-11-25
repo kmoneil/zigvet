@@ -44,7 +44,6 @@ src/refill.zig	Rule.heldByValue	14	36	22	4	2	2
 src/refill.zig	freedParams	13	27	24	5	2	2
 src/sweep.zig	emptiedAfter	16	26	22	4	4	4
 src/sweep.zig	freeOf	18	30	29	4	3	3
-src/twice.zig	check	18	35	36	3	2	2
 src/twice.zig	failsAfter	11	27	24	3	5	5
 src/types.zig	Types.bindingType	33	65	48	4	2	2
 src/unlock.zig	check	12	26	24	4	2	2

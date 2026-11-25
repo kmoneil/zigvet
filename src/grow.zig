@@ -839,7 +839,7 @@ fn replaces(tree: *const Ast, node: Node.Index, place: []const u8) bool {
 
 /// The loop a `break` or `continue` leaves or turns again, or the block a
 /// labeled `break` leaves. Null for a labeled `continue` of a `switch`.
-fn jumpTarget(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) ?Node.Index {
+pub fn jumpTarget(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) ?Node.Index {
     const label = if (tree.nodeData(node).opt_token_and_opt_node[0].unwrap()) |token| tree.tokenSlice(token) else null;
     var up = parents[@backingInt(node)].unwrap();
     while (up) |parent| : (up = parents[@backingInt(parent)].unwrap()) {

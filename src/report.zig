@@ -155,8 +155,9 @@ pub const Finding = struct {
     pub const Twice = struct {
         /// The call written out by hand, as written: `gpa.destroy(conn)`.
         call: []const u8,
-        /// What fails after it: `it returns error.BadConfig`, or
-        /// `self.spawn fails`.
+        /// What fails after it, for an errdefer's: `it returns
+        /// error.BadConfig`, or `self.spawn fails`. Empty for a defer's,
+        /// which runs however its block is left.
         fails: []const u8,
     };
 
@@ -441,9 +442,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .torn => |t| try w.print("{s} is built in place, so if {s} fails it is left set over what was never made, and deinit frees it", .{
             t.place, t.fails,
         }),
-        .twice => |t| try w.print("`{s}` here, and the errdefer above it does the same again if {s}", .{
-            t.call, t.fails,
-        }),
+        .twice => |t| try writeTwice(w, t),
         .sweep => |s| try w.print("freed here, but if {s} fails on a later turn, {s} still holds what earlier turns freed, since only `{s}` after the loop empties it", .{
             s.fails, s.list, s.reset,
         }),
@@ -524,6 +523,16 @@ fn writeFreed(w: *Writer, f: Finding.Freed) Writer.Error!void {
         try w.print(", whose strings can point into `{s}`, which `defer {s}` above frees before the caller reads them", .{ f.borrowed, f.release });
     } else {
         try w.print(", which `defer {s}` above frees before the caller gets it", .{f.release});
+    }
+}
+
+/// twice's message: which deferred call runs as well, and when.
+fn writeTwice(w: *Writer, t: Finding.Twice) Writer.Error!void {
+    try w.print("`{s}` here, and the ", .{t.call});
+    if (t.fails.len == 0) {
+        try w.writeAll("defer above it does the same again when its block ends");
+    } else {
+        try w.print("errdefer above it does the same again if {s}", .{t.fails});
     }
 }
 
