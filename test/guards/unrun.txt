@@ -10,3 +10,17 @@ file src/unrun.zig
 == refAllDecls(@This()) in a test names the file's declarations as a whole
 -            if (c.root == .self and c.fields.len == 0 and c.use != .plain) return true;
 +            if (false and c.root == .self and c.fields.len == 0 and c.use != .plain) return true;
+
+== a file named by itself is taken as reached
+-            if (file.named and file.build == null) try r.whole(f, .all);
++            if (false and file.named and file.build == null) try r.whole(f, .all);
+
+== every declaration of it, so every file it imports
+-            if (file.named and file.build == null) try r.whole(f, .all);
++            if (file.named and file.build == null) try r.whole(f, .public);
+
+file src/main.zig
+
+== a file named by itself is not one found under a directory
+-    if (added.len == 1 and std.mem.eql(u8, added[0], try std.fs.path.resolveAlloc(arena, &.{arg}))) return;
++    if (false and added.len == 1 and std.mem.eql(u8, added[0], try std.fs.path.resolveAlloc(arena, &.{arg}))) return;

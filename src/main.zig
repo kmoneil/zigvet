@@ -60,12 +60,15 @@ const Survey = struct {
     /// wrapper: most runs need no names.
     resolver: ?unrun.Resolver,
 
-    fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, cwd: Io.Dir, paths: []const []const u8) !Survey {
+    /// `walked` holds the paths found under a directory given; the others
+    /// were named by themselves.
+    fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, cwd: Io.Dir, paths: []const []const u8, walked: *const Walked) !Survey {
         const summaries = try arena.alloc(unrun.Summary, paths.len);
         const fuzz_wrappers = try arena.alloc([]const hoard.Wrapper, paths.len);
         var any = false;
         for (paths, summaries, fuzz_wrappers) |path, *summary, *wrappers| {
             summary.* = .{ .path = path, .unparsed = true };
+            defer summary.named = !walked.contains(path);
             wrappers.* = &.{};
             const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
@@ -90,6 +93,17 @@ const Survey = struct {
     }
 };
 
+/// The files found under a directory given on the command line.
+const Walked = std.StringHashMapUnmanaged(void);
+
+/// Records in `walked` what path argument `arg` listed, `added`, when it
+/// is a directory. A file lists itself alone, cleaned as `walk.collect`
+/// cleans it, and is left out: what refers to it may not have been given.
+fn noteWalked(arena: std.mem.Allocator, walked: *Walked, arg: []const u8, added: []const []const u8) std.mem.Allocator.Error!void {
+    if (added.len == 1 and std.mem.eql(u8, added[0], try std.fs.path.resolveAlloc(arena, &.{arg}))) return;
+    for (added) |path| try walked.put(arena, path, {});
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
@@ -110,6 +124,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cwd = Io.Dir.cwd();
     var unreadable = false;
     var files: std.ArrayList([]const u8) = .empty;
+    var walked: Walked = .empty;
     for (run.paths) |arg| {
         const before = files.items.len;
         walk.collect(arena, io, cwd, arg, run.excludes, &files) catch |err| switch (err) {
@@ -125,10 +140,11 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("zigvet: {s}: no .zig file to check (hidden files and directories, zig-out, zig-pkg and excluded paths are skipped)\n", .{arg});
             unreadable = true;
         }
+        try noteWalked(arena, &walked, arg, files.items[before..]);
     }
     walk.sortUnique(&files);
 
-    var survey: Survey = try .read(gpa, arena, io, cwd, files.items);
+    var survey: Survey = try .read(gpa, arena, io, cwd, files.items, &walked);
     const unrun_found = try unrun.check(arena, survey.summaries);
 
     var reports: report.Out = .init(gpa, out, run.format);
@@ -380,6 +396,65 @@ test "unrun reads every file checked before it reports one, and an allow comment
         \\
     , result.stdout);
     try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "noteWalked: a directory's files are recorded, a file named by itself is not" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const clean = struct {
+        fn clean(a: std.mem.Allocator, path: []const u8) ![]const u8 {
+            return std.fs.path.resolveAlloc(a, &.{path});
+        }
+    }.clean;
+    var walked: Walked = .empty;
+    try noteWalked(arena, &walked, "./a.zig", &.{try clean(arena, "a.zig")});
+    try noteWalked(arena, &walked, "src/", &.{ try clean(arena, "src/b.zig"), try clean(arena, "src/sub/c.zig") });
+    // A directory that holds one file.
+    try noteWalked(arena, &walked, "one", &.{try clean(arena, "one/d.zig")});
+    try std.testing.expectEqual(3, walked.count());
+    try std.testing.expect(!walked.contains(try clean(arena, "a.zig")));
+    try std.testing.expect(walked.contains(try clean(arena, "src/sub/c.zig")));
+    try std.testing.expect(walked.contains(try clean(arena, "one/d.zig")));
+}
+
+test "unrun does not report files named by themselves, whose test root may not be among them (#215)" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub");
+    const files = [_][2][]const u8{
+        .{ "root.zig", "pub const units = @import(\"sub/units.zig\");\npub const server = @import(\"sub/server.zig\");\ntest { @import(\"std\").testing.refAllDecls(@This()); }\n" },
+        .{ "sub/server.zig", "const units = @import(\"units.zig\");\npub fn limit() u64 {\n    return units.default_limit;\n}\n" },
+        .{ "sub/units.zig", "pub const default_limit: u64 = 512;\ntest \"the default limit\" {}\n" },
+    };
+    for (files) |file| try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+
+    const sep = std.fs.path.sep_str;
+    const cases = [_]struct { argv: []const []const u8, exit: u8, stdout: []const u8 }{
+        // The whole project: root.zig reaches both.
+        .{ .argv = &.{ exe, "." }, .exit = 0, .stdout = "" },
+        // The files a change touched, as `zigvet $(git diff --name-only)` gives them.
+        .{ .argv = &.{ exe, "sub/server.zig", "./sub/units.zig" }, .exit = 0, .stdout = "" },
+        // A directory is read as all there is: its root is taken to be in it.
+        .{
+            .argv = &.{ exe, "sub" },
+            .exit = 1,
+            .stdout = "sub" ++ sep ++ "units.zig:2:1: unrun: nothing the tests reach refers to this file, so its test never runs\n" ++
+                "    hint: add `test { _ = units; }` to sub" ++ sep ++ "server.zig\n",
+        },
+    };
+    for (cases) |case| {
+        const result = try std.process.run(gpa, io, .{ .argv = case.argv, .cwd = .{ .dir = tmp.dir } });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = case.exit }, result.term);
+        try std.testing.expectEqualStrings(case.stdout, result.stdout);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
 }
 
 test "hoard reads a function handed to another file's wrapper around the fuzz call (#136)" {

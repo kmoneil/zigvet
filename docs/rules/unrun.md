@@ -66,6 +66,17 @@ a module that names
 itself, `@import("mylib")` inside mylib, which only the build maps to a
 file; an allow comment above the reported `test` covers one of those.
 
+A directory given is read as all there is, so its test root is taken to
+be in it. A file named by itself is not read that way: `zigvet $(git diff
+--name-only)` gives the files a change touched, and not the root that runs
+their tests, nor what else refers to them. So a file named by itself, and
+not also found under a directory given, is taken as reached, every
+declaration of it, and neither it nor a file it imports is reported
+([#215](https://github.com/kmoneil/zigvet/issues/215)). A build script
+named so, as in `zigvet build.zig src`, is still read as a build script,
+since no file imports one. A run over files alone therefore reports no
+`unrun` at all: for that, name the directory.
+
 ## Found in real code
 
 Over Zig 0.17.0's standard library and compiler sources and the
