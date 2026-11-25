@@ -1,0 +1,88 @@
+# twice's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/twice.zig
+
+== a call whose name says it releases
+-        if (!releases(tree, call.ast.fn_expr)) continue;
++        if (false and !releases(tree, call.ast.fn_expr)) continue;
+
+== one call deferred, not the first of several
+-            if (statements.len != 1) continue;
++            if (statements.len == 0) continue;
+
+== an errdefer's in a test block, where a failure ends the test
+-        if (!plain and inTest(tree, parents, defer_node)) continue;
++        if (false and !plain and inTest(tree, parents, defer_node)) continue;
+
+== a release safe to run twice
+-        if (safeTwice(t, call.ast.fn_expr)) continue;
++        if (false and safeTwice(t, call.ast.fn_expr)) continue;
+
+== a queue's close
+-    if (closesQueue(t, fn_expr)) return true;
++    if (false and closesQueue(t, fn_expr)) return true;
+
+== a local that names a type
+-    if (tree.fullContainerDecl(&buffer, made) != null) return made;
++    if (false and tree.fullContainerDecl(&buffer, made) != null) return made;
+
+== the type a function of the file is declared to return
+-    return t.containerOf(returned(tree, fn_decl) orelse return null, 0);
++    return t.containerOf(returned(tree, fn_decl) orelse return null, 9);
+
+== the type behind an error union's error set
+-    if (tree.nodeTag(return_type) == .error_union) return tree.nodeData(return_type).node_and_node[1];
++    if (false and tree.nodeTag(return_type) == .error_union) return tree.nodeData(return_type).node_and_node[1];
+
+== a free of a slice known to be empty
+-            if (onlyWhenEmpty(tree, parents, node, d.block, d.handed)) continue;
++            if (false and onlyWhenEmpty(tree, parents, node, d.block, d.handed)) continue;
+
+== a statement of a block, not a switch prong
+-            if (!isStatement(tree, parents, node)) continue;
++            if (false and !isStatement(tree, parents, node)) continue;
+
+== under an errdefer, a name assigned again before the failure
+-            if (try reassigns(arena, tree, next, handed)) return null;
++            if (false and try reassigns(arena, tree, next, handed)) return null;
+
+== under an errdefer, a path that leaves without failing
+-                .@"return", .@"break", .@"continue" => return null,
++                .@"return", .@"break", .@"continue" => {},
+
+== under a defer, a name assigned again on the way out
+-        if (try reassigns(arena, tree, statement, handed)) return .spared;
++        if (false and try reassigns(arena, tree, statement, handed)) return .spared;
+
+== under a defer, a name whose address is taken on the way out
+-        if (try takesAddress(arena, tree, statement, handed)) return .spared;
++        if (false and try takesAddress(arena, tree, statement, handed)) return .spared;
+
+== a name the release is handed by address
+-        const of = if (tree.nodeTag(argument) == .address_of) tree.nodeData(argument).node else argument;
++        const of = argument;
+
+== under a defer, a statement that never returns
+-        if (neverReturns(t, statement)) return .spared;
++        if (false and neverReturns(t, statement)) return .spared;
+
+== unreachable
+-        .unreachable_literal => return true,
++        .unreachable_literal => return false,
+
+== @panic
+-        .builtin_call_two, .builtin_call_two_comma => return std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(statement)), "@panic"),
++        .builtin_call_two, .builtin_call_two_comma => return false,
+
+== a call of an exit by its name
+-        if (std.mem.eql(u8, name, word)) return true;
++        if (false and std.mem.eql(u8, name, word)) return true;
+
+== a function of the file declared noreturn
+-    return std.mem.eql(u8, tree.getNodeSource(return_type), "noreturn");
++    return false and std.mem.eql(u8, tree.getNodeSource(return_type), "noreturn");
+
+== a continue of a labeled switch, not followed
+-            .@"break", .@"continue" => return if (grow.jumpTarget(tree, t.parents, statement)) |target| .{ .jumps = target } else .spared,
++            .@"break", .@"continue" => return if (grow.jumpTarget(tree, t.parents, statement)) |target| .{ .jumps = target } else .goes_on,

@@ -62,8 +62,8 @@ first trips its rule, and the fix reports nothing.
   its caller keeps it.
 - torn: an optional or union field built in place by an initializer
   that can fail.
-- twice: an errdefer's free also written out by hand on a path that
-  returns an error.
+- twice: a deferred release also written out by hand: an errdefer's on a
+  path that returns an error, a defer's wherever its block is then left.
 - sweep: a loop frees what a list holds, can fail part way, and empties
   the list only after it.
 - unlock: a lock taken, then something that can fail before the unlock,
@@ -386,9 +386,10 @@ const Editor = struct {
 
 ### twice
 
-An errdefer's free also written out by hand on a path that then returns
-an error. The errdefer runs too, so it is freed twice. No allocation has
-to fail: any input that takes the path does it.
+A deferred release also written out by hand, where both run: an
+errdefer's on a path that then returns an error, a defer's wherever its
+block is then left. It is released twice. No allocation has to fail: any
+input that takes the path does it, and under a defer every run.
 
 ```zig
 fn open(gpa: Allocator, fd: i32) !*Conn {
@@ -401,9 +402,19 @@ fn open(gpa: Allocator, fd: i32) !*Conn {
     conn.* = .{ .fd = fd };
     return conn;
 }
+
+fn replace(io: Io, dir: Io.Dir, name: []const u8, data: []const u8) !void {
+    const file = try dir.createFile(io, "new", .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, data);
+    file.close(io);
+    try dir.rename("new", dir, name, io);
+}
 ```
 
-Drop the hand-written free and let the errdefer do it.
+Drop the hand-written one and let the errdefer or defer do it. Where the
+release has to come early, as this close before the rename, make the
+defer conditional and turn it off there.
 
 ```zig
 fn open(gpa: Allocator, fd: i32) !*Conn {
@@ -412,6 +423,16 @@ fn open(gpa: Allocator, fd: i32) !*Conn {
     if (fd < 0) return error.BadConfig;
     conn.* = .{ .fd = fd };
     return conn;
+}
+
+fn replace(io: Io, dir: Io.Dir, name: []const u8, data: []const u8) !void {
+    const file = try dir.createFile(io, "new", .{});
+    var open_file = true;
+    defer if (open_file) file.close(io);
+    try file.writeStreamingAll(io, data);
+    file.close(io);
+    open_file = false;
+    try dir.rename("new", dir, name, io);
 }
 ```
 
@@ -943,7 +964,9 @@ takes the path:
   then reports the double free or the leak. After unlock's, the next
   `lock` waits for good.
 - twice needs no failure made: a test with the input that takes the
-  path, and `std.testing.allocator` reports the double free.
+  path, and `std.testing.allocator` reports the double free. A
+  descriptor closed twice shows only when another thread was given its
+  number in between.
 - race: a Debug test built with ThreadSanitizer
   (`.sanitize_thread = true` on its module) on x86_64 Linux, with other
   threads locking or storing while one asks. macOS's ThreadSanitizer does
