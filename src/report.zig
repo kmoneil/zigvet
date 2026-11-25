@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter, opath };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter, opath, tail };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -66,6 +66,7 @@ pub const Finding = struct {
         narrow: Narrow,
         counter: Counter,
         opath: Opath,
+        tail: Tail,
         allow: Allow,
     };
 
@@ -340,6 +341,14 @@ pub const Finding = struct {
         pub const Use = enum { listed, synced, permissions, owner };
     };
 
+    pub const Tail = struct {
+        /// The modifier, as written: `.always_tail`.
+        modifier: []const u8,
+        /// What is called, as written: `rest`, or for a long callee its
+        /// last name and `...`.
+        callee: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -381,6 +390,7 @@ pub const Finding = struct {
             .narrow => .narrow,
             .counter => .counter,
             .opath => .opath,
+            .tail => .tail,
             .allow => null,
         };
     }
@@ -504,6 +514,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .narrow => |n| try writeNarrow(w, n),
         .counter => |c| try writeCounter(w, c),
         .opath => |o| try writeOpath(w, o),
+        .tail => |t| try w.print("`@call({s}, {s}, ...)` is a tail call or a compile error, and Zig's own x86_64 backend, the Debug default on x86_64 Linux, has no tail calls: every Debug build there fails, while LLVM's, on macOS and in every release mode, pass", .{ t.modifier, t.callee }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),

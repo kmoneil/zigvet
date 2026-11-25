@@ -1,0 +1,64 @@
+# tail's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/tail.zig
+
+== the modifier written as always_tail, not another
+-    if (!std.mem.eql(u8, tree.tokenSlice(name), "always_tail")) return null;
++    if (false and !std.mem.eql(u8, tree.tokenSlice(name), "always_tail")) return null;
+
+== a test of the backend before the call in its function
+-        if (file.tests(function.body, call)) return true;
++        if (false and file.tests(function.body, call)) return true;
+
+== before the call, not after it
+-        if (file.tests(function.body, call)) return true;
++        if (file.tests(function.body, function.last)) return true;
+
+== from the function's body, not its name
+-        if (file.tests(function.body, call)) return true;
++        if (file.tests(function.first, call)) return true;
+
+== the innermost function, not one around it
+-            if (inner == null or function.first > inner.?.first) inner = function;
++            if (inner == null or function.first < inner.?.first) inner = function;
+
+== a declaration that reads the backend
+-            if (std.mem.eql(u8, name, "zig_backend") or file.reads.contains(name)) return true;
++            if (std.mem.eql(u8, name, "zig_backend") or false) return true;
+
+== one declaration read through another, in any order
+-                grew = true;
++                grew = false;
+
+== a file whose top level refuses a backend
+-        if (file.refuses) return true;
++        if (false and file.refuses) return true;
+
+== a refusal calls @compileError
+-            if (file.tests(first, last) and calls(tree, first, last, "@compileError")) return true;
++            if (file.tests(first, last)) return true;
+
+== at the top of a container, not in a function
+-            if (tree.nodeTag(member) != .@"comptime") continue;
++            if (false and tree.nodeTag(member) != .@"comptime") continue;
+
+== a function named only in branches on the backend
+-        return file.namedOnlyInBranches(name, function);
++        return false and file.namedOnlyInBranches(name, function);
+
+== every time it is named, not once
+-            } else return false;
++            } else continue;
+
+== named at all
+-        return named;
++        return true;
+
+== not pub
+-            const name = if (proto.visib_token == null) proto.name_token else null;
++            const name = proto.name_token;
+
+== named outside its own function
+-            if (token >= function.first and token <= function.last) continue;
++            if (false and token >= function.first and token <= function.last) continue;
