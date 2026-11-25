@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter, opath };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -65,6 +65,7 @@ pub const Finding = struct {
         wrap: Wrap,
         narrow: Narrow,
         counter: Counter,
+        opath: Opath,
         allow: Allow,
     };
 
@@ -319,6 +320,25 @@ pub const Finding = struct {
         max: u64,
     };
 
+    pub const Opath = struct {
+        /// The directory, as written: `d`, or `tmp.dir` for a `tmpDir`'s.
+        dir: []const u8,
+        use: Use,
+        /// The call that needs its descriptor, as written:
+        /// `as_file.sync(io)`.
+        call: []const u8,
+        /// The call that hands it to the function of the file that makes
+        /// `call`, as written: `syncDir(io, slots)`. Empty when the
+        /// function that opens it makes the call.
+        handed: []const u8 = "",
+        /// That function's name: `syncDir`.
+        helper: []const u8 = "",
+
+        /// What is done with the directory that an O_PATH descriptor
+        /// refuses.
+        pub const Use = enum { listed, synced, permissions, owner };
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -359,6 +379,7 @@ pub const Finding = struct {
             .wrap => .wrap,
             .narrow => .narrow,
             .counter => .counter,
+            .opath => .opath,
             .allow => null,
         };
     }
@@ -483,6 +504,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         }),
         .narrow => |n| try writeNarrow(w, n),
         .counter => |c| try writeCounter(w, c),
+        .opath => |o| try writeOpath(w, o),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
@@ -503,6 +525,24 @@ fn writeFreed(w: *Writer, f: Finding.Freed) Writer.Error!void {
     } else {
         try w.print(", which `defer {s}` above frees before the caller gets it", .{f.release});
     }
+}
+
+/// opath's message: what the directory is used for, by which call, and
+/// what Linux answers.
+fn writeOpath(w: *Writer, o: Finding.Opath) Writer.Error!void {
+    try w.print("`{s}` is opened without `.iterate = true`, which on Linux is an O_PATH descriptor, and ", .{o.dir});
+    const does = switch (o.use) {
+        .listed => "lists it",
+        .synced => "syncs it",
+        .permissions => "sets its permissions",
+        .owner => "sets its owner",
+    };
+    if (o.helper.len > 0) {
+        try w.print("'{s}', which `{s}` below hands it to, {s} (`{s}`)", .{ o.helper, o.handed, does, o.call });
+    } else {
+        try w.print("`{s}` below {s}", .{ o.call, does });
+    }
+    try w.writeAll(": that is EBADF there, a panic in Debug and error.Unexpected otherwise, while macOS, which has no O_PATH, passes");
 }
 
 /// counter's message: the value at which the test still holds and the

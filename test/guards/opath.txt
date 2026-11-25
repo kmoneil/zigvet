@@ -1,0 +1,68 @@
+# opath's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/opath.zig
+
+== options written at the call, not held in a name
+-    const init = tree.fullStructInit(&buffer, options) orelse return false;
++    const init = tree.fullStructInit(&buffer, options) orelse return true;
+
+== iterate written as anything but false
+-        if (std.mem.eql(u8, name, "iterate")) return std.mem.eql(u8, tree.getNodeSource(field), "false");
++        if (std.mem.eql(u8, name, "iterate")) return true;
+
+== the open_options createDirPathOpen takes are read
+-        if (std.mem.eql(u8, name, "open_options")) return withoutIterate(tree, field);
++        if (std.mem.eql(u8, name, "open_options")) return true;
+
+== the local the directory was opened into, not another
+-        return tree.nodeTag(n) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(n)), dir.name);
++        return tree.nodeTag(n) == .identifier;
+
+== a tmpDir's dir, not its parent_dir
+-            if (!std.mem.eql(u8, tree.tokenSlice(field), "dir")) return false;
++            if (false and !std.mem.eql(u8, tree.tokenSlice(field), "dir")) return false;
+
+== after the open, not before it
+-            const need = try needIn(arena, tree, statements[at + 1 ..], opened.dir, helpers.?) orelse continue;
++            const need = try needIn(arena, tree, statements[0 * at ..], opened.dir, helpers.?) orelse continue;
+
+== up to where the local is assigned again
+-        if (s.reassigned) return null;
++        if (false and s.reassigned) return null;
+
+== only the methods that need the descriptor
+-                if (methods.get(name)) |use| return .{ .use = use, .call = node };
++                if (@as(?Use, methods.get(name) orelse .listed)) |use| return .{ .use = use, .call = node };
+
+== a sync of the file, not what fstat answers
+-            } else if (std.mem.eql(u8, name, "sync") and s.isFile(receiver)) {
++            } else if (s.isFile(receiver)) {
+
+== a file made from the directory's handle, not one opened under it
+-        for (s.files.items) |file| if (std.mem.eql(u8, file, name)) return true;
++        if (name.len > 0) return true;
+
+== fsync of the directory's handle, not another's
+-            if (params.len == 1 and s.dir.handleIs(tree, params[0])) return .{ .use = .synced, .call = node };
++            if (params.len == 1) return .{ .use = .synced, .call = node };
+
+== a helper's parameter written as a Dir
+-            if (!std.mem.endsWith(u8, tree.getNodeSource(param_type), "Dir")) continue;
++            if (false and !std.mem.endsWith(u8, tree.getNodeSource(param_type), "Dir")) continue;
+
+== a helper name only one function of the file has
+-        if (named.get(tree.tokenSlice(name)).? > 1) continue;
++        if (false and named.get(tree.tokenSlice(name)).? > 1) continue;
+
+== handed to the parameter the helper uses
+-        if (helper.params == call.ast.params.len and helper.param == index) return helper;
++        if (helper.params == call.ast.params.len) return helper;
+
+== a call with as many arguments as the helper takes
+-        if (helper.params == call.ast.params.len and helper.param == index) return helper;
++        if (helper.param == index) return helper;
+
+== one call followed, and no further
+-            const need = try needIn(arena, tree, &.{body}, .{ .name = tree.tokenSlice(param_name) }, &.{}) orelse continue;
++            const need = try needIn(arena, tree, &.{body}, .{ .name = tree.tokenSlice(param_name) }, helpers.items) orelse continue;
