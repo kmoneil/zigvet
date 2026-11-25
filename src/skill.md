@@ -91,6 +91,8 @@ first trips its rule, and the fix reports nothing.
   `.len` of the slice it walks, which overflows on a longer slice.
 - opath: a directory opened without `.iterate = true`, then listed,
   synced or given new permissions, which Linux refuses.
+- tail: `@call(.always_tail, ...)` with nothing that tests the backend,
+  which every Debug build on x86_64 Linux fails to compile.
 - cached: a build script lists a directory to decide what to build, and
   never tells Zig's configure cache.
 - unrun: a file whose tests never run, because nothing the test build
@@ -846,6 +848,37 @@ pub fn syncDir(io: Io, dir: Io.Dir, sub: []const u8) !void {
     defer d.close(io);
     const as_file: Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
     try as_file.sync(io);
+}
+```
+
+### tail
+
+`@call(.always_tail, ...)` asks for a tail call or a compile error. LLVM
+makes one; Zig's own x86_64 backend, the Debug default on x86_64 Linux,
+makes none. So the code compiles on macOS and in every release build, and
+every Debug build on x86_64 Linux fails, a library's consumers' builds
+among them. The report is on the `@call`, when nothing before it in its
+function tests `builtin.zig_backend`.
+
+```zig
+pub fn scan(xs: []const u8, i: usize) usize {
+    if (i >= xs.len or xs[i] == 0) return i;
+    return @call(.always_tail, scan, .{ xs, i + 1 });
+}
+```
+
+Ask for the tail call only where the backend makes one, and for a plain
+call elsewhere: a modifier held in a constant that tests the backend.
+
+```zig
+const builtin = @import("builtin");
+const std = @import("std");
+
+const tail: std.lang.CallModifier = if (builtin.zig_backend == .stage2_llvm) .always_tail else .auto;
+
+pub fn scan(xs: []const u8, i: usize) usize {
+    if (i >= xs.len or xs[i] == 0) return i;
+    return @call(tail, scan, .{ xs, i + 1 });
 }
 ```
 

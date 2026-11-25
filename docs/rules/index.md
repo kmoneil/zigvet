@@ -72,6 +72,7 @@ One needs no failure: twice, for a release written out under a plain
 | Rule | Catches | What goes wrong |
 |---|---|---|
 | [opath](opath.md) | A directory opened without `.iterate = true`, then listed, synced through its handle, or given new permissions or a new owner | Linux opens it with `O_PATH`, where each of those is `EBADF`: a panic in Debug and `error.Unexpected` otherwise, while the same code passes on macOS |
+| [tail](tail.md) | `@call(.always_tail, ...)` with nothing before it that tests `builtin.zig_backend` | Zig's own x86_64 backend, the Debug default on x86_64 Linux, makes no tail calls: every Debug build there fails to compile, a library's consumers' too, while macOS and every release build pass |
 
 ## Builds and tests
 
