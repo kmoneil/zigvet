@@ -22,8 +22,9 @@ found in real code.
 
 ## Error paths: double frees, leaks, held locks
 
-These all go wrong only when something fails part way, the path tests
-seldom take.
+These go wrong when something fails part way, the path tests seldom take.
+One needs no failure: twice, for a release written out under a plain
+`defer`.
 
 | Rule | Catches | What goes wrong |
 |---|---|---|
@@ -31,7 +32,7 @@ seldom take.
 | [owner](owner.md) | One allocation freed by two errdefers: the caller's, and the one in the function it hands it to | Freed twice |
 | [kept](kept.md) | An `errdefer` that frees what the function has already stored where its caller keeps it | The caller's `deinit` frees it again |
 | [torn](torn.md) | An optional or union built in place by an initializer that can fail | It is left set over what was never made, and `deinit` frees that |
-| [twice](twice.md) | An errdefer's free also written out by hand on a path that then fails | Freed twice |
+| [twice](twice.md) | A deferred release also written out by hand: an errdefer's on a path that then fails, a defer's wherever its block is then left | Freed or closed twice |
 | [sweep](sweep.md) | A loop that frees what a list holds, can fail part way, and empties the list only after it | The list still holds what was freed |
 | [unlock](unlock.md) | A lock taken, then something that can fail before the unlock, with no `defer` | The lock stays held, and the next `lock` waits for good |
 | [leak](leak.md) | A local released by hand later in its block, with something that can fail between | The release never runs |
