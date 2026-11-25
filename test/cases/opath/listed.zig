@@ -30,11 +30,11 @@ fn sources(io: Io, gpa: std.mem.Allocator, path: []const u8) !usize {
 
 // The error is dropped, so in a release build on Linux the cache keeps
 // the mode it was made with and nothing says so.
-fn private(io: Io, path: []const u8) !Io.Dir {
+fn private(io: Io, path: []const u8, owner_only: Io.File.Permissions) !Io.Dir {
     const cwd = Io.Dir.cwd();
     try cwd.createDirPath(io, path);
     var dir = try cwd.openDir(io, path, .{});
-    dir.setPermissions(io, .fromMode(0o700)) catch {};
+    dir.setPermissions(io, owner_only) catch {};
     return dir;
 }
 
@@ -112,6 +112,6 @@ comptime {
 //
 // :11:17: error: `d` is opened without `.iterate = true`, which on Linux is an O_PATH descriptor, and `d.iterate()` below lists it: that is EBADF there, a panic in Debug and error.Unexpected otherwise, while macOS, which has no O_PATH, passes
 // :20:17: error: `d` is opened without `.iterate = true`, which on Linux is an O_PATH descriptor, and `d.walk(gpa)` below lists it: that is EBADF there, a panic in Debug and error.Unexpected otherwise, while macOS, which has no O_PATH, passes
-// :36:19: error: `dir` is opened without `.iterate = true`, which on Linux is an O_PATH descriptor, and `dir.setPermissions(io, .fromMode(0o700))` below sets its permissions: that is EBADF there, a panic in Debug and error.Unexpected otherwise, while macOS, which has no O_PATH, passes
+// :36:19: error: `dir` is opened without `.iterate = true`, which on Linux is an O_PATH descriptor, and `dir.setPermissions(io, owner_only)` below sets its permissions: that is EBADF there, a panic in Debug and error.Unexpected otherwise, while macOS, which has no O_PATH, passes
 // :42:21: error: `spool` is opened without `.iterate = true`, which on Linux is an O_PATH descriptor, and `spool.setOwner(io, uid, null)` below sets its owner: that is EBADF there, a panic in Debug and error.Unexpected otherwise, while macOS, which has no O_PATH, passes
 // :50:15: error: `tmp.dir` is opened without `.iterate = true`, which on Linux is an O_PATH descriptor, and `tmp.dir.iterate()` below lists it: that is EBADF there, a panic in Debug and error.Unexpected otherwise, while macOS, which has no O_PATH, passes
