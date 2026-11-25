@@ -16,8 +16,8 @@ file src/twice.zig
 +        if (false and !plain and inTest(tree, parents, defer_node)) continue;
 
 == a release safe to run twice
--        if (safeTwice(t, call.ast.fn_expr)) continue;
-+        if (false and safeTwice(t, call.ast.fn_expr)) continue;
+-        if (try safeTwice(arena, t, call.ast.fn_expr, elsewhere)) continue;
++        if (false and try safeTwice(arena, t, call.ast.fn_expr, elsewhere)) continue;
 
 == a queue's close
 -    if (closesQueue(t, fn_expr)) return true;
@@ -34,6 +34,34 @@ file src/twice.zig
 == the type behind an error union's error set
 -    if (tree.nodeTag(return_type) == .error_union) return tree.nodeData(return_type).node_and_node[1];
 +    if (false and tree.nodeTag(return_type) == .error_union) return tree.nodeData(return_type).node_and_node[1];
+
+== a function another file checked declares that stores to what it frees
+-            .place => |place| if (e.declared(place)) |f| return f.clears,
++            .place => |place| if (e.declared(place)) |f| return f.clears and false,
+
+== a method of a type another file checked declares
+-            .type => |owner| (e.find(owner.file, owner.name, tree.tokenSlice(name)) orelse return false).clears,
++            .type => |owner| (e.find(owner.file, owner.name, tree.tokenSlice(name)) orelse return false).clears and false,
+
+== a method of a type a file not checked declares
+-            .unchecked => true,
++            .unchecked => false,
+
+== a function a file not checked declares
+-            .unchecked => return true,
++            .unchecked => return false,
+
+== the type a pointer points to
+-            return switch (try e.leadsTo(arena, tree, types.pointee(tree, type_expr) orelse type_expr)) {
++            return switch (try e.leadsTo(arena, tree, type_expr)) {
+
+== a type that is a file itself
+-                    0 => .{ .type = .{ .file = place.file, .name = "" } },
++                    0 => .nowhere,
+
+== what the function that made a local is declared to return, through a try
+-        const made = if (tree.nodeTag(init) == .@"try") tree.nodeData(init).node else init;
++        const made = init;
 
 == a free of a slice known to be empty
 -            if (onlyWhenEmpty(tree, parents, node, d.block, d.handed)) continue;

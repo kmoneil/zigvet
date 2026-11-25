@@ -10,6 +10,8 @@ const test_options = @import("test_options");
 const hoard = @import("hoard.zig");
 const report = @import("report.zig");
 const skill = @import("skill.zig");
+// Named for the rule, apart from the skill part a test reads.
+const twice_rule = @import("twice.zig");
 const unrun = @import("unrun.zig");
 const vet = @import("vet.zig");
 const walk = @import("walk.zig");
@@ -56,20 +58,27 @@ const max_source_bytes = std.math.maxInt(u32);
 const Survey = struct {
     summaries: []unrun.Summary,
     fuzz_wrappers: [][]const hoard.Wrapper,
-    /// Which file a name leads to, made only when a file declares a
-    /// wrapper: most runs need no names.
-    resolver: ?unrun.Resolver,
+    /// For twice: the functions each file declares that a release written
+    /// in another may lead to.
+    functions: [][]const twice_rule.Fn,
+    /// Whether any file declares a wrapper: most runs have none, and
+    /// hoard then has no call to look for.
+    wraps: bool,
+    /// Which file a name leads to.
+    resolver: unrun.Resolver,
 
     /// `walked` holds the paths found under a directory given; the others
     /// were named by themselves.
     fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: Io, cwd: Io.Dir, paths: []const []const u8, walked: *const Walked) !Survey {
         const summaries = try arena.alloc(unrun.Summary, paths.len);
         const fuzz_wrappers = try arena.alloc([]const hoard.Wrapper, paths.len);
+        const functions = try arena.alloc([]const twice_rule.Fn, paths.len);
         var any = false;
-        for (paths, summaries, fuzz_wrappers) |path, *summary, *wrappers| {
+        for (paths, summaries, fuzz_wrappers, functions) |path, *summary, *wrappers, *declared| {
             summary.* = .{ .path = path, .unparsed = true };
             defer summary.named = !walked.contains(path);
             wrappers.* = &.{};
+            declared.* = &.{};
             const source = cwd.readFileAllocOptions(io, path, gpa, .limited(max_source_bytes), .of(u8), 0) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 else => continue,
@@ -79,16 +88,18 @@ const Survey = struct {
             defer tree.deinit(gpa);
             summary.* = try unrun.summarize(gpa, arena, path, &tree);
             wrappers.* = try hoard.wrappers(arena, &tree);
+            if (tree.errors.len == 0) declared.* = try twice_rule.functions(gpa, arena, &tree);
             any = any or wrappers.len > 0;
         }
-        return .{ .summaries = summaries, .fuzz_wrappers = fuzz_wrappers, .resolver = if (any) try .init(arena, summaries) else null };
+        return .{ .summaries = summaries, .fuzz_wrappers = fuzz_wrappers, .functions = functions, .wraps = any, .resolver = try .init(arena, summaries) };
     }
 
     /// What file `f` is checked with, `found` being unrun's finding in it.
     fn across(s: *Survey, f: usize, found: *const ?report.Finding) vet.Across {
         return .{
             .extra = if (found.*) |*first| first[0..1] else &.{},
-            .wrapped = if (s.resolver) |*r| .{ .wrappers = s.fuzz_wrappers, .resolver = r, .file = f } else null,
+            .wrapped = if (s.wraps) .{ .wrappers = s.fuzz_wrappers, .resolver = &s.resolver, .file = f } else null,
+            .elsewhere = .{ .functions = s.functions, .resolver = &s.resolver, .file = f },
         };
     }
 };
@@ -145,7 +156,7 @@ pub fn main(init: std.process.Init) !u8 {
     walk.sortUnique(&files);
 
     var survey: Survey = try .read(gpa, arena, io, cwd, files.items, &walked);
-    const unrun_found = try unrun.check(arena, survey.summaries);
+    const unrun_found = try survey.resolver.check();
 
     var reports: report.Out = .init(gpa, out, run.format);
     defer reports.deinit();
@@ -446,6 +457,68 @@ test "unrun does not report files named by themselves, whose test root may not b
             .stdout = "sub" ++ sep ++ "units.zig:2:1: unrun: nothing the tests reach refers to this file, so its test never runs\n" ++
                 "    hint: add `test { _ = units; }` to sub" ++ sep ++ "server.zig\n",
         },
+    };
+    for (cases) |case| {
+        const result = try std.process.run(gpa, io, .{ .argv = case.argv, .cwd = .{ .dir = tmp.dir } });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = case.exit }, result.term);
+        try std.testing.expectEqualStrings(case.stdout, result.stdout);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
+}
+
+test "twice reads a release where another file checked declares it (#216)" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const files = [_][2][]const u8{
+        .{
+            "sock.zig",
+            \\pub const Sock = struct {
+            \\    fd: i32,
+            \\    pub fn close(s: *Sock) void {
+            \\        if (s.fd < 0) return;
+            \\        s.fd = -1;
+            \\    }
+            \\    pub fn destroy(s: *Sock) void {
+            \\        _ = s;
+            \\    }
+            \\};
+            \\
+        },
+        .{
+            "sock_test.zig",
+            \\const Sock = @import("sock.zig").Sock;
+            \\test "closed by hand, and again by its defer" {
+            \\    var s: Sock = .{ .fd = 3 };
+            \\    defer s.close();
+            \\    s.close();
+            \\}
+            \\test "destroyed by hand, and again by its defer" {
+            \\    var s: Sock = .{ .fd = 3 };
+            \\    defer s.destroy();
+            \\    s.destroy();
+            \\}
+            \\
+        },
+    };
+    for (files) |file| try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    const exe = try Io.Dir.cwd().realPathFileAlloc(io, test_options.zigvet_exe, gpa);
+    defer gpa.free(exe);
+
+    const destroyed =
+        \\sock_test.zig:10:5: twice: `s.destroy()` here, and the defer above it does the same again when its block ends
+        \\    hint: the defer above runs however its block is left; drop this one, or to release here, make the defer conditional (`defer if (open) ...`) and clear what it tests
+        \\
+    ;
+    const cases = [_]struct { argv: []const []const u8, exit: u8, stdout: []const u8 }{
+        // `close` stores to what it closes, which sock.zig shows; `destroy` does not.
+        .{ .argv = &.{ exe, "." }, .exit = 1, .stdout = destroyed },
+        .{ .argv = &.{ exe, "sock_test.zig", "sock.zig" }, .exit = 1, .stdout = destroyed },
+        // Without sock.zig neither can be read, and neither is reported.
+        .{ .argv = &.{ exe, "sock_test.zig" }, .exit = 0, .stdout = "" },
     };
     for (cases) |case| {
         const result = try std.process.run(gpa, io, .{ .argv = case.argv, .cwd = .{ .dir = tmp.dir } });

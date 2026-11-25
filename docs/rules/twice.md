@@ -100,26 +100,42 @@ a call of a function of the file, by what that is declared to return, a
 local `struct`); the `close` of a `std.Io.Queue`, which std documents as
 idempotent, where the file writes the queue's type; and a free inside
 `if (x.len == 0)` for the `x` it is handed, which frees nothing either
-time (#87). A function of a type declared in another file is not seen, so
-one that is safe to run twice is still reported.
+time (#87).
+
+A release that is no function of the file is read where it is declared,
+when that file is checked in the same run
+([#216](https://github.com/kmoneil/zigvet/issues/216)): a function reached
+through the constants that import it (`pool.release(conn)`), or a method
+of a type another file declares, the receiver's type shown by its
+declaration (`var s: Sock`, `s: *Sock`) or by the call that made it
+(`try Sock.open(...)`, by what `open` is declared to return). It is not
+reported when it stores to what it frees there. One that leads to a file
+imported by path that is not among those checked cannot be read, and is
+not reported either, so a run over a few files says less than one over
+the directory. Not followed: a type from a module imported by name
+(`@import("vaxis")`), which only the build maps to a file, and what a
+method of a parameter or a field returns; a release of those is reported,
+as one of the standard library's is.
 
 ## Found in real code
 
 Under an errdefer: over Zig 0.17.0's standard library and compiler
 sources and the application repos, twice reports nothing. Over fourteen
-well-known public Zig projects, 23 in one compiler: 22 real, at seven
-places, and one false positive, a deinit that resets what it frees run
-twice, its type declared in another file.
+well-known public Zig projects, 22 in one compiler, all real, at seven
+places. A 23rd was a false positive until releases were read where they
+are declared: a deinit that resets what it frees, its type in another
+file.
 
 Under a defer: over Zig 0.17.1's standard library and compiler sources
 and the fourteen public projects, nothing. Before the exemptions above,
 the shape matched 48 places there and in the application repos: 32 give
 the name something new on the next line, 4 exit a forked child, and 9
 are safe to run twice, by a function that nulls what it frees, a queue's
-close, or a value made again through its address. That leaves 3 reports,
+close, or a value made again through its address. That left 3 reports,
 at two places in the application repos: the listener test above, in a
 copy of the framework that another repo keeps, and a test that closes a
-socket twice on purpose, to show that its close can be repeated, the
-type declared in another file.
+socket twice on purpose, to show that its close can be repeated. Its
+type is declared in another file, where the close is now read, which
+leaves the listener test alone.
 
 [All rules](index.md)

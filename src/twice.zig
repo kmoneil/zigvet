@@ -67,6 +67,18 @@
 //! idempotent, where the file writes the queue's type; and a free inside
 //! `if (x.len == 0)` for the `x` it is handed, which frees nothing either
 //! time.
+//!
+//! A release that is no function of the file is read where it is
+//! declared, when that file is checked in the same run (#216): a function
+//! reached through the constants that import it (`pool.release(conn)`),
+//! or a method of a type another file declares, the receiver's type shown
+//! by its declaration (`var s: Sock`, `s: *Sock`) or by the call that made
+//! it (`try Sock.open(...)`). It is not reported when it stores to what
+//! it frees there, nor when it leads to a file imported by path that is
+//! not among those checked, which cannot be read. Not followed: a type
+//! from a module imported by name, which only the build maps to a file,
+//! and what a method of a parameter or a field returns; a release of
+//! those is reported, as one of the standard library's is.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -81,11 +93,14 @@ const report = @import("report.zig");
 const Finding = report.Finding;
 const types = @import("types.zig");
 const unlock = @import("unlock.zig");
+const unrun = @import("unrun.zig");
 
 /// Appends a finding for every deferred release also written out by hand
 /// where both run: an errdefer's on a path that then fails, a defer's
 /// wherever its block is then left. Everything is allocated with `arena`.
-pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
+/// `elsewhere`, when the run checks other files with this one, says what
+/// their functions do and how this file's names reach them.
+pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding), elsewhere: ?Elsewhere) Allocator.Error!void {
     var parents: []const Node.OptionalIndex = &.{};
     for (tree.nodes.items(.tag), 0..) |tag, i| {
         const plain = switch (tag) {
@@ -108,7 +123,7 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
         const t: types.Types = .{ .tree = tree, .parents = parents };
         // A failure ends a test, but a plain defer runs when it passes too.
         if (!plain and inTest(tree, parents, defer_node)) continue;
-        if (safeTwice(t, call.ast.fn_expr)) continue;
+        if (try safeTwice(arena, t, call.ast.fn_expr, elsewhere)) continue;
         // What the call is handed: its arguments, and the receiver of a
         // method (`current` of `current.close(io)`).
         var handed: std.ArrayList(Node.Index) = .empty;
@@ -194,7 +209,10 @@ fn calledName(tree: *const Ast, fn_expr: Node.Index) ?[]const u8 {
 /// that is safe to run twice, such as `shrinkRetainingCapacity` or a
 /// restore, is no bug.
 pub fn releases(tree: *const Ast, fn_expr: Node.Index) bool {
-    const name = calledName(tree, fn_expr) orelse return false;
+    return releasesByName(calledName(tree, fn_expr) orelse return false);
+}
+
+fn releasesByName(name: []const u8) bool {
     var lower: [64]u8 = undefined;
     if (name.len > lower.len) return false;
     const folded = std.ascii.lowerString(&lower, name);
@@ -205,12 +223,235 @@ pub fn releases(tree: *const Ast, fn_expr: Node.Index) bool {
 }
 
 /// Whether the release `fn_expr` names frees nothing the second time, as
-/// far as the file shows: a function of the file that stores to what it
-/// frees, or the `close` of a `std.Io.Queue`.
-fn safeTwice(t: types.Types, fn_expr: Node.Index) bool {
+/// far as the files checked show: the `close` of a `std.Io.Queue`, or a
+/// function that stores to what it frees, of this file or, when it is
+/// not one of this file's, of another that `elsewhere` leads to.
+fn safeTwice(arena: Allocator, t: types.Types, fn_expr: Node.Index, elsewhere: ?Elsewhere) Allocator.Error!bool {
     if (closesQueue(t, fn_expr)) return true;
-    return clears(t.tree, function(t, fn_expr) orelse return false);
+    if (function(t, fn_expr)) |fn_decl| return clears(t.tree, fn_decl);
+    const e = elsewhere orelse return false;
+    return e.safe(arena, t, fn_expr);
 }
+
+/// A function a file declares, as a release written in another file needs
+/// to know it: what the run reads of each file before any is checked.
+pub const Fn = struct {
+    /// The type, declared at the top of the file, that it is a member of.
+    /// Empty for a function of the file itself.
+    container: []const u8,
+    name: []const u8,
+    /// It releases, and stores to what it frees, as `clears` reads one.
+    clears: bool,
+    /// The type of the file it is declared to return, as `container`
+    /// names one. Null for any other type.
+    returns: ?[]const u8,
+};
+
+/// The functions of `tree` that a release in another file may lead to,
+/// of the file itself and of each type it declares at the top: those
+/// that release and store to what they free, and those that return a type
+/// of the file, which say what a local they make is. Nothing for a file
+/// with no release that stores to what it frees, which is most files.
+/// `gpa` is for what it needs while it reads; what it returns is allocated
+/// with `arena`, every name copied.
+pub fn functions(gpa: Allocator, arena: Allocator, tree: *const Ast) Allocator.Error![]const Fn {
+    var scratch_state: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch_state.deinit();
+    var reader: Reader = .{ .scratch = scratch_state.allocator(), .tree = tree };
+    try reader.listContainers();
+    for (reader.containers.items) |container| try reader.read(container);
+    if (!reader.stores) return &.{};
+    const copied = try arena.alloc(Fn, reader.found.items.len);
+    for (copied, reader.found.items) |*to, from| to.* = .{
+        .container = try arena.dupe(u8, from.container),
+        .name = try arena.dupe(u8, from.name),
+        .clears = from.clears,
+        .returns = if (from.returns) |name| try arena.dupe(u8, name) else null,
+    };
+    return copied;
+}
+
+/// Reads a file's functions for `functions`, into memory of its own.
+const Reader = struct {
+    scratch: Allocator,
+    tree: *const Ast,
+    /// The file, then each type it declares at the top.
+    containers: std.ArrayList(Container) = .empty,
+    /// Made when a return type is first asked about.
+    types: ?types.Types = null,
+    found: std.ArrayList(Fn) = .empty,
+    /// Whether a function found releases and stores to what it frees.
+    stores: bool = false,
+
+    const Container = struct { node: Node.Index, name: []const u8 };
+
+    fn listContainers(r: *Reader) Allocator.Error!void {
+        const tree = r.tree;
+        try r.containers.append(r.scratch, .{ .node = .root, .name = "" });
+        for (tree.rootDecls()) |member| {
+            const decl = tree.fullVarDecl(member) orelse continue;
+            const value = decl.ast.init_node.unwrap() orelse continue;
+            var buffer: [2]Node.Index = undefined;
+            if (tree.fullContainerDecl(&buffer, value) == null) continue;
+            try r.containers.append(r.scratch, .{ .node = value, .name = tree.tokenSlice(decl.ast.mut_token + 1) });
+        }
+    }
+
+    /// Appends the functions of `container` that `functions` keeps.
+    fn read(r: *Reader, container: Container) Allocator.Error!void {
+        const tree = r.tree;
+        var buffer: [2]Node.Index = undefined;
+        for (tree.fullContainerDecl(&buffer, container.node).?.ast.members) |member| {
+            if (tree.nodeTag(member) != .fn_decl) continue;
+            var proto_buffer: [1]Node.Index = undefined;
+            const proto = tree.fullFnProto(&proto_buffer, tree.nodeData(member).node_and_node[0]).?;
+            const name = tree.tokenSlice(proto.name_token orelse continue);
+            const stores = releasesByName(name) and clears(tree, member);
+            const returns = try r.typeReturned(member);
+            if (!stores and returns == null) continue;
+            r.stores = r.stores or stores;
+            try r.found.append(r.scratch, .{ .container = container.name, .name = name, .clears = stores, .returns = returns });
+        }
+    }
+
+    /// The type of the file `fn_decl` is declared to return, by its name
+    /// among `containers`.
+    fn typeReturned(r: *Reader, fn_decl: Node.Index) Allocator.Error!?[]const u8 {
+        const type_expr = returned(r.tree, fn_decl) orelse return null;
+        if (r.types == null) r.types = try .init(r.scratch, r.tree);
+        const made = r.types.?.containerOf(type_expr, 0) orelse return null;
+        for (r.containers.items) |container| {
+            if (container.node == made) return container.name;
+        }
+        return null;
+    }
+};
+
+/// What the run knows of the other files checked with this one: each
+/// file's functions, by its place among them, where a name written in
+/// this one leads, and this file's place.
+pub const Elsewhere = struct {
+    functions: []const []const Fn,
+    resolver: *unrun.Resolver,
+    file: usize,
+
+    /// Whether the release `fn_expr` names, which is no function of this
+    /// file, frees nothing the second time, as far as the other files
+    /// show: a function another file checked declares that stores to what
+    /// it frees, reached through the constants that import it
+    /// (`pool.release(conn)`), or a method of a type one declares, the
+    /// receiver's type shown by its declaration (`var s: Sock`) or by the
+    /// call that made it (`try Sock.open(...)`). One that leads to a file
+    /// imported by path that is not among those checked cannot be read,
+    /// and is taken to be safe: the rule misses rather than reports.
+    fn safe(e: Elsewhere, arena: Allocator, t: types.Types, fn_expr: Node.Index) Allocator.Error!bool {
+        const tree = t.tree;
+        switch (try e.leadsTo(arena, tree, fn_expr)) {
+            .unchecked => return true,
+            .place => |place| if (e.declared(place)) |f| return f.clears,
+            .nowhere => {},
+        }
+        if (tree.nodeTag(fn_expr) != .field_access) return false;
+        const receiver, const name = tree.nodeData(fn_expr).node_and_token;
+        return switch (try e.typeOf(arena, t, receiver)) {
+            .unchecked => true,
+            .type => |owner| (e.find(owner.file, owner.name, tree.tokenSlice(name)) orelse return false).clears,
+            .nowhere => false,
+        };
+    }
+
+    /// Where a name of this file leads, of what this rule reads there.
+    const Lead = union(enum) {
+        /// To a declaration of another file checked.
+        place: unrun.Place,
+        /// To a file imported by path that is not among those checked.
+        unchecked,
+        /// Nowhere the files show: this file itself, which `function`
+        /// reads, the standard library, a local.
+        nowhere,
+    };
+
+    /// What a receiver's type is, of what this rule reads of it.
+    const Owner = union(enum) {
+        /// A type another file checked declares, by its name there, as
+        /// `Fn.container` names one.
+        type: struct { file: usize, name: []const u8 },
+        /// One a file that is not among those checked declares.
+        unchecked,
+        /// Nothing the files show.
+        nowhere,
+    };
+
+    /// The type of `receiver`, where another file declares it: as this
+    /// file writes it, a pointer to it included, or, for a local with none
+    /// written, what the function that made it is declared to return.
+    fn typeOf(e: Elsewhere, arena: Allocator, t: types.Types, receiver: Node.Index) Allocator.Error!Owner {
+        const tree = t.tree;
+        if (t.typeOf(receiver, 0)) |type_expr| {
+            return switch (try e.leadsTo(arena, tree, types.pointee(tree, type_expr) orelse type_expr)) {
+                .unchecked => .unchecked,
+                .nowhere => .nowhere,
+                .place => |place| switch (place.names.len) {
+                    0 => .{ .type = .{ .file = place.file, .name = "" } },
+                    1 => .{ .type = .{ .file = place.file, .name = place.names[0] } },
+                    else => .nowhere,
+                },
+            };
+        }
+        if (tree.nodeTag(receiver) != .identifier) return .nowhere;
+        const init = t.localInit(receiver) orelse return .nowhere;
+        const made = if (tree.nodeTag(init) == .@"try") tree.nodeData(init).node else init;
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, made) orelse return .nowhere;
+        const place = switch (try e.leadsTo(arena, tree, call.ast.fn_expr)) {
+            .unchecked => return .unchecked,
+            .nowhere => return .nowhere,
+            .place => |place| place,
+        };
+        const returns = (e.declared(place) orelse return .nowhere).returns orelse return .nowhere;
+        return .{ .type = .{ .file = place.file, .name = returns } };
+    }
+
+    /// Where `node`, a name and the fields after it, leads.
+    fn leadsTo(e: Elsewhere, arena: Allocator, tree: *const Ast, node: Node.Index) Allocator.Error!Lead {
+        var fields: std.ArrayList([]const u8) = .empty;
+        var root = node;
+        while (tree.nodeTag(root) == .field_access) {
+            const lhs, const field = tree.nodeData(root).node_and_token;
+            try fields.insert(arena, 0, tree.tokenSlice(field));
+            root = lhs;
+        }
+        if (tree.nodeTag(root) != .identifier) return .nowhere;
+        const lead = try e.resolver.leadOf(e.file, .{
+            .root = .{ .name = tree.tokenSlice(tree.nodeMainToken(root)) },
+            .fields = fields.items,
+            .use = .plain,
+        }) orelse return .nowhere;
+        return switch (lead) {
+            .unchecked => .unchecked,
+            .place => |place| if (place.file == e.file) .nowhere else .{ .place = place },
+        };
+    }
+
+    /// The function at `place`: one of the file itself, or of a type it
+    /// declares at the top.
+    fn declared(e: Elsewhere, place: unrun.Place) ?Fn {
+        return switch (place.names.len) {
+            1 => e.find(place.file, "", place.names[0]),
+            2 => e.find(place.file, place.names[0], place.names[1]),
+            else => null,
+        };
+    }
+
+    /// The function `name` that `file` declares in `container`, as
+    /// `Fn.container` names it.
+    fn find(e: Elsewhere, file: usize, container: []const u8, name: []const u8) ?Fn {
+        for (e.functions[file]) |f| {
+            if (std.mem.eql(u8, f.container, container) and std.mem.eql(u8, f.name, name)) return f;
+        }
+        return null;
+    }
+};
 
 /// Whether `fn_expr` is the `close` of a `std.Io.Queue`, the one release
 /// a queue has, where the file writes the receiver's type. std documents
@@ -571,7 +812,7 @@ fn expectTwice(source: [:0]const u8, expected: []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     var findings: std.ArrayList(Finding) = .empty;
-    try check(arena_state.allocator(), &tree, &findings);
+    try check(arena_state.allocator(), &tree, &findings, null);
     std.mem.sort(Finding, findings.items, {}, struct {
         fn before(_: void, a: Finding, b: Finding) bool {
             return a.offset < b.offset;
@@ -724,6 +965,103 @@ test "a release that stores to what it frees, and a queue's close, run twice saf
         \\21:75 c.deinit(gpa) <- defer
         \\22:50 c.release() <- defer
         \\24:107 index.deinitIndex(gpa) <- defer
+        \\
+    );
+}
+
+/// Runs the rule over `sources`, each a path and its source, checked
+/// together as one run checks them, and compares one line per finding,
+/// `path:line:col call <- what fails`, or `<- defer`, in their order.
+fn expectTwiceAcross(sources: []const [2][:0]const u8, expected: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const trees = try arena.alloc(Ast, sources.len);
+    const summaries = try arena.alloc(unrun.Summary, sources.len);
+    const declared = try arena.alloc([]const Fn, sources.len);
+    var parsed: usize = 0;
+    defer for (trees[0..parsed]) |*tree| tree.deinit(gpa);
+    for (sources, trees, summaries, declared) |file, *tree, *summary, *fns| {
+        tree.* = try Ast.parse(gpa, file[1], .{});
+        parsed += 1;
+        try std.testing.expectEqual(0, tree.errors.len);
+        summary.* = try unrun.summarize(gpa, arena, try std.fs.path.resolveAlloc(arena, &.{file[0]}), tree);
+        fns.* = try functions(gpa, arena, tree);
+    }
+    var resolver: unrun.Resolver = try .init(arena, summaries);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    for (sources, trees, 0..) |file, *tree, f| {
+        var findings: std.ArrayList(Finding) = .empty;
+        try check(arena, tree, &findings, .{ .functions = declared, .resolver = &resolver, .file = f });
+        std.mem.sort(Finding, findings.items, {}, struct {
+            fn before(_: void, a: Finding, b: Finding) bool {
+                return a.offset < b.offset;
+            }
+        }.before);
+        for (findings.items) |finding| {
+            const loc = report.location(file[1], finding.offset);
+            const t = finding.detail.twice;
+            try out.writer.print("{s}:{d}:{d} {s} <- {s}\n", .{ file[0], loc.line + 1, loc.column + 1, t.call, if (t.fails.len == 0) "defer" else t.fails });
+        }
+    }
+    try expect.findings(@src(), expected, out.written());
+}
+
+test "a release another file checked declares is read there, and one a file not checked declares is left (#216)" {
+    try expectTwiceAcross(&.{
+        .{
+            "sock.zig",
+            \\pub const Sock = struct {
+            \\    fd: i32,
+            \\    pub fn open() !Sock { return .{ .fd = 3 }; }
+            \\    pub fn close(s: *Sock) void { if (s.fd < 0) return; sys.close(s.fd); s.fd = -1; }
+            \\    pub fn deinit(s: *Sock) void { sys.close(s.fd); }
+            \\};
+            \\pub fn freeAll(state: *State, gpa: Allocator) void { gpa.free(state.rows); state.rows = &.{}; }
+            \\pub fn destroyAll(state: *State, gpa: Allocator) void { gpa.free(state.rows); }
+            \\
+        },
+        .{
+            "Conn.zig",
+            \\fd: i32,
+            \\const Conn = @This();
+            \\pub fn init() Conn { return .{ .fd = 3 }; }
+            \\pub fn close(c: *Conn) void { sys.close(c.fd); c.fd = -1; }
+            \\
+        },
+        .{ "lib.zig", "pub const sock = @import(\"sock.zig\");\n" },
+        .{
+            "use.zig",
+            \\const Sock = @import("sock.zig").Sock;
+            \\const sock = @import("sock.zig");
+            \\const lib = @import("lib.zig");
+            \\const Conn = @import("Conn.zig");
+            \\const gone = @import("gone.zig");
+            \\fn annotated() void { var s: Sock = .{ .fd = 3 }; defer s.close(); s.close(); }
+            \\fn pointer(s: *Sock) void { defer s.close(); s.close(); }
+            \\fn made() !void { var s = try Sock.open(); defer s.close(); s.close(); }
+            \\fn through() !void { var s = try lib.sock.Sock.open(); defer s.close(); s.close(); }
+            \\fn whole() void { var c = Conn.init(); defer c.close(); c.close(); }
+            \\fn file(c: *Conn) void { defer c.close(); c.close(); }
+            \\fn function(gpa: Allocator) void { var state: State = .{}; defer sock.freeAll(&state, gpa); sock.freeAll(&state, gpa); }
+            \\fn failing(fail: bool) !void { var s: Sock = .{ .fd = 3 }; errdefer s.close(); s.close(); if (fail) return error.Failed; }
+            \\fn unread(g: *gone.Gone) void { defer g.close(); g.close(); }
+            \\fn unreadFunction(gpa: Allocator) void { var state: State = .{}; defer gone.freeAll(&state, gpa); gone.freeAll(&state, gpa); }
+            \\fn frees(s: *Sock) void { defer s.deinit(); s.deinit(); }
+            \\fn destroys(gpa: Allocator) void { var state: State = .{}; defer sock.destroyAll(&state, gpa); sock.destroyAll(&state, gpa); }
+            \\fn failingFree(s: *Sock, fail: bool) !void { errdefer s.deinit(); s.deinit(); if (fail) return error.Failed; }
+            \\fn standard(io: Io, f: std.Io.File) void { defer f.close(io); f.close(io); }
+            \\fn untyped(io: Io, dir: Io.Dir) !void { const f = try dir.openFile(io, "x", .{}); defer f.close(io); f.close(io); }
+            \\
+        },
+    },
+        \\use.zig:16:45 s.deinit() <- defer
+        \\use.zig:17:96 sock.destroyAll(&state, gpa) <- defer
+        \\use.zig:18:67 s.deinit() <- it returns error.Failed
+        \\use.zig:19:63 f.close(io) <- defer
+        \\use.zig:20:102 f.close(io) <- defer
         \\
     );
 }

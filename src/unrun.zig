@@ -441,6 +441,13 @@ fn identifier(tree: *const Ast, token: Ast.TokenIndex) []const u8 {
 /// refers to, by the file's index. Allocated with `arena`.
 pub fn check(arena: Allocator, files: []const Summary) Allocator.Error![]?Finding {
     var r: Reach = try .init(arena, files);
+    return unreached(&r);
+}
+
+/// `check`, over the files `r` was made with.
+fn unreached(r: *Reach) Allocator.Error![]?Finding {
+    const arena = r.arena;
+    const files = r.files;
     try r.markRoots();
     try r.reachNamed();
     while (r.work.pop()) |item| switch (item) {
@@ -448,8 +455,8 @@ pub fn check(arena: Allocator, files: []const Summary) Allocator.Error![]?Findin
         .whole => |w| try r.whole(w.file, w.whole),
     };
 
-    const found = try arena.alloc(?Finding, files.len);
-    @memset(found, null);
+    const findings = try arena.alloc(?Finding, files.len);
+    @memset(findings, null);
     for (files, 0..) |file, f| {
         if (file.tests == 0 or r.analysed[f] or r.root[f]) continue;
         // The importer named in the hint: one whose tests run, if any does.
@@ -458,13 +465,13 @@ pub fn check(arena: Allocator, files: []const Summary) Allocator.Error![]?Findin
             if (importer == null or (r.analysed[i] and !r.analysed[importer.?])) importer = i;
         }
         const by = importer orelse continue;
-        found[f] = .{
+        findings[f] = .{
             .offset = file.first_test,
             .hint = try hint(arena, files[by], file.path, r.analysed[by]),
             .detail = .{ .unrun = .{ .tests = file.tests } },
         };
     }
-    return found;
+    return findings;
 }
 
 /// How to reach `path` from `importer`, whose tests run if `runs`: by
@@ -501,10 +508,41 @@ pub const Resolver = struct {
         return .{ .reach = try .init(arena, files) };
     }
 
+    /// `check`, over the files it was made with, which are read once for
+    /// both. To call once.
+    pub fn check(r: *Resolver) Allocator.Error![]?Finding {
+        return unreached(&r.reach);
+    }
+
     /// The file `c`, written in file `f`, ends on, if it ends on one.
     pub fn fileOf(r: *Resolver, f: usize, c: Chain) ?usize {
         return r.reach.chainTarget(f, c, 0);
     }
+
+    /// Where `c`, written in file `f`, leads: see `Lead`. Null when
+    /// nothing shows it, as for the standard library when it is not
+    /// checked. For twice, which reads a release another file declares.
+    pub fn leadOf(r: *Resolver, f: usize, c: Chain) Allocator.Error!?Lead {
+        return r.reach.lead(f, c, 0);
+    }
+};
+
+/// Where a name written in one file leads.
+pub const Lead = union(enum) {
+    /// To a declaration of a file checked.
+    place: Place,
+    /// To a file imported by path that is not among those checked, so
+    /// what it declares cannot be read.
+    unchecked,
+};
+
+/// A declaration, by the file that declares it and its names there, from
+/// the top: `Sock` and `close` of sock.zig for `Sock.close`, with `Sock` a
+/// constant set to `@import("sock.zig").Sock`. No names for the file
+/// itself.
+pub const Place = struct {
+    file: usize,
+    names: []const []const u8,
 };
 
 const Reach = struct {
@@ -739,6 +777,39 @@ const Reach = struct {
     /// one: `const s3 = @import("s3.zig");`, or `const T = other.s3;`.
     fn aliasOf(r: *Reach, f: usize, d: usize, depth: u8) ?usize {
         return r.chainTarget(f, r.files[f].decls[d].init orelse return null, depth);
+    }
+
+    /// Where chain `c`, in file `f`, leads: through each constant set to a
+    /// chain, an `@import` or another file's declaration, to the file that
+    /// declares what it names.
+    fn lead(r: *Reach, f: usize, c: Chain, depth: u8) Allocator.Error!?Lead {
+        if (depth > 16) return null;
+        var names: std.ArrayList([]const u8) = .empty;
+        var file = switch (c.root) {
+            .name => |name| file: {
+                try names.append(r.arena, name);
+                break :file f;
+            },
+            .file => |path| r.by_path.get(path) orelse return .unchecked,
+            .self => f,
+            .std => r.std_of[f] orelse return null,
+        };
+        try names.appendSlice(r.arena, c.fields);
+        var rest = names.items;
+        while (rest.len > 0) : (rest = rest[1..]) {
+            const d = r.by_name[file].get(rest[0]) orelse break;
+            // A declaration of its own, such as a type: what is left are
+            // its names in `file`.
+            const alias = r.files[file].decls[d].init orelse break;
+            const stands_for = switch (try r.lead(file, alias, depth + 1) orelse return null) {
+                .unchecked => return .unchecked,
+                .place => |place| place,
+            };
+            file = stands_for.file;
+            if (stands_for.names.len == 0) continue;
+            return .{ .place = .{ .file = file, .names = try std.mem.concat(r.arena, []const u8, &.{ stands_for.names, rest[1..] }) } };
+        }
+        return .{ .place = .{ .file = file, .names = rest } };
     }
 
     /// The file chain `c`, in file `f`, ends on, if it ends on one.

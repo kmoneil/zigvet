@@ -47,6 +47,9 @@ pub const Across = struct {
     /// For hoard: the wrappers around a fuzz call the files declare, and
     /// how this file's names reach them.
     wrapped: ?hoard.Wrapped = null,
+    /// For twice: what the files declare that a release in this one may
+    /// lead to, and how this file's names reach them.
+    elsewhere: ?twice.Elsewhere = null,
 };
 
 /// Writes `source`'s parse errors or, if it parses, its findings to `out`,
@@ -92,7 +95,7 @@ pub fn findings(arena: Allocator, tree: *const Ast, across: Across) Allocator.Er
     try owner.check(arena, tree, &all);
     try kept_rule.check(arena, tree, &all);
     try torn.check(arena, tree, &all);
-    try twice.check(arena, tree, &all);
+    try twice.check(arena, tree, &all, across.elsewhere);
     try sweep.check(arena, tree, &all);
     try unlock.check(arena, tree, &all);
     try wipe.check(arena, tree, &all);
