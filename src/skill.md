@@ -1059,9 +1059,10 @@ what it could read.
 ## What catches agents out
 
 - Name the whole project, build.zig with it: `zigvet .`. unrun asks which
-  files the tests reach from the build's roots, so a file checked alone,
-  or a directory without the files that import it, says nothing of its
-  tests.
+  files the tests reach from the build's roots. A file named by itself,
+  as when only the files a change touched are given, is taken as reached,
+  so such a run reports no unrun; a directory is read as all there is, so
+  one without its test root can report a file the root reaches.
 - A clean run prints nothing. `--summary` says how many files were
   checked; a path that holds no .zig file is exit 2, not a clean run.
 - Hidden files and directories, `zig-out` and `zig-pkg` are skipped.

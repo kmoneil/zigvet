@@ -47,6 +47,14 @@
 //! names itself, `@import("mylib")` inside mylib, which only the build maps
 //! to a file. Name the project's directory, build.zig with it, for the
 //! build's roots to be seen.
+//!
+//! A directory given is read as all there is. A file named by itself is
+//! not: `zigvet $(git diff --name-only)` gives the files a change touched
+//! and not the root that runs their tests, nor what else refers to them.
+//! So a file named by itself, and not also found under a directory given,
+//! is taken as reached, every declaration of it, and neither it nor a
+//! file it imports is reported (#215). A build script named so is still
+//! read as one, since no file imports it.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -83,6 +91,9 @@ pub const Summary = struct {
     build: ?Build = null,
     /// Its tree had parse errors: nothing more is known of it.
     unparsed: bool = false,
+    /// Named on the command line by itself, not found under a directory
+    /// given: files that were not given may refer to it.
+    named: bool = false,
 };
 
 pub const Import = struct {
@@ -431,6 +442,7 @@ fn identifier(tree: *const Ast, token: Ast.TokenIndex) []const u8 {
 pub fn check(arena: Allocator, files: []const Summary) Allocator.Error![]?Finding {
     var r: Reach = try .init(arena, files);
     try r.markRoots();
+    try r.reachNamed();
     while (r.work.pop()) |item| switch (item) {
         .chains => |c| for (c.list) |each| try r.follow(c.file, each),
         .whole => |w| try r.whole(w.file, w.whole),
@@ -611,6 +623,15 @@ const Reach = struct {
         }
         try r.cycleRoots();
         for (r.root, 0..) |is_root, f| if (is_root) try r.analyse(f);
+    }
+
+    /// Takes every declaration of each file named by itself as reached:
+    /// what refers to it may not have been given, the root that runs its
+    /// tests included. Not a build script, which no file imports.
+    fn reachNamed(r: *Reach) Allocator.Error!void {
+        for (r.files, 0..) |file, f| {
+            if (file.named and file.build == null) try r.whole(f, .all);
+        }
     }
 
     /// Makes roots of each import cycle, or lone file, that nothing outside
@@ -808,6 +829,12 @@ fn sccs(arena: Allocator, imports: []const std.ArrayList(usize)) Allocator.Error
 /// The paths are cleaned as walk cleans them, which on Windows makes every
 /// separator `\`, and are compared with `/`.
 fn expectUnrun(sources: []const [2][:0]const u8, expected: []const u8) !void {
+    return expectUnrunNamed(sources, &.{}, expected);
+}
+
+/// `expectUnrun`, with the paths in `named` named on the command line by
+/// themselves, and the others found under a directory given.
+fn expectUnrunNamed(sources: []const [2][:0]const u8, named: []const []const u8, expected: []const u8) !void {
     const gpa = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -818,6 +845,9 @@ fn expectUnrun(sources: []const [2][:0]const u8, expected: []const u8) !void {
         defer tree.deinit(gpa);
         try std.testing.expectEqual(0, tree.errors.len);
         summary.* = try summarize(gpa, arena, try std.fs.path.resolveAlloc(arena, &.{file[0]}), &tree);
+        for (named) |path| {
+            if (std.mem.eql(u8, path, file[0])) summary.named = true;
+        }
     }
     const found = try check(arena, summaries);
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -1231,6 +1261,75 @@ test "the hint: an importer with no tests, an import with no constant, an import
         \\s3/inline.zig:4:1 1 | add `_ = @import("s3/inline.zig");` to a test block in inline_import.zig
         \\near.zig:2:1 1 | add `_ = near;` to a test block in far.zig
         \\s3/far.zig:4:1 1 | add `_ = s3;` to a test block in near.zig, and reach that file from a test too
+        \\
+    );
+}
+
+test "files named by themselves, their test root not among them, are taken as reached (#215)" {
+    // root.zig, whose `refAllDecls(@This())` runs the test of units.zig,
+    // is not given: `zigvet server.zig units.zig`.
+    const server =
+        \\const units = @import("units.zig");
+        \\pub fn limit() u64 { return units.default_limit; }
+        \\
+    ;
+    const units =
+        \\pub const default_limit: u64 = 512;
+        \\test "the default limit" { try @import("std").testing.expectEqual(512, default_limit); }
+        \\
+    ;
+    try expectUnrunNamed(&.{ .{ "server.zig", server }, .{ "units.zig", units } }, &.{ "server.zig", "units.zig" }, "");
+    // The importer named, and what it imports found under a directory:
+    // the directory is not all there is, as the named file shows.
+    try expectUnrunNamed(&.{
+        .{
+            "server.zig",
+            \\const units = @import("lib/units.zig");
+            \\pub fn limit() u64 { return units.default_limit; }
+            \\
+        },
+        .{ "lib/units.zig", units },
+    }, &.{"server.zig"}, "");
+    // So too when nothing in the named file uses the import: a file not
+    // given may import it as the named one does.
+    try expectUnrunNamed(&.{
+        .{
+            "server.zig",
+            \\const units = @import("lib/units.zig");
+            \\pub fn limit() u64 { return 512; }
+            \\
+        },
+        .{ "lib/units.zig", units },
+    }, &.{"server.zig"}, "");
+    // Both found under a directory given, they are all there is to read:
+    // server.zig, which nothing imports, is the root, and no test of it
+    // reaches units.zig.
+    try expectUnrun(&.{ .{ "server.zig", server }, .{ "units.zig", units } },
+        \\units.zig:2:1 1 | add `test { _ = units; }` to server.zig
+        \\
+    );
+}
+
+test "a build script named by itself is still read as one, which nothing imports (#215)" {
+    // `zigvet build.zig src tools`: the tests of a file build.zig imports
+    // run only if a test root reaches it.
+    try expectUnrunNamed(&.{
+        .{
+            "build.zig",
+            \\const std = @import("std");
+            \\const names = @import("tools/names.zig");
+            \\pub fn build(b: *std.Build) void { _ = b.path("src/root.zig"); _ = names.exe; }
+            \\
+        },
+        .{
+            "tools/names.zig",
+            \\pub const exe = "app";
+            \\test "names" {}
+            \\
+        },
+        .{ "src/root.zig", "test \"root\" {}\n" },
+    }, &.{"build.zig"},
+        \\tools/names.zig:2:1 1 | add `test { _ = names; }` to build.zig
         \\
     );
 }
