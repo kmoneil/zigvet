@@ -655,6 +655,7 @@ test {
     _ = @import("kept.zig");
     _ = @import("narrow.zig");
     _ = @import("counter.zig");
+    _ = @import("opath.zig");
     _ = @import("leak.zig");
     _ = @import("owner.zig");
     _ = @import("refill.zig");

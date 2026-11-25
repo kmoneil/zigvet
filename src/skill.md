@@ -89,6 +89,8 @@ first trips its rule, and the fix reports nothing.
   in the narrow type, where the same function widens it elsewhere.
 - counter: a `u8` or `u16` counter stepped while it is less than the
   `.len` of the slice it walks, which overflows on a longer slice.
+- opath: a directory opened without `.iterate = true`, then listed,
+  synced or given new permissions, which Linux refuses.
 - cached: a build script lists a directory to decide what to build, and
   never tells Zig's configure cache.
 - unrun: a file whose tests never run, because nothing the test build
@@ -790,6 +792,39 @@ pub fn headingLevel(line: []const u8) ?u8 {
     while (level < line.len and line[level] == '#') level += 1;
     if (level == 0 or level > 6) return null;
     return @intCast(level);
+}
+```
+
+### opath
+
+A directory opened without `.iterate = true`, then listed (`iterate`,
+`walk`), synced through its handle, or given new permissions or a new
+owner. Linux opens such a directory with `O_PATH`, a descriptor that names
+it and cannot read or change it, so each of those is `EBADF` there: a
+panic in Debug, `error.Unexpected` otherwise. macOS has no `O_PATH`, so
+the code works there and its tests pass. The report is on the call that
+opens it, also when the use is in a function of the same file it is
+handed to.
+
+```zig
+pub fn syncDir(io: Io, dir: Io.Dir, sub: []const u8) !void {
+    const d = try dir.openDir(io, sub, .{});
+    defer d.close(io);
+    const as_file: Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+    try as_file.sync(io);
+}
+```
+
+Open it for iterating, which Linux does without `O_PATH`:
+`.{ .iterate = true }`, or `.{ .open_options = .{ .iterate = true } }`
+for `createDirPathOpen`.
+
+```zig
+pub fn syncDir(io: Io, dir: Io.Dir, sub: []const u8) !void {
+    const d = try dir.openDir(io, sub, .{ .iterate = true });
+    defer d.close(io);
+    const as_file: Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+    try as_file.sync(io);
 }
 ```
 
