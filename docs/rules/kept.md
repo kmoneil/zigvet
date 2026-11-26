@@ -56,8 +56,10 @@ reached through a parameter, a local pointer made from one
 `while` captures from one, or is a container-level `var`. It is reported
 when,
 after the store and on its path, before the errdefer's block ends,
-something makes the function fail: a `try`, a `return error.X`, or a
-handler that returns the error it caught.
+something makes the function fail: a `try`, a `return error.X`, a
+handler that returns the error it caught, or a `return` of a call that
+can fail as it is (`return self.gpa.dupe(u8, name);`), the file's own
+function declared `!T` or one of std's that allocate (#223).
 
 The same goes for what an optional holds, freed through `.?`:
 

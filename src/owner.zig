@@ -228,7 +228,7 @@ fn ownerNames(arena: Allocator, tree: *const Ast) Allocator.Error!std.StringHash
     for (tree.nodes.items(.tag), 0..) |tag, i| {
         if (tag != .fn_decl) continue;
         const fn_decl: Node.Index = @fromBackingInt(@intCast(i));
-        if (!canFail(tree, fn_decl)) continue;
+        if (!types.canFail(tree, fn_decl)) continue;
         const body = tree.nodeData(fn_decl).node_and_node[1];
         try functions.append(arena, .{ .node = fn_decl, .first = tree.firstToken(body), .last = tree.lastToken(body) });
     }
@@ -359,16 +359,6 @@ fn caughtTokens(arena: Allocator, tree: *const Ast, function: Function) Allocato
         try caught.append(arena, tree.tokenSlice(token + 2));
     }
     return caught.items;
-}
-
-/// Whether `fn_decl` can return an error: its return type is `E!T` or
-/// `!T`.
-fn canFail(tree: *const Ast, fn_decl: Node.Index) bool {
-    var buffer: [1]Node.Index = undefined;
-    const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
-    const return_type = proto.ast.return_type.unwrap() orelse return false;
-    if (tree.nodeTag(return_type) == .error_union) return true;
-    return tree.tokenTag(tree.firstToken(return_type) - 1) == .bang;
 }
 
 /// Appends to `held` the locals in `nodes` made as a copy of a name it

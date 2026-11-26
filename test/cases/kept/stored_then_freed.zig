@@ -42,10 +42,27 @@ const Store = struct {
         errdefer _ = self.names.pop();
         try self.sizes.append(self.gpa, name.len);
     }
+
+    // A call that can fail, returned as it is, fails as `try` does (#223).
+    fn putCopy(self: *Store, name: []const u8) ![]u8 {
+        const owned = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(owned);
+        try self.names.append(self.gpa, owned);
+        return self.gpa.dupe(u8, name);
+    }
+
+    // Not reported: the store is the call returned.
+    fn putReturned(self: *Store, name: []const u8) !void {
+        const owned = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(owned);
+        return self.names.append(self.gpa, owned);
+    }
 };
 
 comptime {
     _ = &Store.put;
+    _ = &Store.putCopy;
+    _ = &Store.putReturned;
     _ = &Store.remember;
     _ = &Store.putLast;
     _ = &Store.putUndone;
@@ -55,3 +72,4 @@ comptime {
 //
 // :16:9: error: `owned` freed here if self.sizes.append fails, but self.names already holds it
 // :23:9: error: `owned` freed here if it returns error.Empty, but self.last already holds it
+// :49:9: error: `owned` freed here if self.gpa.dupe fails, but self.names already holds it
