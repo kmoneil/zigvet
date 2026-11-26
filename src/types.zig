@@ -259,6 +259,16 @@ fn initType(tree: *const Ast, decl: Ast.full.VarDecl) ?Node.Index {
     return struct_init.ast.type_expr.unwrap();
 }
 
+/// Whether `fn_decl` can return an error: its return type is `E!T` or
+/// `!T`.
+pub fn canFail(tree: *const Ast, fn_decl: Node.Index) bool {
+    var buffer: [1]Node.Index = undefined;
+    const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
+    const return_type = proto.ast.return_type.unwrap() orelse return false;
+    if (tree.nodeTag(return_type) == .error_union) return true;
+    return tree.tokenTag(tree.firstToken(return_type) - 1) == .bang;
+}
+
 /// What a pointer to one value, `*T` or `*const T`, points at.
 pub fn pointee(tree: *const Ast, type_expr: Node.Index) ?Node.Index {
     const ptr = tree.fullPtrType(type_expr) orelse return null;

@@ -27,8 +27,10 @@
 //! `if` or `while` captures from one, or is a container-level `var`.
 //! It is reported when, after the store and on its path, before the
 //! errdefer's block ends, something makes the function fail with the
-//! errdefer armed: a `try`, a `return error.X`, or a handler that returns
-//! the error it caught.
+//! errdefer armed: a `try`, a `return error.X`, a handler that returns
+//! the error it caught, or a `return` of a call that can fail, the file's
+//! own function declared `!T` or one of std's that allocate
+//! (`return self.gpa.dupe(u8, name);`).
 //!
 //! The same goes for what an optional holds, freed through it:
 //!
@@ -105,6 +107,15 @@ const keeping: std.StaticStringMap(void) = .initComptime(.{
     .{"put"},
     .{"putAssumeCapacity"},
     .{"putNoClobber"},
+});
+
+/// std's functions that allocate, so can fail with `error.OutOfMemory`:
+/// `std.mem.Allocator`'s, `std.fmt.allocPrint` and a list's
+/// `toOwnedSlice`.
+const allocating: std.StaticStringMap(void) = .initComptime(.{
+    .{"alignedAlloc"},     .{"alloc"},        .{"allocPrint"},           .{"allocPrintSentinel"}, .{"allocSentinel"},
+    .{"allocWithOptions"}, .{"create"},       .{"dupe"},                 .{"dupeSentinel"},       .{"dupeZ"},
+    .{"realloc"},          .{"toOwnedSlice"}, .{"toOwnedSliceSentinel"},
 });
 
 /// A store of a name: the call or assignment, and what it hands the name
@@ -368,7 +379,7 @@ const Rule = struct {
             if (tree.nodeMainToken(node) <= armed) continue;
             const fails = switch (tree.nodeTag(node)) {
                 .@"try" => true,
-                .@"return" => unlock.returnsError(r.tree, r.parents, node),
+                .@"return" => unlock.returnsError(r.tree, r.parents, node) or r.returnedCall(node) != null,
                 else => false,
             };
             if (!fails) continue;
@@ -377,11 +388,29 @@ const Rule = struct {
         return first;
     }
 
+    /// The call `node`, a `return`, returns as it is, when that call can
+    /// fail: the file's own function declared `!T`, or one of std's that
+    /// allocate (`return self.gpa.dupe(u8, name);`). Its error is the
+    /// function's, as a `try` of it would make it.
+    fn returnedCall(r: *Rule, node: Node.Index) ?Ast.full.Call {
+        const tree = r.tree;
+        var value = tree.nodeData(node).opt_node.unwrap() orelse return null;
+        while (tree.nodeTag(value) == .grouped_expression) value = tree.nodeData(value).node_and_token[0];
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, value) orelse return null;
+        const t: types.Types = .{ .tree = tree, .parents = r.parents };
+        if (t.callee(call.ast.fn_expr)) |found| return if (types.canFail(tree, found[0])) call else null;
+        if (tree.nodeTag(call.ast.fn_expr) != .field_access) return null;
+        const method = tree.tokenSlice(tree.nodeData(call.ast.fn_expr).node_and_token[1]);
+        return if (allocating.has(method)) call else null;
+    }
+
     /// What fails at `point`, as the message says it: `gpa.alloc fails`,
     /// or `it returns error.Busy`.
     fn what(r: *Rule, point: Node.Index) Allocator.Error![]const u8 {
         const tree = r.tree;
         if (tree.nodeTag(point) == .@"return") {
+            if (r.returnedCall(point)) |call| return r.arena.print("{s} fails", .{tree.getNodeSource(call.ast.fn_expr)});
             return r.arena.print("it returns {s}", .{tree.getNodeSource(tree.nodeData(point).opt_node.unwrap().?)});
         }
         var operand = tree.nodeData(point).node;
@@ -635,6 +664,36 @@ test "an errdefer frees what the function stored where its caller keeps it (#63)
         \\8:92 owned self.last <- it returns err
         \\
     );
+}
+
+test "a store, then a return of a call that can fail (#223)" {
+    try expectKept(
+        \\fn put(self: *Names, name: []const u8) ![]u8 { const owned = try self.gpa.dupe(u8, name); errdefer self.gpa.free(owned); try self.names.append(self.gpa, owned); return self.gpa.dupe(u8, name); }
+        \\fn printed(self: *Names, name: []const u8) ![]u8 { const owned = try self.gpa.dupe(u8, name); errdefer self.gpa.free(owned); self.last = owned; return (std.fmt.allocPrint(self.gpa, "{s}", .{name})); }
+        \\const Names = struct {
+        \\    fn own(self: *Names, name: []const u8) !usize { const owned = try self.gpa.dupe(u8, name); errdefer self.gpa.free(owned); try self.names.append(self.gpa, owned); return self.index(name); }
+        \\    fn index(self: *Names, name: []const u8) !usize { _ = self; if (name.len == 0) return error.Empty; return 0; }
+        \\};
+        \\fn byName(self: *Names, name: []const u8) !usize { const owned = try self.gpa.dupe(u8, name); errdefer self.gpa.free(owned); self.last = owned; return find(name); }
+        \\fn find(name: []const u8) error{Empty}!usize { if (name.len == 0) return error.Empty; return 0; }
+    ,
+        \\1:91 owned self.names <- self.gpa.dupe fails
+        \\2:95 owned self.last <- std.fmt.allocPrint fails
+        \\4:96 owned self.names <- self.index fails
+        \\7:95 owned self.last <- find fails
+        \\
+    );
+}
+
+test "not reported: a return of a call that cannot fail, of one not known, or of the store itself (#223)" {
+    try expectKept(
+        \\const Names = struct {
+        \\    fn counted(self: *Names, name: []const u8) !usize { const owned = try self.gpa.dupe(u8, name); errdefer self.gpa.free(owned); try self.names.append(self.gpa, owned); return self.count(); }
+        \\    fn count(self: *Names) usize { return self.names.items.len; }
+        \\};
+        \\fn looked(self: *Names, name: []const u8) !usize { const owned = try self.gpa.dupe(u8, name); errdefer self.gpa.free(owned); try self.names.append(self.gpa, owned); return self.table.lookup(name); }
+        \\fn stored(self: *Names, name: []const u8) !void { const owned = try self.gpa.dupe(u8, name); errdefer self.gpa.free(owned); return self.names.append(self.gpa, owned); }
+    , "");
 }
 
 test "not reported: a local, a value made from it, undone, or a failure off the store's path" {
