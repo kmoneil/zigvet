@@ -1,0 +1,44 @@
+# hollow's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/hollow.zig
+
+== a C or allowzero pointer keeps a flag of its own
+-            if (ptr.size == .c or ptr.allowzero_token != null) return null;
++            if (false and (ptr.size == .c or ptr.allowzero_token != null)) return null;
+
+== a field access payload only when it is a type's child
+-            return if (std.mem.eql(u8, tree.tokenSlice(field), "child")) .generic else null;
++            return if (std.mem.eql(u8, tree.tokenSlice(field), "child") or true) .generic else null;
+
+== a name the file does not show is not generic
+-            return if (typeParameter(t, type_expr)) .generic else null;
++            return .generic;
+
+== a generic payload the function asks @typeInfo about
+-        if (kind == .generic and asksTypeInfo(tree, body, payload)) continue;
++        if (false and kind == .generic and asksTypeInfo(tree, body, payload)) continue;
+
+== deferred stores and unwraps run when the block is left
+-        if (tree.nodeTag(node) == .@"defer" or tree.nodeTag(node) == .@"errdefer") continue;
++        if (false) continue;
+
+== the same place
+-        if (!isPlace(tree, use.operand, store)) continue;
++        if (false) continue;
+
+== after the store, not before it
+-        if (at <= after) continue;
++        if (false and at <= after) continue;
+
+== a store of the whole place first
+-        .assign => .{ .operand = data.node_and_node[0], .by = .store },
++        .assign => .{ .operand = data.node_and_node[0], .by = .unwrap },
+
+== a taking of its address first
+-        .address_of => .{ .operand = data.node, .by = .address },
++        .address_of => .{ .operand = data.node, .by = .unwrap },
+
+== an error union's if, which captures its error
+-    if (full.payload_token == null or full.error_token != null) return null;
++    if (full.payload_token == null) return null;
