@@ -52,6 +52,7 @@ One needs no failure: twice, for a release written out under a plain
 | [flush](flush.md) | A buffered file or stream writer, written to and never flushed | What is left in the buffer never arrives |
 | [positional](positional.md) | A writer on stdout or stderr, or a reader on stdin, made positional (`writer`, `File.Writer.init`, `reader`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled; a reader reads again what was read before it |
 | [wipe](wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
+| [buckets](buckets.md) | A std `HashMap`'s `capacity()` compared with a count of items, to decide whether an insert that assumes capacity has room | `capacity()` counts buckets, of which the map fills 80%: the test passes with no room, and `putAssumeCapacity` panics in Debug, undefined behavior in ReleaseFast |
 
 ## Data races
 
