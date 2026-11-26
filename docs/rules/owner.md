@@ -90,7 +90,10 @@ fn decode(gpa: Allocator, n: usize) !Image {
 
 The function is found by name, through its type (`Store.keep(s, b)`), or
 as a method of a binding whose type the file declares, in an annotation or
-in its initializer (`self.keep(b)`, `const img = Image{ ... };`).
+in its initializer (`self.keep(b)`, `const img = Image{ ... };`), or, for
+a local with no type written, by the call that made it: `try gpa.create(W)`,
+or a function of the file declared to return `W` or `*W`, through a `try`
+or a `catch` (#224).
 
 Not reported: a call whose error is handled rather than handed on, which
 only the caller can judge; an `errdefer` declared after the call; an

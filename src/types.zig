@@ -97,12 +97,51 @@ pub const Types = struct {
                 if (t.containerOf(receiver, 0)) |container| {
                     return .{ memberFn(tree, container, name) orelse return null, 0 };
                 }
-                const of = t.typeOf(receiver, 0) orelse return null;
-                const container = t.containerOf(pointee(tree, of) orelse of, 0) orelse return null;
-                return .{ memberFn(tree, container, name) orelse return null, 1 };
+                if (t.typeOf(receiver, 0)) |of| {
+                    const container = t.containerOf(pointee(tree, of) orelse of, 0) orelse return null;
+                    return .{ memberFn(tree, container, name) orelse return null, 1 };
+                }
+                return t.untypedLocal(receiver, name);
             },
             else => return null,
         }
+    }
+
+    /// The function `name` called through `receiver`, a local with no
+    /// type written: one that names a type (`const S = struct { ... };`),
+    /// called through it, or a value of the type the call that made it
+    /// gives, called as a method.
+    fn untypedLocal(t: Types, receiver: Node.Index, name: []const u8) ?struct { Node.Index, usize } {
+        const tree = t.tree;
+        if (tree.nodeTag(receiver) != .identifier) return null;
+        const value = t.localInit(receiver) orelse return null;
+        var buffer: [2]Node.Index = undefined;
+        if (tree.fullContainerDecl(&buffer, value) != null) return .{ memberFn(tree, value, name) orelse return null, 0 };
+        const container = t.madeType(value) orelse return null;
+        return .{ memberFn(tree, container, name) orelse return null, 1 };
+    }
+
+    /// The struct or union of the file whose value, or a pointer to one,
+    /// the call `value` makes, through a `try` or a `catch`: `T` of
+    /// `gpa.create(T)`, or what a function of the file is declared to
+    /// return (`T.init(...)`, `Store.open(...)`, with `!T` or `!*T`).
+    pub fn madeType(t: Types, value: Node.Index) ?Node.Index {
+        const tree = t.tree;
+        const made = switch (tree.nodeTag(value)) {
+            .@"try" => tree.nodeData(value).node,
+            .@"catch" => tree.nodeData(value).node_and_node[0],
+            else => value,
+        };
+        var buffer: [1]Node.Index = undefined;
+        const call = tree.fullCall(&buffer, made) orelse return null;
+        if (tree.nodeTag(call.ast.fn_expr) == .field_access and call.ast.params.len == 1 and
+            std.mem.eql(u8, tree.tokenSlice(tree.nodeData(call.ast.fn_expr).node_and_token[1]), "create"))
+        {
+            if (t.containerOf(call.ast.params[0], 0)) |container| return container;
+        }
+        const fn_decl = (t.callee(call.ast.fn_expr) orelse return null)[0];
+        const type_expr = returned(tree, fn_decl) orelse return null;
+        return t.containerOf(pointee(tree, type_expr) orelse type_expr, 0);
     }
 
     /// The type of `node` as the file writes it: a binding's, or a field's
@@ -257,6 +296,16 @@ fn initType(tree: *const Ast, decl: Ast.full.VarDecl) ?Node.Index {
     var buffer: [2]Node.Index = undefined;
     const struct_init = tree.fullStructInit(&buffer, init) orelse return null;
     return struct_init.ast.type_expr.unwrap();
+}
+
+/// The type `fn_decl` is declared to return, without the error set of an
+/// error union: `Store` of `!Store` and of `Allocator.Error!Store`.
+pub fn returned(tree: *const Ast, fn_decl: Node.Index) ?Node.Index {
+    var buffer: [1]Node.Index = undefined;
+    const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
+    const return_type = proto.ast.return_type.unwrap() orelse return null;
+    if (tree.nodeTag(return_type) == .error_union) return tree.nodeData(return_type).node_and_node[1];
+    return return_type;
 }
 
 /// Whether `fn_decl` can return an error: its return type is `E!T` or

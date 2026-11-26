@@ -228,7 +228,7 @@ fn releasesByName(name: []const u8) bool {
 /// not one of this file's, of another that `elsewhere` leads to.
 fn safeTwice(arena: Allocator, t: types.Types, fn_expr: Node.Index, elsewhere: ?Elsewhere) Allocator.Error!bool {
     if (closesQueue(t, fn_expr)) return true;
-    if (function(t, fn_expr)) |fn_decl| return clears(t.tree, fn_decl);
+    if (t.callee(fn_expr)) |found| return clears(t.tree, found[0]);
     const e = elsewhere orelse return false;
     return e.safe(arena, t, fn_expr);
 }
@@ -317,7 +317,7 @@ const Reader = struct {
     /// The type of the file `fn_decl` is declared to return, by its name
     /// among `containers`.
     fn typeReturned(r: *Reader, fn_decl: Node.Index) Allocator.Error!?[]const u8 {
-        const type_expr = returned(r.tree, fn_decl) orelse return null;
+        const type_expr = types.returned(r.tree, fn_decl) orelse return null;
         if (r.types == null) r.types = try .init(r.scratch, r.tree);
         const made = r.types.?.containerOf(type_expr, 0) orelse return null;
         for (r.containers.items) |container| {
@@ -492,45 +492,6 @@ fn declares(tree: *const Ast, statements: []const Node.Index, name: []const u8) 
         if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) return true;
     }
     return false;
-}
-
-/// The file's own function a call's `fn_expr` names: as `types.callee`
-/// finds it, which reads a local receiver's type from its annotation or
-/// from the `T{ ... }` it is made with, or a method through the type of a
-/// local receiver as `madeType` reads it.
-fn function(t: types.Types, fn_expr: Node.Index) ?Node.Index {
-    const tree = t.tree;
-    if (t.callee(fn_expr)) |found| return found[0];
-    if (tree.nodeTag(fn_expr) != .field_access) return null;
-    const receiver, const name = tree.nodeData(fn_expr).node_and_token;
-    if (tree.nodeTag(receiver) != .identifier) return null;
-    const container = madeType(t, t.localInit(receiver) orelse return null) orelse return null;
-    return types.memberFn(tree, container, tree.tokenSlice(name));
-}
-
-/// The struct or union of the file that an initializer makes, or is: what
-/// a function of the file is declared to return, for a call of one,
-/// through a `try` (`T.init(...)`, `Store.open(...)`); or the
-/// `struct { ... }` itself, for a local that names a type.
-fn madeType(t: types.Types, init: Node.Index) ?Node.Index {
-    const tree = t.tree;
-    const made = if (tree.nodeTag(init) == .@"try") tree.nodeData(init).node else init;
-    var buffer: [2]Node.Index = undefined;
-    if (tree.fullContainerDecl(&buffer, made) != null) return made;
-    var call_buffer: [1]Node.Index = undefined;
-    const call = tree.fullCall(&call_buffer, made) orelse return null;
-    const fn_decl = (t.callee(call.ast.fn_expr) orelse return null)[0];
-    return t.containerOf(returned(tree, fn_decl) orelse return null, 0);
-}
-
-/// The type `fn_decl` is declared to return, without the error set of an
-/// error union: `Store` of `!Store` and of `Allocator.Error!Store`.
-fn returned(tree: *const Ast, fn_decl: Node.Index) ?Node.Index {
-    var buffer: [1]Node.Index = undefined;
-    const proto = tree.fullFnProto(&buffer, tree.nodeData(fn_decl).node_and_node[0]).?;
-    const return_type = proto.ast.return_type.unwrap() orelse return null;
-    if (tree.nodeTag(return_type) == .error_union) return tree.nodeData(return_type).node_and_node[1];
-    return return_type;
 }
 
 /// Whether `node` is the body, or in the body, of an `if (x.len == 0)`
@@ -752,7 +713,7 @@ fn neverReturns(t: types.Types, statement: Node.Index) bool {
         if (std.mem.eql(u8, name, word)) return true;
     }
     const fn_decl = (t.callee(call.ast.fn_expr) orelse return false)[0];
-    const return_type = returned(tree, fn_decl) orelse return false;
+    const return_type = types.returned(tree, fn_decl) orelse return false;
     return std.mem.eql(u8, tree.getNodeSource(return_type), "noreturn");
 }
 

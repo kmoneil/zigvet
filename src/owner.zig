@@ -861,3 +861,32 @@ test "not reported: a catch that handles the error, or may leave another way" {
         \\fn d(list: *List, gpa: Allocator, text: []const u8) !void { const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); keep(list, gpa, bytes) catch |err| return other(err); }
     , "");
 }
+
+test "a receiver made by gpa.create(T), by a function declared to return it, or a type a local names (#224)" {
+    try expectOwners(
+        \\const Parser = struct { gpa: Allocator, buf: []u8, fn deinit(p: *Parser) void { p.gpa.free(p.buf); p.* = undefined; } };
+        \\const W = struct {
+        \\    gpa: Allocator,
+        \\    fn finish(w: *W, p: *Parser) !void { p.deinit(); w.gpa.free(try w.gpa.alloc(u8, 1)); }
+        \\    fn open(gpa: Allocator) !*W { return gpa.create(W); }
+        \\};
+        \\fn a(gpa: Allocator) !*W { const w = try gpa.create(W); errdefer gpa.destroy(w); var p: Parser = .{ .gpa = gpa, .buf = try gpa.alloc(u8, 16) }; errdefer p.deinit(); try w.finish(&p); return w; }
+        \\fn b(gpa: Allocator) !*W { const w = try W.open(gpa); var p: Parser = .{ .gpa = gpa, .buf = try gpa.alloc(u8, 16) }; errdefer p.deinit(); try w.finish(&p); return w; }
+        \\fn c(gpa: Allocator) !*W { const w = gpa.create(W) catch return error.OutOfMemory; var p: Parser = .{ .gpa = gpa, .buf = try gpa.alloc(u8, 16) }; errdefer p.deinit(); try w.finish(&p); return w; }
+        \\fn d(list: *List, gpa: Allocator, text: []const u8) !void { const K = struct { fn keep(l: *List, g: Allocator, bytes: []u8) !void { errdefer g.free(bytes); try l.append(g, bytes); } }; const bytes = try gpa.dupe(u8, text); errdefer gpa.free(bytes); try K.keep(list, gpa, bytes); }
+    ,
+        \\7:170 w.finish p
+        \\8:143 w.finish p
+        \\9:172 w.finish p
+        \\10:254 K.keep bytes
+        \\
+    );
+}
+
+test "not reported: a receiver made by create of a type the file does not declare, or by a call it does not (#224)" {
+    try expectOwners(
+        \\const Parser = struct { gpa: Allocator, buf: []u8, fn deinit(p: *Parser) void { p.gpa.free(p.buf); p.* = undefined; } };
+        \\fn a(gpa: Allocator) !*Other { const w = try gpa.create(Other); var p: Parser = .{ .gpa = gpa, .buf = try gpa.alloc(u8, 16) }; errdefer p.deinit(); try w.finish(&p); return w; }
+        \\fn b(gpa: Allocator, pool: *Pool) !*W { const w = try pool.create(gpa); var p: Parser = .{ .gpa = gpa, .buf = try gpa.alloc(u8, 16) }; errdefer p.deinit(); try w.finish(&p); return w; }
+    , "");
+}
