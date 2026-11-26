@@ -16,7 +16,7 @@ a buffered writer never flushed, tests that never run. `go vet` is the
 closest analog: not style, which `zig fmt` and the existing linters cover,
 but silent wrongness.
 
-- **Twenty-seven rules.** Twenty-three have found real bugs: in Zig's own standard
+- **Twenty-eight rules.** Twenty-three have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -214,6 +214,7 @@ One needs no failure: twice, for a release written out under a plain
 | [flush](docs/rules/flush.md) | A buffered file or stream writer, written to and never flushed | What is left in the buffer never arrives |
 | [positional](docs/rules/positional.md) | A writer on stdout or stderr, or a reader on stdin, made positional (`writer`, `File.Writer.init`, `reader`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled; a reader reads again what was read before it |
 | [wipe](docs/rules/wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
+| [buckets](docs/rules/buckets.md) | A std `HashMap`'s `capacity()` compared with a count of items, to decide whether an insert that assumes capacity has room | `capacity()` counts buckets, of which the map fills 80%: the test passes with no room, and `putAssumeCapacity` panics in Debug, undefined behavior in ReleaseFast |
 
 ### Data races
 

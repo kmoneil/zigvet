@@ -1,0 +1,36 @@
+# buckets' guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/buckets.zig
+
+== std's hash maps that count buckets, not the array ones
+-    return bucket_maps.has(name);
++    return bucket_maps.has(name) or std.mem.endsWith(u8, name, "HashMapUnmanaged");
+
+== a map reached from std, not a type of the file's or another file's
+-            return if (std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(path)), "std")) "" else null;
++            return "";
+
+== a comparison with something other than 0
+-                if (tree.nodeTag(other) == .number_literal and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(other)), "0")) return false;
++                if (false and tree.nodeTag(other) == .number_literal) return false;
+
+== in the condition of an if or a while
+-            else => return false,
+-        }
+-    }
+-    return false;
+-}
++            else => return true,
++        }
++    }
++    return false;
++}
+
+== the same map
+-        if (call.map != capacity.map) continue;
++        if (false) continue;
+
+== an insert that assumes room, somewhere in the file
+-    return if (grows) anywhere else null;
++    return if (grows) anywhere orelse "put" else null;

@@ -81,6 +81,8 @@ first trips its rule, and the fix reports nothing.
   positional.
 - wipe: a local wiped with `@memset` as the last thing done with it,
   which release builds drop.
+- buckets: a std `HashMap`'s `capacity()`, its buckets, tested as room
+  for items before an insert that assumes capacity.
 - race: a container-level optional holding atomics or a lock, asked
   whether it is null by value.
 - wrap: a test for unsigned wraparound after a plain `+`, which panics
@@ -685,6 +687,30 @@ fn login(io: std.Io) !void {
     var secret: [64]u8 = undefined;
     defer std.crypto.secureZero(u8, &secret);
     try readSecret(io, &secret);
+}
+```
+
+### buckets
+
+A std `HashMap`'s or `HashMapUnmanaged`'s `capacity()` tested as room for
+items before an insert that assumes capacity. It counts buckets, and the
+map fills only 80% of them before an insert must grow, so the test passes
+with no room, and `putAssumeCapacity` panics in Debug.
+
+```zig
+fn add(map: *std.AutoHashMapUnmanaged(u32, void), gpa: std.mem.Allocator, key: u32) !void {
+    if (map.capacity() <= map.count()) try map.ensureTotalCapacity(gpa, map.count() * 2 + 8);
+    map.putAssumeCapacity(key, {});
+}
+```
+
+Ask for room counted in items: `ensureUnusedCapacity` returns at once
+when there is room.
+
+```zig
+fn add(map: *std.AutoHashMapUnmanaged(u32, void), gpa: std.mem.Allocator, key: u32) !void {
+    try map.ensureUnusedCapacity(gpa, 1);
+    map.putAssumeCapacity(key, {});
 }
 ```
 
