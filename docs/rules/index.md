@@ -31,6 +31,7 @@ One needs no failure: twice, for a release written out under a plain
 | [refill](refill.md) | A place freed, then given new memory by something that can fail first | The place still holds the freed memory, and `deinit` frees it again |
 | [owner](owner.md) | One allocation freed by two errdefers: the caller's, and the one in the function it hands it to | Freed twice |
 | [kept](kept.md) | An `errdefer` that frees what the function has already stored where its caller keeps it | The caller's `deinit` frees it again |
+| [handed](handed.md) | An `errdefer` that frees a local, still armed after a call hands the local to a value whose own errdefer'd release frees it | Both run when a later step fails: freed twice |
 | [torn](torn.md) | An optional or union built in place by an initializer that can fail | It is left set over what was never made, and `deinit` frees that |
 | [twice](twice.md) | A deferred release also written out by hand: an errdefer's on a path that then fails, a defer's wherever its block is then left | Freed or closed twice |
 | [sweep](sweep.md) | A loop that frees what a list holds, can fail part way, and empties the list only after it | The list still holds what was freed |

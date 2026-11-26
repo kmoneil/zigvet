@@ -21,7 +21,7 @@ but silent wrongness.
 [The rules](rules/index.md){: .btn .mr-2 }
 [GitHub](https://github.com/kmoneil/zigvet){: .btn }
 
-- **Twenty-eight rules.** Twenty-three have found real bugs: in Zig's own standard
+- **Twenty-nine rules.** Twenty-three have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -86,8 +86,8 @@ page shows them all with what goes wrong.
   [grow](rules/grow.md), [copy](rules/copy.md)
 - **Error paths, double frees, leaks, held locks:**
   [refill](rules/refill.md), [owner](rules/owner.md), [kept](rules/kept.md),
-  [torn](rules/torn.md), [twice](rules/twice.md), [sweep](rules/sweep.md),
-  [unlock](rules/unlock.md), [leak](rules/leak.md)
+  [handed](rules/handed.md), [torn](rules/torn.md), [twice](rules/twice.md),
+  [sweep](rules/sweep.md), [unlock](rules/unlock.md), [leak](rules/leak.md)
 - **Errors swallowed:** [cancel](rules/cancel.md), [fit](rules/fit.md)
 - **Silently wrong results:** [alias](rules/alias.md),
   [flush](rules/flush.md), [positional](rules/positional.md),
