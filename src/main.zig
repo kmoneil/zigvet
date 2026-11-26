@@ -807,6 +807,7 @@ test {
     _ = @import("tail.zig");
     _ = @import("buckets.zig");
     _ = @import("handed.zig");
+    _ = @import("hollow.zig");
     _ = @import("leak.zig");
     _ = @import("owner.zig");
     _ = @import("refill.zig");

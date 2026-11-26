@@ -85,6 +85,8 @@ first trips its rule, and the fix reports nothing.
   which release builds drop.
 - buckets: a std `HashMap`'s `capacity()`, its buckets, tested as room
   for items before an insert that assumes capacity.
+- hollow: an optional given `@as(T, undefined)` of a pointer, slice or
+  error set, then unwrapped, which tests bits left undefined.
 - race: a container-level optional holding atomics or a lock, asked
   whether it is null by value.
 - wrap: a test for unsigned wraparound after a plain `+`, which panics
@@ -778,6 +780,43 @@ when there is room.
 fn add(map: *std.AutoHashMapUnmanaged(u32, void), gpa: std.mem.Allocator, key: u32) !void {
     try map.ensureUnusedCapacity(gpa, 1);
     map.putAssumeCapacity(key, {});
+}
+```
+
+### hollow
+
+An optional given a payload of `undefined`, then unwrapped in place. An
+optional of a pointer, a slice or an error set keeps its null in the
+payload's own bits, so `@as(T, undefined)` leaves it neither null nor set,
+and the `.?` after it branches on undefined: Debug's 0xaa fill reads as
+set, while ReleaseSafe can read it as null and lose what was written
+through it.
+
+```zig
+fn copyName(gpa: std.mem.Allocator, src: []const u8, dst: *?[]const u8) !void {
+    dst.* = @as([]const u8, undefined);
+    try dupeInto(gpa, src, &dst.*.?);
+}
+
+fn dupeInto(gpa: std.mem.Allocator, src: []const u8, out: *[]const u8) !void {
+    out.* = try gpa.dupe(u8, src);
+}
+```
+
+Build the payload in a local and assign the optional once; or, where its
+address matters, store a defined value first (a copy of the source) and
+write the payload through `.?`. Generic code can ask
+`@typeInfo(T) == .pointer` and read a pointer aside.
+
+```zig
+fn copyName(gpa: std.mem.Allocator, src: []const u8, dst: *?[]const u8) !void {
+    var name: []const u8 = undefined;
+    try dupeInto(gpa, src, &name);
+    dst.* = name;
+}
+
+fn dupeInto(gpa: std.mem.Allocator, src: []const u8, out: *[]const u8) !void {
+    out.* = try gpa.dupe(u8, src);
 }
 ```
 

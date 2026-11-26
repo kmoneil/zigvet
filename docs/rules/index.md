@@ -54,6 +54,7 @@ One needs no failure: twice, for a release written out under a plain
 | [positional](positional.md) | A writer on stdout or stderr, or a reader on stdin, made positional (`writer`, `File.Writer.init`, `reader`) | Redirected to a file it writes from byte 0, over what else is written there: `prog > log 2>&1` comes out garbled; a reader reads again what was read before it |
 | [wipe](wipe.md) | A local wiped with `@memset` as the last thing done with it | Release builds drop the store, and the secret stays in memory |
 | [buckets](buckets.md) | A std `HashMap`'s `capacity()` compared with a count of items, to decide whether an insert that assumes capacity has room | `capacity()` counts buckets, of which the map fills 80%: the test passes with no room, and `putAssumeCapacity` panics in Debug, undefined behavior in ReleaseFast |
+| [hollow](hollow.md) | An optional given `@as(T, undefined)` of a pointer, a slice or an error set, then unwrapped in place (`dst.* = @as([]const u8, undefined);`, then `&dst.*.?`) | Its null is in the payload's bits, which this leaves undefined: Debug passes, and ReleaseSafe reads it as null and loses what was written through it |
 
 ## Data races
 

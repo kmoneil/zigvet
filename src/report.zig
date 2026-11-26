@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter, opath, tail, buckets, handed };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter, opath, tail, buckets, handed, hollow };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -69,6 +69,7 @@ pub const Finding = struct {
         tail: Tail,
         buckets: Buckets,
         handed: Handed,
+        hollow: Hollow,
         allow: Allow,
     };
 
@@ -369,6 +370,18 @@ pub const Finding = struct {
         fails: []const u8,
     };
 
+    pub const Hollow = struct {
+        /// The optional given an undefined payload, as written: `dst.*`.
+        place: []const u8,
+        /// The payload's type, as written: `[]const u8`.
+        payload: []const u8,
+        /// What unwraps it after: `dst.*.?`, `if (dst.*)`.
+        unwrap: []const u8,
+        /// Whether the payload's type is a generic function's, which keeps
+        /// its null in the payload only for some types.
+        generic: bool,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -413,6 +426,7 @@ pub const Finding = struct {
             .tail => .tail,
             .buckets => .buckets,
             .handed => .handed,
+            .hollow => .hollow,
             .allow => null,
         };
     }
@@ -539,6 +553,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .tail => |t| try w.print("`@call({s}, {s}, ...)` is a tail call or a compile error, and Zig's own x86_64 backend, the Debug default on x86_64 Linux, has no tail calls: every Debug build there fails, while LLVM's, on macOS and in every release mode, pass", .{ t.modifier, t.callee }),
         .buckets => |b| try w.print("`{s}.capacity()` counts buckets, and a hash map fills only its max load of them, 80% by default, before an insert must grow: tested as room for items, it says there is room when there is none, and {s} takes the map's `available` below zero, a panic in Debug and undefined behavior in ReleaseFast", .{ b.map, b.insert }),
         .handed => |h| try w.print("`{s}` freed here if {s}, and again by the errdefer's {s}, since {s} stored it in what {s} frees", .{ h.name, h.fails, h.release, h.callee, h.release }),
+        .hollow => |h| try writeHollow(w, h),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
             .unknown_rule => |name| try w.print("no rule named '{s}' (rules: {s})", .{ name, rule_names }),
@@ -594,6 +609,16 @@ fn writeOpath(w: *Writer, o: Finding.Opath) Writer.Error!void {
 fn writeCounter(w: *Writer, c: Finding.Counter) Writer.Error!void {
     try w.print("`{s}` is a {s}, and `{s}` can be more than {d}: ", .{ c.counter, c.type, c.len, c.max });
     try w.print("`{s}` still holds at {d}, so `{s}` overflows", .{ c.check, c.max, c.step });
+}
+
+/// hollow's message: the store, the unwrap, and which payloads keep their
+/// optional's null.
+fn writeHollow(w: *Writer, h: Finding.Hollow) Writer.Error!void {
+    try w.print("`{s}` is given `@as({s}, undefined)`, then unwrapped by `{s}`: ", .{ h.place, h.payload, h.unwrap });
+    if (h.generic) {
+        try w.print("when `{s}` is a pointer, a slice or an error set, its optional keeps its null in the payload's own bits", .{h.payload});
+    } else try w.writeAll("an optional of a pointer, a slice or an error set keeps its null in the payload's own bits");
+    try w.writeAll(", which this leaves undefined: Debug's 0xaa fill reads as set, and a release build may drop the store and read as null what the bytes held before");
 }
 
 /// narrow's message: where the sum overflows, when the constant shows it.
