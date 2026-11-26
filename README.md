@@ -16,7 +16,7 @@ a buffered writer never flushed, tests that never run. `go vet` is the
 closest analog: not style, which `zig fmt` and the existing linters cover,
 but silent wrongness.
 
-- **Twenty-eight rules.** Twenty-three have found real bugs: in Zig's own standard
+- **Twenty-nine rules.** Twenty-three have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -193,6 +193,7 @@ One needs no failure: twice, for a release written out under a plain
 | [refill](docs/rules/refill.md) | A place freed, then given new memory by something that can fail first | The place still holds the freed memory, and `deinit` frees it again |
 | [owner](docs/rules/owner.md) | One allocation freed by two errdefers: the caller's, and the one in the function it hands it to | Freed twice |
 | [kept](docs/rules/kept.md) | An `errdefer` that frees what the function has already stored where its caller keeps it | The caller's `deinit` frees it again |
+| [handed](docs/rules/handed.md) | An `errdefer` that frees a local, still armed after a call hands the local to a value whose own errdefer'd release frees it | Both run when a later step fails: freed twice |
 | [torn](docs/rules/torn.md) | An optional or union built in place by an initializer that can fail | It is left set over what was never made, and `deinit` frees that |
 | [twice](docs/rules/twice.md) | A deferred release also written out by hand: an errdefer's on a path that then fails, a defer's wherever its block is then left | Freed or closed twice |
 | [sweep](docs/rules/sweep.md) | A loop that frees what a list holds, can fail part way, and empties the list only after it | The list still holds what was freed |

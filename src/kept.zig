@@ -475,10 +475,26 @@ pub fn isNested(tag: Node.Tag) bool {
     };
 }
 
+/// The first node of `statement`, after token `armed`, that makes the
+/// function fail, as kept reads one: a `try`, a `return error.X`, a
+/// `return` of what a capture caught, or of a call that can fail.
+/// `parents` gives every node's parent.
+pub fn failure(arena: Allocator, tree: *const Ast, parents: []const Node.OptionalIndex, statement: Node.Index, armed: Ast.TokenIndex) Allocator.Error!?Node.Index {
+    var r: Rule = .{ .arena = arena, .tree = tree, .findings = undefined, .parents = parents };
+    return r.failing(statement, armed);
+}
+
+/// What fails at `point`, which `failure` found, as a message says it:
+/// `gpa.alloc fails`, or `it returns error.Busy`.
+pub fn failureText(arena: Allocator, tree: *const Ast, parents: []const Node.OptionalIndex, point: Node.Index) Allocator.Error![]const u8 {
+    var r: Rule = .{ .arena = arena, .tree = tree, .findings = undefined, .parents = parents };
+    return r.what(point);
+}
+
 /// The name an errdefer's `deferred` frees: `x.free(name)`,
 /// `x.destroy(name)`, `x.rawFree(name, ...)` or `name.deinit(...)`, alone or
 /// as a statement of a block.
-fn freedName(tree: *const Ast, deferred: Node.Index) ?[]const u8 {
+pub fn freedName(tree: *const Ast, deferred: Node.Index) ?[]const u8 {
     var buffer: [2]Node.Index = undefined;
     const statements = tree.blockStatements(&buffer, deferred) orelse (&deferred)[0..1];
     for (statements) |statement| {

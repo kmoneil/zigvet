@@ -60,6 +60,8 @@ first trips its rule, and the fix reports nothing.
   callee's.
 - kept: an `errdefer` frees what the function has already stored where
   its caller keeps it.
+- handed: an `errdefer` frees a local, still armed after a call handed it
+  to a value whose own errdefer'd release frees it.
 - torn: an optional or union field built in place by an initializer
   that can fail.
 - twice: a deferred release also written out by hand: an errdefer's on a
@@ -343,6 +345,71 @@ fn put(self: *Store, name: []const u8) !void {
     try self.names.append(self.gpa, owned);
     errdefer _ = self.names.pop();
     try self.sizes.append(self.gpa, name.len);
+}
+```
+
+### handed
+
+An `errdefer` frees a local, and is still armed after a call has handed
+the local to a value that a later `errdefer` releases, freeing it with
+it. When anything after fails, both run, and the local is freed twice.
+
+```zig
+const Pending = struct {
+    gpa: std.mem.Allocator,
+    url: []u8,
+
+    fn make(gpa: std.mem.Allocator, url: []u8) !*Pending {
+        const p = try gpa.create(Pending);
+        p.* = .{ .gpa = gpa, .url = url };
+        return p;
+    }
+
+    fn destroy(p: *Pending) void {
+        p.gpa.free(p.url);
+        p.gpa.destroy(p);
+    }
+};
+
+fn prepare(gpa: std.mem.Allocator, href: []const u8) !*Pending {
+    const url = try gpa.dupe(u8, href);
+    errdefer gpa.free(url);
+    const p = try Pending.make(gpa, url);
+    errdefer p.destroy();
+    try check(p);
+    return p;
+}
+```
+
+Scope the first errdefer to the hand-over, so it covers only the call
+failing.
+
+```zig
+const Pending = struct {
+    gpa: std.mem.Allocator,
+    url: []u8,
+
+    fn make(gpa: std.mem.Allocator, url: []u8) !*Pending {
+        const p = try gpa.create(Pending);
+        p.* = .{ .gpa = gpa, .url = url };
+        return p;
+    }
+
+    fn destroy(p: *Pending) void {
+        p.gpa.free(p.url);
+        p.gpa.destroy(p);
+    }
+};
+
+fn prepare(gpa: std.mem.Allocator, href: []const u8) !*Pending {
+    const url = try gpa.dupe(u8, href);
+    const p = blk: {
+        errdefer gpa.free(url);
+        break :blk try Pending.make(gpa, url);
+    };
+    errdefer p.destroy();
+    try check(p);
+    return p;
 }
 ```
 

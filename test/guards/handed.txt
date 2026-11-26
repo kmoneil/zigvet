@@ -1,0 +1,24 @@
+# handed's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/handed.zig
+
+== the parameter itself stored, not a value made from it
+-                    if (isName(tree, field, param)) try fields.append(r.arena, tree.tokenSlice(tree.firstToken(field) - 2));
++                    if (param.len > 0) try fields.append(r.arena, tree.tokenSlice(tree.firstToken(field) - 2));
+
+== a release of what the declaration made, not of another value
+-            const index = if (offset == 1 and isName(tree, tree.nodeData(call.ast.fn_expr).node_and_token[0], handover.made))
++            const index = if (offset == 1)
+
+== a field of the parameter the value is passed as
+-            if (!isName(tree, lhs, param)) continue;
++            if (false and !isName(tree, lhs, param)) continue;
+
+== a field the call stored the name in
+-            for (fields) |stored| if (std.mem.eql(u8, tree.tokenSlice(field), stored)) return true;
++            for (fields) |stored| if (stored.len > 0 or field == 0) return true;
+
+== the name assigned anew before the failure
+-            if (assigns(tree, statement, name)) return null;
++            if (false and assigns(tree, statement, name)) return null;
