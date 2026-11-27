@@ -72,6 +72,8 @@ first trips its rule, and the fix reports nothing.
   with no `defer`.
 - leak: a local released by hand later, with something that can fail in
   between and no `defer`.
+- orphan: an allocation made in the arguments of a call that can fail,
+  which has no name to free it by when it does.
 - cancel: an `Io` call's error dropped in a task's loop, so whoever
   cancels the task waits for good, or a wait's returned as another error.
 - fit: a number printed into a buffer too small for it, under
@@ -587,6 +589,32 @@ fn insert(conn: *Conn, rows: []const Row) !void {
     var stmt = try conn.prepare("insert into t values (?)");
     defer stmt.finalize();
     for (rows) |row| try stmt.bind(row);
+}
+```
+
+### orphan
+
+An allocation made in the arguments of a call that can fail. The argument
+is made first; when the call then fails, nothing has a name for it, so no
+errdefer can free it and it leaks. The same goes for a thread
+(`try std.Thread.spawn(...)`) or an open file passed that way. Memory is
+reported only from an allocator named `gpa`: an arena frees it anyway.
+
+```zig
+fn keep(gpa: std.mem.Allocator, list: *std.ArrayList([]u8), s: []const u8) !void {
+    try list.append(gpa, try gpa.dupe(u8, s));
+}
+```
+
+Give it a name and arm its release before the call, as here; or make the
+call unable to fail first (`ensureUnusedCapacity`, then
+`appendAssumeCapacity`).
+
+```zig
+fn keep(gpa: std.mem.Allocator, list: *std.ArrayList([]u8), s: []const u8) !void {
+    const copy = try gpa.dupe(u8, s);
+    errdefer gpa.free(copy);
+    try list.append(gpa, copy);
 }
 ```
 
