@@ -81,7 +81,7 @@ One needs no failure: twice, for a release written out under a plain
 
 | Rule | Catches | What goes wrong |
 |---|---|---|
-| [cached](cached.md) | A build script that lists a directory to decide what to build, and never tells Zig's configure cache | A file added there is not built until something else changes the build |
+| [cached](cached.md) | A build script that lists a directory, or asks whether a path is there, to decide what to build, and never tells Zig's configure cache | A file added there, or the path once it is made, is not built until something else changes the build |
 | [unrun](unrun.md) | A file whose tests never run, because nothing the test build analyses refers to it | `zig build test` passes without them |
 | [hoard](hoard.md) | A fuzz target that keeps memory past one input, from an allocator the test runner does not check | It grows with every input until the run runs out of memory, and the leak check passes |
 

@@ -231,10 +231,19 @@ pub const Finding = struct {
     };
 
     pub const Cached = struct {
-        /// The directory listed, as written: `"test"`.
+        /// The directory listed, or the path asked after, as written:
+        /// `"test"`.
         path: []const u8,
-        /// Walked, with a dependency on it but on none under it.
-        walked: bool,
+        shape: Shape,
+
+        pub const Shape = enum {
+            /// Listed to decide what to build.
+            listed,
+            /// Walked, with a dependency on it but on none under it.
+            walked,
+            /// Asked whether it is there (#240).
+            probed,
+        };
     };
 
     pub const Unrun = struct {
@@ -519,10 +528,11 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .flush => |f| try w.print("'{s}' keeps what is written through it in `{s}` until it is flushed, and nothing here flushes it or hands it on, so the last of it is never written", .{
             f.writer, f.buffer,
         }),
-        .cached => |c| if (c.walked)
-            try w.print("walks `{s}`, and `dependOnDirectoryContents` is not recursive, so a file added to a directory under it is not seen until something else changes the build", .{c.path})
-        else
-            try w.print("lists `{s}` to decide what to build, and nothing here tells Zig's configure cache, so a file added there is not seen until something else changes the build", .{c.path}),
+        .cached => |c| switch (c.shape) {
+            .walked => try w.print("walks `{s}`, and `dependOnDirectoryContents` is not recursive, so a file added to a directory under it is not seen until something else changes the build", .{c.path}),
+            .listed => try w.print("lists `{s}` to decide what to build, and nothing here tells Zig's configure cache, so a file added there is not seen until something else changes the build", .{c.path}),
+            .probed => try w.print("asks whether `{s}` is there to decide what to build, and nothing here tells Zig's configure cache, so one made or removed later is not seen until something else changes the build", .{c.path}),
+        },
         .unrun => |u| if (u.tests == 1)
             try w.writeAll("nothing the tests reach refers to this file, so its test never runs")
         else
