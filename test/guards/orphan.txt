@@ -31,6 +31,26 @@ file src/orphan.zig
 -    return !takenOnFailure(t, call, index);
 +    return !(false and takenOnFailure(t, call, index));
 
+== in an initializer, a test block
+-    if (inTest(t, node)) return null;
++    if (false and inTest(t, node)) return null;
+
+== in an initializer, an allocator named for the general-purpose one
+-        if (!generalPurpose(t, allocator)) return null;
++        if (false and !generalPurpose(t, allocator)) return null;
+
+== in an initializer, something that fails after it
+-            const fails = failureAfter(t.*.?, node, elements[index + 1 ..], made) orelse continue;
++            const fails = failureAfter(t.*.?, node, elements[index + 1 ..], made) orelse at;
+
+== a nested initializer's allocation, reported once
+-            if (reported(findings.items, tree.tokenStart(tree.firstToken(at)))) break;
++            if (false and reported(findings.items, tree.tokenStart(tree.firstToken(at)))) break;
+
+== the call an initializer is an argument of can fail, and does not free it
+-    if (!canFail(t, parent) or takenOnFailure(t, call, index)) return null;
++    if (false and (!canFail(t, parent) or takenOnFailure(t, call, index))) return null;
+
 == a thread's spawn, not another's
 -    if (std.mem.eql(u8, name, "spawn") and !std.mem.endsWith(u8, tree.getNodeSource(receiver), "Thread")) return null;
 +    if (false and std.mem.eql(u8, name, "spawn") and !std.mem.endsWith(u8, tree.getNodeSource(receiver), "Thread")) return null;

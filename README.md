@@ -199,7 +199,7 @@ One needs no failure: twice, for a release written out under a plain
 | [sweep](docs/rules/sweep.md) | A loop that frees what a list holds, can fail part way, and empties the list only after it | The list still holds what was freed |
 | [unlock](docs/rules/unlock.md) | A lock taken, then something that can fail before the unlock, with no `defer` | The lock stays held, and the next `lock` waits for good |
 | [leak](docs/rules/leak.md) | A local released by hand later in its block, with something that can fail between | The release never runs |
-| [orphan](docs/rules/orphan.md) | An allocation made in the arguments of a call that can fail (`try list.append(gpa, try gpa.dupe(u8, s))`) | When the call fails nothing has a name for it: the copy leaks, and a thread spawned that way is left neither joined nor detached |
+| [orphan](docs/rules/orphan.md) | An allocation made in the arguments of a call that can fail (`try list.append(gpa, try gpa.dupe(u8, s))`), or in an initializer with a failure after it (`.{ .a = try gpa.dupe(u8, x), .b = try gpa.dupe(u8, y) }`) | When what follows fails nothing has a name for it, and an `errdefer` after the initializer never runs: the copy leaks, and a thread spawned that way is left neither joined nor detached |
 
 ### Errors swallowed
 

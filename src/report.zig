@@ -422,6 +422,9 @@ pub const Finding = struct {
         made: []const u8,
         /// What can fail after it is made, as written: `list.append`.
         fails: []const u8,
+        /// Made as an element of an initializer, where a later element
+        /// is what fails (#237), not as a call's own argument.
+        initializer: bool = false,
     };
 
     /// An allow comment that suppresses nothing, and why.
@@ -599,7 +602,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .handed => |h| try w.print("`{s}` freed here if {s}, and again by the errdefer's {s}, since {s} stored it in what {s} frees", .{ h.name, h.fails, h.release, h.callee, h.release }),
         .hollow => |h| try writeHollow(w, h),
         .parsed => |p| try w.print("`{s}` overflows for `{s}` at either end of {s}, and `{s}` is `parseInt`'s, any value the text holds, with nothing bounding it first: a panic in Debug and ReleaseSafe, a wrapped result in ReleaseFast, for whoever writes the text", .{ p.expression, p.operand, p.type, p.operand }),
-        .orphan => |o| try w.print("what {s} makes here has no name, so if {s} fails after it, nothing releases it", .{ o.made, o.fails }),
+        .orphan => |o| try writeOrphan(w, o),
         .remainder => |r| try w.print("`{s}` is `@mod({s}, {s})` by hand, and its product overflows for `{s}` near its type's minimum, where `@mod` gives the answer: a panic in Debug and ReleaseSafe, undefined behavior in ReleaseFast", .{ r.expression, r.dividend, r.divisor, r.dividend }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),
@@ -621,6 +624,13 @@ fn writeFreed(w: *Writer, f: Finding.Freed) Writer.Error!void {
     } else {
         try w.print(", which `defer {s}` above frees before the caller gets it", .{f.release});
     }
+}
+
+/// orphan's message: what is made, where, and what fails after it.
+fn writeOrphan(w: *Writer, o: Finding.Orphan) Writer.Error!void {
+    try w.print("what {s} makes here {s}, so if {s} fails after it, nothing releases it", .{
+        o.made, if (o.initializer) "is in an initializer and has no name yet" else "has no name", o.fails,
+    });
 }
 
 /// cancel's message: the error dropped, or what it is returned as.
