@@ -51,6 +51,21 @@
 //! path or a directory above it: a dependency on a path that is not there
 //! fails the configure (Zig 0.17.1), so what tells the cache is one on the
 //! directory the path would be in.
+//!
+//! That directory may have to be found first, so the dependency is often
+//! made in a function of its own (#248):
+//!
+//!     dependOnPresence(b, b.path("db/seeds.zig")); // the nearest above that is there
+//!     if (b.root.access(b.graph.io, "db/seeds.zig", .{})) |_| { ... }
+//!
+//! A call by name to a function of the file is taken as the calls that
+//! function makes itself: a `dependOn...` there tells of what the call is
+//! handed, and a `poisonCache` there turns the cache off for the caller.
+//! It is not followed when two functions of the file have the name, or on
+//! into what that function calls. A probed path held in a local is told of,
+//! too, by a call that names what the local is declared from (not `b`):
+//! `dependOnPresence(b, dir)` for `sub` of `const root, const sub = switch
+//! (dir) { ... }`.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -68,6 +83,7 @@ const Finding = report.Finding;
 /// path it asks after, without telling the configure cache. Everything is
 /// allocated with `arena`.
 pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
+    var helpers: Helpers = .{};
     for (0..tree.nodes.len) |i| {
         const node: Node.Index = @fromBackingInt(@intCast(i));
         if (tree.nodeTag(node) != .fn_decl) continue;
@@ -76,10 +92,10 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
         const proto = tree.fullFnProto(&buffer, proto_node).?;
         const b = buildParam(tree, proto) orelse continue;
         var seen: Seen = .{ .body = body };
-        try scan(arena, tree, body, b, false, &seen);
+        try scan(arena, tree, body, b, false, &seen, &helpers);
         if (seen.poisoned) continue;
         for (seen.probes.items) |call| {
-            if (!toldOf(tree, seen.told.items, probedPath(tree, call))) try addProbe(arena, tree, findings, call, b);
+            if (!toldOf(tree, &seen, b, probedPath(tree, call))) try addProbe(arena, tree, findings, call, b);
         }
         // Told of the directory, when a walk goes on into those under it.
         if (seen.depends and (!seen.walks or seen.depends_in_loop)) continue;
@@ -119,26 +135,86 @@ const Seen = struct {
     walks: bool = false,
 };
 
+/// The functions of a file a build function calls by name, and what each
+/// tells the configure cache by calls of its own (#248).
+const Helpers = struct {
+    /// Each function of the file by its name, null for a name two of them
+    /// have: a call by it does not say which one it reaches. Made at the
+    /// first call by name, so a file with none pays nothing.
+    fns: ?std.StringHashMapUnmanaged(?Node.Index) = null,
+    /// What each function called so far tells, by its name.
+    tells: std.StringHashMapUnmanaged(Tells) = .empty,
+
+    /// What a function tells the configure cache by calls of its own.
+    const Tells = struct {
+        /// A `dependOn...` call.
+        told: bool,
+        /// A `dependOnDirectory...` call, and one in a loop.
+        depends: bool,
+        depends_in_loop: bool,
+        poisoned: bool,
+    };
+
+    /// What the function of the file named `name` tells by its own calls;
+    /// null when no function, or more than one, has the name. What it
+    /// calls in turn is not followed.
+    fn of(helpers: *Helpers, arena: Allocator, tree: *const Ast, name: []const u8) Allocator.Error!?Tells {
+        if (helpers.tells.get(name)) |tells| return tells;
+        const fns = helpers.fns orelse fns: {
+            var fns: std.StringHashMapUnmanaged(?Node.Index) = .empty;
+            for (0..tree.nodes.len) |i| {
+                const node: Node.Index = @fromBackingInt(@intCast(i));
+                if (tree.nodeTag(node) != .fn_decl) continue;
+                var buffer: [1]Node.Index = undefined;
+                const name_token = tree.fullFnProto(&buffer, tree.nodeData(node).node_and_node[0]).?.name_token orelse continue;
+                const entry = try fns.getOrPut(arena, tree.tokenSlice(name_token));
+                entry.value_ptr.* = if (entry.found_existing) null else node;
+            }
+            helpers.fns = fns;
+            break :fns fns;
+        };
+        const decl = (fns.get(name) orelse return null) orelse return null;
+        const body = tree.nodeData(decl).node_and_node[1];
+        var seen: Seen = .{ .body = body };
+        try scan(arena, tree, body, "", false, &seen, null);
+        const tells: Tells = .{
+            .told = seen.told.items.len > 0,
+            .depends = seen.depends,
+            .depends_in_loop = seen.depends_in_loop,
+            .poisoned = seen.poisoned,
+        };
+        try helpers.tells.put(arena, name, tells);
+        return tells;
+    }
+};
+
 /// Notes in `seen` what `node`, inside the function with the build
 /// parameter `b`, does, and what is under it, but not in nested functions
-/// and types. `in_loop` says whether a loop is around it.
-fn scan(arena: Allocator, tree: *const Ast, node: Node.Index, b: []const u8, in_loop: bool, seen: *Seen) Allocator.Error!void {
+/// and types. `in_loop` says whether a loop is around it. A call to one of
+/// `helpers` is taken as the calls it makes; with none, calls by name are
+/// not followed.
+fn scan(arena: Allocator, tree: *const Ast, node: Node.Index, b: []const u8, in_loop: bool, seen: *Seen, helpers: ?*Helpers) Allocator.Error!void {
     if (kept.isNested(tree.nodeTag(node))) return;
-    try noteCall(arena, tree, node, b, in_loop, seen);
+    try noteCall(arena, tree, node, b, in_loop, seen, helpers);
     if (answered(tree, node)) |asked| {
         if (probesRoot(tree, asked, b, seen.body)) try seen.probes.append(arena, asked);
     }
     const loop = in_loop or tree.fullWhile(node) != null or tree.fullFor(node) != null;
     var nodes: std.ArrayList(Node.Index) = .empty;
     try children.append(arena, tree, node, &nodes);
-    for (nodes.items) |child| try scan(arena, tree, child, b, loop, seen);
+    for (nodes.items) |child| try scan(arena, tree, child, b, loop, seen, helpers);
 }
 
 /// Notes in `seen` what `node` does when it is a method call the rule asks
-/// about: a listing, a walk, or something told to the configure cache.
-fn noteCall(arena: Allocator, tree: *const Ast, node: Node.Index, b: []const u8, in_loop: bool, seen: *Seen) Allocator.Error!void {
+/// about: a listing, a walk, or something told to the configure cache; or
+/// a call by name to one of `helpers`.
+fn noteCall(arena: Allocator, tree: *const Ast, node: Node.Index, b: []const u8, in_loop: bool, seen: *Seen, helpers: ?*Helpers) Allocator.Error!void {
     var buffer: [1]Node.Index = undefined;
     const call = tree.fullCall(&buffer, node) orelse return;
+    if (tree.nodeTag(call.ast.fn_expr) == .identifier) {
+        if (helpers) |all| try noteHelper(arena, tree, node, call, in_loop, seen, all);
+        return;
+    }
     if (tree.nodeTag(call.ast.fn_expr) != .field_access) return;
     const method = tree.tokenSlice(tree.nodeData(call.ast.fn_expr).node_and_token[1]);
     if (std.mem.eql(u8, method, "openDir")) {
@@ -154,6 +230,18 @@ fn noteCall(arena: Allocator, tree: *const Ast, node: Node.Index, b: []const u8,
     } else if (std.mem.eql(u8, method, "walk") or std.mem.eql(u8, method, "walkSelectively")) {
         seen.walks = true;
     }
+}
+
+/// Notes in `seen` what `call`, by name, tells the configure cache when it
+/// reaches a function of the file that tells it something by its own
+/// calls, taken as them: a `dependOn...` there tells of what `call` is
+/// handed, and a `poisonCache` there turns the cache off here.
+fn noteHelper(arena: Allocator, tree: *const Ast, node: Node.Index, call: Ast.full.Call, in_loop: bool, seen: *Seen, helpers: *Helpers) Allocator.Error!void {
+    const tells = try helpers.of(arena, tree, tree.tokenSlice(tree.nodeMainToken(call.ast.fn_expr))) orelse return;
+    if (tells.told) try seen.told.append(arena, node);
+    if (tells.depends) seen.depends = true;
+    if (tells.depends and (in_loop or tells.depends_in_loop)) seen.depends_in_loop = true;
+    if (tells.poisoned) seen.poisoned = true;
 }
 
 /// The call whose failure `node` takes as an answer: the condition of an
@@ -265,26 +353,50 @@ fn namesRoot(tree: *const Ast, first: Ast.TokenIndex, last: Ast.TokenIndex, b: [
 /// Whether the local `name` is declared in `body`, alone or as one of a
 /// destructure's, from something that reaches a build's root.
 fn declaredFromRoot(tree: *const Ast, body: Node.Index, name: []const u8, b: []const u8) bool {
-    const first = tree.firstToken(body);
-    const last = tree.lastToken(body);
-    for (0..tree.nodes.len) |i| {
-        const node: Node.Index = @fromBackingInt(@intCast(i));
-        const at = tree.firstToken(node);
-        if (at < first or at > last) continue;
-        const declares = if (tree.fullVarDecl(node)) |decl|
-            std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)
-        else if (tree.nodeTag(node) == .assign_destructure) declares: {
-            const full = tree.assignDestructure(node);
-            for (full.ast.variables) |variable| {
-                const decl = tree.fullVarDecl(variable) orelse continue;
-                if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), name)) break :declares true;
-            }
-            break :declares false;
-        } else false;
-        if (declares and namesRoot(tree, at, tree.lastToken(node), b)) return true;
+    var declarations: Declarations = .{ .tree = tree, .body = body, .name = name };
+    while (declarations.next()) |found| {
+        if (namesRoot(tree, tree.firstToken(found.node), tree.lastToken(found.node), b)) return true;
     }
     return false;
 }
+
+/// The declarations in a function's `body` of the local `name`, alone or
+/// as one of a destructure's.
+const Declarations = struct {
+    tree: *const Ast,
+    body: Node.Index,
+    name: []const u8,
+    at: usize = 0,
+
+    const Found = struct {
+        /// The declaration, or the whole destructure.
+        node: Node.Index,
+        /// What the local is declared from: the value destructured.
+        value: ?Node.Index,
+    };
+
+    fn next(it: *Declarations) ?Found {
+        const tree = it.tree;
+        const first = tree.firstToken(it.body);
+        const last = tree.lastToken(it.body);
+        while (it.at < tree.nodes.len) {
+            const node: Node.Index = @fromBackingInt(@intCast(it.at));
+            it.at += 1;
+            const at = tree.firstToken(node);
+            if (at < first or at > last) continue;
+            if (tree.fullVarDecl(node)) |decl| {
+                if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), it.name)) return .{ .node = node, .value = decl.ast.init_node.unwrap() };
+            } else if (tree.nodeTag(node) == .assign_destructure) {
+                const full = tree.assignDestructure(node);
+                for (full.ast.variables) |variable| {
+                    const decl = tree.fullVarDecl(variable) orelse continue;
+                    if (std.mem.eql(u8, tree.tokenSlice(decl.ast.mut_token + 1), it.name)) return .{ .node = node, .value = full.ast.value_expr };
+                }
+            }
+        }
+        return null;
+    }
+};
 
 /// The path a probe asks after, its second argument.
 fn probedPath(tree: *const Ast, node: Node.Index) Node.Index {
@@ -292,19 +404,57 @@ fn probedPath(tree: *const Ast, node: Node.Index) Node.Index {
     return tree.fullCall(&buffer, node).?.ast.params[1];
 }
 
-/// Whether one of `told`, the function's `dependOn...` calls, names
-/// `path`: its tokens, or for a string a directory above it, `"db"` or
-/// `"."` for `"db/seeds.zig"`.
-fn toldOf(tree: *const Ast, told: []const Node.Index, path: Node.Index) bool {
+/// Whether one of `seen.told`, the function's `dependOn...` calls and its
+/// calls to a function that makes one, names `path`: its tokens, or for a
+/// string a directory above it, `"db"` or `"."` for `"db/seeds.zig"`; or,
+/// for a local, what it is declared from.
+fn toldOf(tree: *const Ast, seen: *const Seen, b: []const u8, path: Node.Index) bool {
     const literal = tree.nodeTag(path) == .string_literal;
-    for (told) |call| {
+    for (seen.told.items) |call| {
         const last = tree.lastToken(call);
         var token = tree.firstToken(call);
         while (token <= last) : (token += 1) {
             if (if (literal) namesAbove(tree, token, path) else sameTokensAt(tree, token, last, path)) return true;
         }
     }
+    return tree.nodeTag(path) == .identifier and toldOfSource(tree, seen, b, tree.getNodeSource(path));
+}
+
+/// Whether one of `seen.told` names a name of what the local `local` is
+/// declared from, other than `b`: `dir` for `sub` of `const root, const
+/// sub = switch (dir) { ... }` (#248).
+fn toldOfSource(tree: *const Ast, seen: *const Seen, b: []const u8, local: []const u8) bool {
+    var declarations: Declarations = .{ .tree = tree, .body = seen.body, .name = local };
+    while (declarations.next()) |found| {
+        const value = found.value orelse continue;
+        const last = tree.lastToken(value);
+        var token = tree.firstToken(value);
+        while (token <= last) : (token += 1) {
+            const name = nameAt(tree, token) orelse continue;
+            if (std.mem.eql(u8, name, b)) continue;
+            for (seen.told.items) |call| {
+                if (holdsName(tree, call, name)) return true;
+            }
+        }
+    }
     return false;
+}
+
+/// Whether the tokens of `node` hold the name `name`, and not as a field.
+fn holdsName(tree: *const Ast, node: Node.Index, name: []const u8) bool {
+    const last = tree.lastToken(node);
+    var token = tree.firstToken(node);
+    while (token <= last) : (token += 1) {
+        if (std.mem.eql(u8, nameAt(tree, token) orelse continue, name)) return true;
+    }
+    return false;
+}
+
+/// The name at `token` when it is one, and not a field's after a `.`.
+fn nameAt(tree: *const Ast, token: Ast.TokenIndex) ?[]const u8 {
+    if (tree.tokenTag(token) != .identifier) return null;
+    if (token > 0 and tree.tokenTag(token - 1) == .period) return null;
+    return tree.tokenSlice(token);
 }
 
 /// Whether `token` is a string that names `path`, a string too, or a
@@ -505,6 +655,48 @@ test "not reported: a probe that stops the configure, is told, or is of another 
     ,
         \\1:81 "tests/data" probed
         \\2:109 path probed
+        \\
+    );
+}
+
+test "not reported: told by a function of the file that makes the dependency (#248)" {
+    try expectCached(
+        \\pub fn build(b: *std.Build) void { dependOnPresence(b, "db/seeds.zig"); if (b.root.access(b.graph.io, "db/seeds.zig", .{})) |_| { _ = b.step("seed", "x"); } else |_| {} }
+        \\fn dependOnPresence(b: *std.Build, sub: []const u8) void { const rel = std.fs.path.dirname(sub) orelse "."; b.root.access(b.graph.io, rel, .{}) catch return; b.dependOnDirectoryMetadata(b.path(rel)); }
+        \\fn openSourceDir(b: *std.Build, dir: std.Build.LazyPath) ?std.Io.Dir { const root, const sub = switch (dir) { .src_path => |p| .{ p.owner.root, p.sub_path }, else => return null }; watch(b, dir); return root.openDir(b.graph.io, sub, .{}) catch null; }
+        \\fn watch(b: *std.Build, dir: std.Build.LazyPath) void { b.dependOnDirectoryMetadata(dir); }
+        \\fn noCache(b: *std.Build) void { b.graph.poisonCache(); }
+        \\fn poisoned(b: *std.Build) !bool { noCache(b); var dir = try b.root.openDir(b.graph.io, "test", .{ .iterate = true }); _ = &dir; b.root.access(b.graph.io, "locales", .{}) catch return false; return true; }
+        \\fn listed(b: *std.Build) !void { watch(b, b.path("test")); var dir = try b.root.openDir(b.graph.io, "test", .{ .iterate = true }); _ = &dir; }
+        \\fn walked(b: *std.Build) !void { var dir = try b.root.openDir(b.graph.io, "test", .{ .iterate = true }); var w = try dir.walk(b.allocator); while (try w.next(b.graph.io)) |e| watch(b, b.path(e.path)); }
+        \\fn watchTree(b: *std.Build, root: []const u8) !void { var w = try (try b.root.openDir(b.graph.io, root, .{ .iterate = true })).walk(b.allocator); b.dependOnDirectoryContents(b.path(root)); while (try w.next(b.graph.io)) |e| b.dependOnDirectoryContents(b.path(e.path)); }
+        \\fn treeWalked(b: *std.Build) !void { try watchTree(b, "test"); var dir = try b.root.openDir(b.graph.io, "test", .{ .iterate = true }); var w = try dir.walk(b.allocator); _ = &w; }
+    , "");
+}
+
+test "a function of the file that tells of another path, or nothing, or only by another (#248)" {
+    try expectCached(
+        \\fn watch(b: *std.Build, dir: []const u8) void { b.dependOnDirectoryContents(b.path(dir)); }
+        \\fn elsewhere(b: *std.Build) bool { watch(b, "test"); b.root.access(b.graph.io, "db/seeds.zig", .{}) catch return false; return true; }
+        \\fn install(b: *std.Build, path: []const u8) void { _ = b.addInstallFile(b.path(path), path); }
+        \\fn installed(b: *std.Build) bool { install(b, "locales"); b.root.access(b.graph.io, "locales", .{}) catch return false; return true; }
+        \\fn outer(b: *std.Build, dir: []const u8) void { watch(b, dir); }
+        \\fn twoDown(b: *std.Build) bool { outer(b, "locales"); b.root.access(b.graph.io, "locales", .{}) catch return false; return true; }
+        \\fn byB(b: *std.Build, other: []const u8) bool { const path = b.pathJoin(&.{ "db", "seeds.zig" }); watch(b, other); b.root.access(b.graph.io, path, .{}) catch return false; return true; }
+        \\fn byField(b: *std.Build, cfg: Config, other: Config) bool { const path = cfg.dir; watch(b, other.dir); b.root.access(b.graph.io, path, .{}) catch return false; return true; }
+        \\const B = struct { fn tell(b: *std.Build, dir: []const u8) void { _ = b; _ = dir; } fn named(b: *std.Build) bool { tell(b, "locales"); b.root.access(b.graph.io, "locales", .{}) catch return false; return true; } };
+        \\const A = struct { fn tell(b: *std.Build, dir: []const u8) void { b.dependOnDirectoryContents(b.path(dir)); } };
+        \\fn listed(b: *std.Build) !void { install(b, "test"); var dir = try b.root.openDir(b.graph.io, "test", .{ .iterate = true }); _ = &dir; }
+        \\fn walked(b: *std.Build) !void { watch(b, "test"); var dir = try b.root.openDir(b.graph.io, "test", .{ .iterate = true }); var w = try dir.walk(b.allocator); _ = &w; }
+    ,
+        \\2:54 "db/seeds.zig" probed
+        \\4:59 "locales" probed
+        \\6:55 "locales" probed
+        \\7:116 path probed
+        \\8:105 path probed
+        \\9:136 "locales" probed
+        \\11:68 "test"
+        \\12:66 "test" walked
         \\
     );
 }

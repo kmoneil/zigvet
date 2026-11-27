@@ -1122,7 +1122,9 @@ pub fn build(b: *std.Build) !void {
 each directory a `walk` enters: it is not recursive), or
 `b.graph.poisonCache()`. For a path asked after, depend on the directory
 it would be in, one that is always there (`b.path(".")`): a dependency on
-a path that is not there fails the configure.
+a path that is not there fails the configure. A function of the build
+script that makes the dependency (say, on the nearest directory above the
+path that is there) counts, called with the path.
 
 ```zig
 pub fn build(b: *std.Build) !void {
