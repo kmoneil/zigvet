@@ -95,6 +95,8 @@ first trips its rule, and the fix reports nothing.
   in the narrow type, where the same function widens it elsewhere.
 - counter: a `u8` or `u16` counter stepped while it is less than the
   `.len` of the slice it walks, which overflows on a longer slice.
+- remainder: a remainder by hand, `x - @divFloor(x, d) * d`, whose
+  product overflows near the type's minimum, where `@mod` does not.
 - opath: a directory opened without `.iterate = true`, then listed,
   synced or given new permissions, which Linux refuses.
 - tail: `@call(.always_tail, ...)` with nothing that tests the backend,
@@ -949,6 +951,29 @@ pub fn headingLevel(line: []const u8) ?u8 {
     while (level < line.len and line[level] == '#') level += 1;
     if (level == 0 or level > 6) return null;
     return @intCast(level);
+}
+```
+
+### remainder
+
+A remainder taken by hand from a floor division of a signed integer,
+`x - @divFloor(x, d) * d`, in one expression or with the division in a
+local. For an `x` near its type's minimum the product is below the
+minimum: a panic in Debug and ReleaseSafe, undefined behavior in
+ReleaseFast. A timestamp parsed from input can be that `x`.
+
+```zig
+fn secondsOfDay(t: i64) i64 {
+    return t - @divFloor(t, 86400) * 86400;
+}
+```
+
+`@mod` is the same value and cannot overflow. `x - @divTrunc(x, d) * d`
+cannot either, and is not reported.
+
+```zig
+fn secondsOfDay(t: i64) i64 {
+    return @mod(t, 86400);
 }
 ```
 

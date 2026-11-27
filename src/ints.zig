@@ -115,6 +115,19 @@ pub fn signOfType(tree: *const Ast, type_expr: Node.Index) Sign {
     return .unknown;
 }
 
+/// Whether `type_expr` names a signed integer type: `isize`, `i64`, or one
+/// of C's. Not a float, which `signOfType` calls signed too.
+pub fn isSignedInt(tree: *const Ast, type_expr: Node.Index) bool {
+    const n = unparen(tree, type_expr);
+    if (tree.nodeTag(n) != .identifier) return false;
+    const name = tree.tokenSlice(tree.nodeMainToken(n));
+    if (std.mem.eql(u8, name, "isize")) return true;
+    if (name.len > 1 and name[0] == 'i' and allDigits(name[1..])) return true;
+    const c_signed = [_][]const u8{ "c_short", "c_int", "c_long", "c_longlong" };
+    for (c_signed) |c| if (std.mem.eql(u8, name, c)) return true;
+    return false;
+}
+
 /// The bits of the unsigned integer type `type_expr` names (`u16`), when
 /// it names one; not `usize`, whose width is the target's.
 pub fn unsignedBits(tree: *const Ast, type_expr: Node.Index) ?u16 {

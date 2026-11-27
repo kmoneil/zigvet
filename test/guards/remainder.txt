@@ -1,0 +1,28 @@
+# remainder's guards: each what keeps a report out, and the edit that takes
+# it away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/remainder.zig
+
+== a parameter, or reached from one, not a local the function computed
+-        if (!isParameter(tree, function, wrap.rootName(tree, a) orelse continue)) continue;
++        if (false and !isParameter(tree, function, wrap.rootName(tree, a) orelse continue)) continue;
+
+== declared a signed integer
+-        if (!ints.isSignedInt(tree, ints.declaredType(t.?, a, 0) orelse continue)) continue;
++        if (ints.declaredType(t.?, a, 0) == null) continue;
+
+== nothing assigned between the division and the subtraction
+-        if (wrap.changedBetween(tree, t.?.parents, function, quotient.call, node, a, quotient.local)) continue;
++        if (false and wrap.changedBetween(tree, t.?.parents, function, quotient.call, node, a, quotient.local)) continue;
+
+== a floor division, not a truncating one
+-    if (params.len != 2 or !std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(call)), "@divFloor")) return null;
++    if (params.len != 2) return null;
+
+== the same dividend in the division and the subtraction
+-    if (!wrap.sameTokens(tree, ints.unparen(tree, params[0]), a)) return null;
++    if (false and !wrap.sameTokens(tree, ints.unparen(tree, params[0]), a)) return null;
+
+== the same divisor in the division and the product
+-    if (!wrap.sameTokens(tree, ints.unparen(tree, params[1]), ints.unparen(tree, d))) return null;
++    if (false and !wrap.sameTokens(tree, ints.unparen(tree, params[1]), ints.unparen(tree, d))) return null;
