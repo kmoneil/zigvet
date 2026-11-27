@@ -99,8 +99,8 @@ first trips its rule, and the fix reports nothing.
   synced or given new permissions, which Linux refuses.
 - tail: `@call(.always_tail, ...)` with nothing that tests the backend,
   which every Debug build on x86_64 Linux fails to compile.
-- cached: a build script lists a directory to decide what to build, and
-  never tells Zig's configure cache.
+- cached: a build script lists a directory, or asks whether a path is
+  there, to decide what to build, and never tells Zig's configure cache.
 - unrun: a file whose tests never run, because nothing the test build
   analyses names it.
 - hoard: a fuzz target keeps memory past one input, from an allocator
@@ -1018,7 +1018,9 @@ pub fn scan(xs: []const u8, i: usize) usize {
 
 A build script lists a directory to decide what to build, and never tells
 Zig's configure cache. A file added there is not built until something
-else changes the build, so `zig build test` passes without it.
+else changes the build, so `zig build test` passes without it. The same
+goes for asking whether a path is there (`b.root.access(io, "locales",
+.{})` in an `if`, or under a `catch` that goes on).
 
 ```zig
 pub fn build(b: *std.Build) !void {
@@ -1032,7 +1034,9 @@ pub fn build(b: *std.Build) !void {
 
 `b.dependOnDirectoryContents` next to the `openDir`, as here (one for
 each directory a `walk` enters: it is not recursive), or
-`b.graph.poisonCache()`.
+`b.graph.poisonCache()`. For a path asked after, depend on the directory
+it would be in, one that is always there (`b.path(".")`): a dependency on
+a path that is not there fails the configure.
 
 ```zig
 pub fn build(b: *std.Build) !void {

@@ -1,0 +1,60 @@
+# cached's guards for a path asked after (#240): each what keeps a report
+# out, and the edit that takes it away. Run with scripts/guardcheck.sh;
+# with any one of them gone, a test must fail.
+file src/cached.zig
+
+== a function that turns the cache off
+-        if (seen.poisoned) continue;
++        if (false) continue;
+
+== told of the path, or of a directory above it
+-            if (!toldOf(tree, seen.told.items, probedPath(tree, call))) try addProbe(arena, tree, findings, call, b);
++            if (true) try addProbe(arena, tree, findings, call, b);
+
+== a directory above the path, not a name that starts as it does
+-    return std.mem.startsWith(u8, asked, named) and asked[named.len] == '/';
++    return std.mem.startsWith(u8, asked, named);
+
+== the path's own name, not a field or a method called the same
+-    if (token > 0 and tree.tokenTag(token - 1) == .period) return false;
++    if (false and token > 0 and tree.tokenTag(token - 1) == .period) return false;
+
+== a handler that stops the configure
+-        if (stops(tree, handler, capture)) return null;
++        if (false and stops(tree, handler, capture)) return null;
+
+== a handler that panics
+-        .builtin_call_two, .builtin_call_two_comma => std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@panic"),
++        .builtin_call_two, .builtin_call_two_comma => false,
+
+== a handler that is unreachable
+-        .unreachable_literal => true,
++        .unreachable_literal => false,
+
+== a handler that returns an error written out
+-    if (tree.nodeTag(value) == .error_value) return true;
++    if (false and tree.nodeTag(value) == .error_value) return true;
+
+== a handler that returns the error it caught
+-    return tree.nodeTag(value) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(value)), caught);
++    return false and tree.nodeTag(value) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(value)), caught);
+
+== a handler that calls what does not return
+-        else => callsOff(tree, node),
++        else => false,
+
+== a listing, which is the rule's other shape
+-    if (hasField(tree, call.ast.params[call.ast.params.len - 1], "iterate", "true")) return false;
++    if (false and hasField(tree, call.ast.params[call.ast.params.len - 1], "iterate", "true")) return false;
+
+== a path of the build's root, not of another directory
+-    if (namesRoot(tree, tree.firstToken(node), tree.lastToken(node), b)) return true;
++    if (true or namesRoot(tree, tree.firstToken(node), tree.lastToken(node), b)) return true;
+
+== the build's own root, not a package's
+-        if (if (reached) std.mem.eql(u8, name, "owner") else std.mem.eql(u8, name, b)) return true;
++        if (reached or std.mem.eql(u8, name, b)) return true;
+
+== a local declared from the root, not from another directory
+-        if (declares and namesRoot(tree, at, tree.lastToken(node), b)) return true;
++        if (declares and (true or namesRoot(tree, at, tree.lastToken(node), b))) return true;
