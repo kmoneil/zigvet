@@ -79,6 +79,17 @@ error), since a configure that fails is not cached; and one in a function
 that calls `poisonCache`, or a `dependOn...` that names the path or a
 directory above it (`"db"` or `"."` for `"db/seeds.zig"`).
 
+The directory to depend on may have to be found first, so the dependency
+is often made in a function of its own. A call by name to a function of
+the file counts as the calls that function makes itself: a helper that
+makes the nearest directory above the path that is there a dependency,
+`dependOnPresence(b, b.path("db/seeds.zig"))`, tells of the path it is
+handed, and of a local declared from what it is handed (`sub` of
+`const root, const sub = switch (dir) { ... }` by `dependOnPresence(b,
+dir)`). One that calls `poisonCache` turns the cache off for the caller.
+It is followed one level, and not by a name two functions of the file
+have.
+
 ## Found in real code
 
 Over Zig 0.17.0's standard library and compiler sources and the
@@ -96,6 +107,8 @@ And two in the terminal emulator's, which asks whether a file its source
 tarballs carry is in the tree: stale the same way, though a checkout
 seldom gains one. Others there that ask after a path tell the cache
 already, by poisoning it where the path is missing or with a dependency on
-the nearest directory that exists, and are not reported.
+the nearest directory that exists, and are not reported. So is the
+framework's fix, a helper that makes the nearest directory above each
+path that is there a dependency, called before each probe.
 
 [All rules](index.md)

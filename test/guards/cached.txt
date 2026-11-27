@@ -8,7 +8,7 @@ file src/cached.zig
 +        if (false) continue;
 
 == told of the path, or of a directory above it
--            if (!toldOf(tree, seen.told.items, probedPath(tree, call))) try addProbe(arena, tree, findings, call, b);
+-            if (!toldOf(tree, &seen, b, probedPath(tree, call))) try addProbe(arena, tree, findings, call, b);
 +            if (true) try addProbe(arena, tree, findings, call, b);
 
 == a directory above the path, not a name that starts as it does
@@ -56,5 +56,55 @@ file src/cached.zig
 +        if (reached or std.mem.eql(u8, name, b)) return true;
 
 == a local declared from the root, not from another directory
--        if (declares and namesRoot(tree, at, tree.lastToken(node), b)) return true;
-+        if (declares and (true or namesRoot(tree, at, tree.lastToken(node), b))) return true;
+-        if (namesRoot(tree, tree.firstToken(found.node), tree.lastToken(found.node), b)) return true;
++        if (true or namesRoot(tree, tree.firstToken(found.node), tree.lastToken(found.node), b)) return true;
+
+# A function of the file that makes the dependency (#248).
+
+== a call to a function of the file that makes a dependency
+-    if (tells.told) try seen.told.append(arena, node);
++    if (false and tells.told) try seen.told.append(arena, node);
+
+== not a call to one that makes none
+-    if (tells.told) try seen.told.append(arena, node);
++    if (true or tells.told) try seen.told.append(arena, node);
+
+== a call to one that turns the cache off
+-    if (tells.poisoned) seen.poisoned = true;
++    if (false and tells.poisoned) seen.poisoned = true;
+
+== a listing told of by one that makes a directory dependency
+-    if (tells.depends) seen.depends = true;
++    if (false and tells.depends) seen.depends = true;
+
+== a walk told of by a call in a loop
+-    if (tells.depends and (in_loop or tells.depends_in_loop)) seen.depends_in_loop = true;
++    if (tells.depends and (false and in_loop or tells.depends_in_loop)) seen.depends_in_loop = true;
+
+== a walk told of by one that makes a dependency in a loop
+-    if (tells.depends and (in_loop or tells.depends_in_loop)) seen.depends_in_loop = true;
++    if (tells.depends and (in_loop or false and tells.depends_in_loop)) seen.depends_in_loop = true;
+
+== not a walk told of once, outside a loop
+-    if (tells.depends and (in_loop or tells.depends_in_loop)) seen.depends_in_loop = true;
++    if (tells.depends and (in_loop or true)) seen.depends_in_loop = true;
+
+== one level, not on into what that function calls
+-        try scan(arena, tree, body, "", false, &seen, null);
++        try scan(arena, tree, body, "", false, &seen, helpers);
+
+== not by a name two functions of the file have
+-                entry.value_ptr.* = if (entry.found_existing) null else node;
++                entry.value_ptr.* = node;
+
+== a local told of by what it is declared from
+-    return tree.nodeTag(path) == .identifier and toldOfSource(tree, seen, b, tree.getNodeSource(path));
++    return false and tree.nodeTag(path) == .identifier and toldOfSource(tree, seen, b, tree.getNodeSource(path));
+
+== not by the build parameter, which every call is handed
+-            if (std.mem.eql(u8, name, b)) continue;
++            if (false and std.mem.eql(u8, name, b)) continue;
+
+== not by a field's name
+-    if (token > 0 and tree.tokenTag(token - 1) == .period) return null;
++    if (false and token > 0 and tree.tokenTag(token - 1) == .period) return null;
