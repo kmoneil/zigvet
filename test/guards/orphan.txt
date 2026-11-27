@@ -1,0 +1,36 @@
+# orphan's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/orphan.zig
+
+== a call that can fail where it stands
+-        else => return false,
++        else => return true,
+
+== a catch that says the call cannot fail
+-            return lhs == child and tree.nodeTag(handler) != .unreachable_literal;
++            return lhs == child and (true or tree.nodeTag(handler) != .unreachable_literal);
+
+== a test block, where a failure ends the test
+-    if (inTest(t, node)) return false;
++    if (false and inTest(t, node)) return false;
+
+== an allocator named for the general-purpose one
+-        if (!generalPurpose(t, allocator)) return false;
++        if (false and !generalPurpose(t, allocator)) return false;
+
+== an arena by its name
+-    if (std.ascii.findIgnoreCase(text, "arena") != null) return false;
++    if (false and std.ascii.findIgnoreCase(text, "arena") != null) return false;
+
+== a local made from an arena
+-            if (std.ascii.findIgnoreCase(tree.getNodeSource(init), "arena") != null) return false;
++            if (false and std.ascii.findIgnoreCase(tree.getNodeSource(init), "arena") != null) return false;
+
+== a function of the file that frees the argument when it fails
+-    return !takenOnFailure(t, call, index);
++    return !(false and takenOnFailure(t, call, index));
+
+== a thread's spawn, not another's
+-    if (std.mem.eql(u8, name, "spawn") and !std.mem.endsWith(u8, tree.getNodeSource(receiver), "Thread")) return null;
++    if (false and std.mem.eql(u8, name, "spawn") and !std.mem.endsWith(u8, tree.getNodeSource(receiver), "Thread")) return null;
