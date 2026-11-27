@@ -262,7 +262,7 @@ fn greet(gpa: Allocator) ![]u8 {
 
 A place freed, then given new memory by something that can fail first.
 When it fails, the place still holds the freed memory, and `deinit` frees
-it again.
+it again, or, for a local, the function's own `defer` does.
 
 ```zig
 fn resize(self: *Rows, n: usize) !void {

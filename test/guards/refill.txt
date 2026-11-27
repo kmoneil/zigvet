@@ -1,0 +1,32 @@
+# refill's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/refill.zig
+
+== a bare local, which the failing function throws away
+-        const bare = freed.path.parts.len == 0 and !freed.path.deref;
++        const bare = false and freed.path.parts.len == 0 and !freed.path.deref;
+
+== a field of a var held by value, which the failing function throws away
+-        if (!bare and !r.heldByValue(freed.call, freed.path.root)) return false;
++        if (!bare and !(false and r.heldByValue(freed.call, freed.path.root))) return false;
+
+== a local no defer frees again
+-        return !try r.freedOnExit(freed, point);
++        return false and !try r.freedOnExit(freed, point);
+
+== a defer armed only after the failure
+-            for (statements[0..at]) |statement| {
++            for (statements[0..if (false) at else statements.len]) |statement| {
+
+== an errdefer, when the failure returns no error
+-                    .@"errdefer" => if (!errors) continue,
++                    .@"errdefer" => if (false and !errors) continue,
+
+== a release of its receiver that stores to what it frees
+-        return twice.clears(t, fn_decl);
++        return false and twice.clears(t, fn_decl);
+
+== only the receiver's own method: what x.free(place) stores to is x's
+-        if (t.nodeData(call.ast.fn_expr).node_and_token[0] != freed.place) return false;
++        if (false and t.nodeData(call.ast.fn_expr).node_and_token[0] != freed.place) return false;
