@@ -469,7 +469,7 @@ fn closesQueue(t: types.Types, fn_expr: Node.Index) bool {
 /// statements assigns anything but `undefined` to something that is not
 /// a local of its own (`self.* = .{};`, `self.fd = null;`, a variable of
 /// the file).
-fn clears(tree: *const Ast, fn_decl: Node.Index) bool {
+pub fn clears(tree: *const Ast, fn_decl: Node.Index) bool {
     var buffer: [2]Node.Index = undefined;
     const statements = tree.blockStatements(&buffer, tree.nodeData(fn_decl).node_and_node[1]) orelse return false;
     for (statements) |statement| {

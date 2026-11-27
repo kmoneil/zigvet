@@ -18,21 +18,32 @@
 //! file's own functions that frees the parameter the place is passed to
 //! (`self.destroyLocal(self.one)`, where a statement of `destroyLocal` frees
 //! `local` or a field of it), as a statement or the body of an `if`, or
-//! `if (place) |old| x.free(old)`. The place has to be a field or what a
-//! pointer points at (`self.items`, `a.*`). It is reported when a later
-//! statement of the same block stores to it, or to what holds it written
-//! whole (`history.* = .{ ... }`), and something can fail first: a `try`,
-//! or a `catch` or `orelse` that returns (`orelse return
-//! error.OutOfMemory`), in the stored value or a statement between.
+//! `if (place) |old| x.free(old)`. It is reported when a later statement
+//! of the same block stores to the place, or to what holds it written whole
+//! (`history.* = .{ ... }`), and something can fail first: a `try`, or a
+//! `catch` or `orelse` that returns (`orelse return error.OutOfMemory`), in
+//! the stored value or a statement between.
+//!
+//! The place is a field or what a pointer points at (`self.items`, `a.*`),
+//! which the caller still holds when the function fails; or a local the
+//! failing function throws away, a bare one (`name`) or a field of a `var`
+//! holding a struct by value (`sample.items[j].line`), when the function's
+//! own `defer` frees it on the way out, or its `errdefer` when the failure
+//! returns an error (#252): `defer gpa.free(name)`, or
+//! `for (sample.items) |s| gpa.free(s.line)` in one, armed before the
+//! failure in a block around it.
 //!
 //! Not reported: a place reset first (`self.items = &.{}`, or any store
 //! into it), by an `errdefer` or by the `catch` or `orelse` that handles
 //! the failure, or perhaps by a call between that is handed what holds it
-//! (`self.clear()`), when nothing has failed before that call; a field of
-//! a `var` local, which holds a struct by value that the failing function
-//! throws away (Zig rejects a `var` that is never changed, and a store to a
-//! field changes no pointer); and a bare local, which an `errdefer` of its
-//! own can cover.
+//! (`self.clear()`), when nothing has failed before that call; a place
+//! released by a method of its own, one of the file's, that stores to what
+//! it frees (`r.rgb = null` after the free), so a second `deinit` finds
+//! nothing; and a local no defer frees again, since nothing reads it
+//! after the failure (Zig rejects a `var` that is never changed, and a
+//! store to a field changes no pointer), nor one whose defer frees only
+//! what holds it (`defer sample.deinit(gpa)` frees the list's buffer, not
+//! what its elements hold).
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -43,7 +54,9 @@ const children = @import("children.zig");
 const expect = @import("expect.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
+const twice = @import("twice.zig");
 const types = @import("types.zig");
+const unlock = @import("unlock.zig");
 
 /// Appends a finding for every place freed and then refilled by something
 /// that can fail first. Everything is allocated with `arena`.
@@ -76,6 +89,18 @@ const Path = struct {
     fn reaches(holder: Path, place: Path) bool {
         if (!std.mem.eql(u8, holder.root, place.root) or holder.parts.len > place.parts.len) return false;
         for (holder.parts, place.parts[0..holder.parts.len]) |a, b| if (!std.mem.eql(u8, a, b)) return false;
+        return true;
+    }
+
+    /// Whether `p` names `place`, an index `[*]`, every element of a loop,
+    /// standing for any index.
+    fn matches(p: Path, place: Path) bool {
+        if (!std.mem.eql(u8, p.root, place.root) or p.deref != place.deref or p.parts.len != place.parts.len) return false;
+        for (p.parts, place.parts) |a, b| {
+            if (std.mem.eql(u8, a, b)) continue;
+            const any = std.mem.eql(u8, a, "[*]") or std.mem.eql(u8, b, "[*]");
+            if (!any or a[0] != '[' or b[0] != '[') return false;
+        }
         return true;
     }
 };
@@ -182,11 +207,9 @@ const Rule = struct {
         return r.types.?;
     }
 
-    /// A release of `place` by `call`, if `place` is a field or what a
-    /// pointer points at.
+    /// A release of `place` by `call`, if `place` is named from a variable.
     fn placed(r: *Rule, call: Node.Index, place: Node.Index) Allocator.Error!?Release {
         const p = try r.path(place) orelse return null;
-        if (p.parts.len == 0 and !p.deref) return null;
         return .{ .call = call, .place = place, .path = p };
     }
 
@@ -213,9 +236,7 @@ const Rule = struct {
             if (refill) |store| {
                 const end = t.lastToken(store);
                 const point = fails orelse try r.failing(nodes.items, end, freed.path) orelse return;
-                _ = try r.typesOf();
-                if (r.heldByValue(freed.call, freed.path.root)) return;
-                if (try r.resetOnError(freed, point)) return;
+                if (try r.excused(freed, point)) return;
                 return r.findings.append(r.arena, .{
                     .offset = t.tokenStart(t.firstToken(freed.call)),
                     .hint = hint,
@@ -264,6 +285,126 @@ const Rule = struct {
             if (try r.handsOver(deferred.items, freed.path)) return true;
         }
         return false;
+    }
+
+    /// Whether, when the function fails at `point`, the place holds nothing
+    /// freed or nothing reads it: the release stores to what it frees, an
+    /// `errdefer` resets it, or it is a local thrown away.
+    fn excused(r: *Rule, freed: Release, point: Node.Index) Allocator.Error!bool {
+        _ = try r.typesOf();
+        return try r.resets(freed) or try r.resetOnError(freed, point) or try r.thrownAway(freed, point);
+    }
+
+    /// Whether the release is the place's own method, one of the file's,
+    /// that stores to what it frees, as `twice.clears` reads one
+    /// (`r.rgb = null` after `gpa.free(p)`), so the place holds nothing
+    /// freed after it. What `x.free(place)` stores to is `x`'s.
+    fn resets(r: *Rule, freed: Release) Allocator.Error!bool {
+        const t = r.tree;
+        var buffer: [1]Node.Index = undefined;
+        const call = t.fullCall(&buffer, freed.call) orelse return false;
+        if (t.nodeTag(call.ast.fn_expr) != .field_access) return false;
+        if (t.nodeData(call.ast.fn_expr).node_and_token[0] != freed.place) return false;
+        const fn_decl, _ = (try r.typesOf()).callee(call.ast.fn_expr) orelse return false;
+        return twice.clears(t, fn_decl);
+    }
+
+    /// Whether the place is a local the function throws away when it fails
+    /// at `point`, a bare one or a field of a `var` held by value, that no
+    /// defer of its own frees again on the way out.
+    fn thrownAway(r: *Rule, freed: Release, point: Node.Index) Allocator.Error!bool {
+        const bare = freed.path.parts.len == 0 and !freed.path.deref;
+        if (!bare and !r.heldByValue(freed.call, freed.path.root)) return false;
+        return !try r.freedOnExit(freed, point);
+    }
+
+    /// Whether a `defer` armed before `point` in a block around it frees
+    /// the place on the way out, or an `errdefer` does when the failure at
+    /// `point` returns an error: the place as written, or reached through
+    /// a capture of a loop or an `if` in it (`for (list.items) |s|
+    /// gpa.free(s.line)` frees `list.items[j].line`).
+    fn freedOnExit(r: *Rule, freed: Release, point: Node.Index) Allocator.Error!bool {
+        const t = r.tree;
+        const errors = try r.failsWithError(point);
+        var child = point;
+        var up = r.parents[@backingInt(point)].unwrap();
+        while (up) |parent| : ({
+            child = parent;
+            up = r.parents[@backingInt(parent)].unwrap();
+        }) {
+            if (t.nodeTag(parent) == .fn_decl or t.nodeTag(parent) == .test_decl) return false;
+            var buffer: [2]Node.Index = undefined;
+            const statements = t.blockStatements(&buffer, parent) orelse continue;
+            // One after `child` is armed only after the failure.
+            const at = std.mem.indexOfScalar(Node.Index, statements, child) orelse continue;
+            for (statements[0..at]) |statement| {
+                switch (t.nodeTag(statement)) {
+                    .@"defer" => {},
+                    .@"errdefer" => if (!errors) continue,
+                    else => continue,
+                }
+                if (try r.frees(t.nodeData(statement).node, freed.path)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Whether what fails at `point` returns an error, so the function's
+    /// `errdefer`s run: a `try`, or a `catch` or `orelse` whose handler
+    /// returns one.
+    fn failsWithError(r: *Rule, point: Node.Index) Allocator.Error!bool {
+        const t = r.tree;
+        if (t.nodeTag(point) == .@"try") return true;
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try r.within(t.nodeData(point).node_and_node[1], &nodes);
+        for (nodes.items) |node| {
+            if (t.nodeTag(node) == .@"return" and unlock.returnsError(t, r.parents, node)) return true;
+        }
+        return false;
+    }
+
+    /// Whether `body`, what a `defer` runs, releases `place`, as
+    /// `releaseOf` finds a release.
+    fn frees(r: *Rule, body: Node.Index, place: Path) Allocator.Error!bool {
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try r.within(body, &nodes);
+        for (nodes.items) |node| {
+            _, const operand = try r.releaseOf(node) orelse continue;
+            const p = try r.path(operand) orelse continue;
+            const released = try r.uncaptured(operand, p, body) orelse continue;
+            if (released.matches(place)) return true;
+        }
+        return false;
+    }
+
+    /// `p`, the path of `node`, with a root captured between `node` and
+    /// `top` written as what was captured: `s.line` of
+    /// `for (list.items) |s|` is `list.items[*].line`, and `n` of
+    /// `if (name) |n|` is `name`. Null when the capture is of something
+    /// that is not a path.
+    fn uncaptured(r: *Rule, node: Node.Index, p: Path, top: Node.Index) Allocator.Error!?Path {
+        const t = r.tree;
+        var out = p;
+        var child = node;
+        while (child != top) {
+            const parent = r.parents[@backingInt(child)].unwrap() orelse break;
+            defer child = parent;
+            const captured = capturedBy(t, parent, child, out.root) orelse continue;
+            // A capture by pointer names what it points at only through
+            // `.*` or a field.
+            if (out.parts.len == 0 and out.deref != captured.by_pointer) return null;
+            var sliced = captured.input orelse return null;
+            if (t.fullSlice(sliced)) |slice| sliced = slice.ast.sliced;
+            const held = try r.path(sliced) orelse return null;
+            const element = captured.element;
+            const deref = if (out.parts.len > 0) out.deref else if (element) false else held.deref;
+            var parts: std.ArrayList([]const u8) = .empty;
+            try parts.appendSlice(r.arena, held.parts);
+            if (element) try parts.append(r.arena, "[*]");
+            try parts.appendSlice(r.arena, out.parts);
+            out = .{ .root = held.root, .parts = parts.items, .deref = deref };
+        }
+        return out;
     }
 
     /// Whether one of `nodes` is a call that could reset `place`: a method
@@ -485,6 +626,61 @@ fn rootName(t: *const Ast, node: Node.Index) ?[]const u8 {
     };
 }
 
+/// One of the names a `for` or an `if` captures.
+const Capture = struct {
+    /// Its place in the list, from 0.
+    at: usize,
+    /// Whether it is written `*name`.
+    by_pointer: bool,
+};
+
+/// `name` as `node`, a `for` or an `if` with `child` its body, captures it.
+const Captured = struct {
+    by_pointer: bool,
+    /// What is captured: the loop's input or the `if`'s condition. Null
+    /// for a capture past the loop's inputs.
+    input: ?Node.Index,
+    /// Whether the capture is an element of it.
+    element: bool,
+};
+
+/// How `node`, with `child` its body, captures `name`, if it does.
+fn capturedBy(t: *const Ast, node: Node.Index, child: Node.Index, name: []const u8) ?Captured {
+    switch (t.nodeTag(node)) {
+        .for_simple, .@"for" => {
+            const full = t.fullFor(node).?;
+            if (child != full.ast.then_expr) return null;
+            const c = capture(t, full.payload_token, name) orelse return null;
+            const input = if (c.at < full.ast.inputs.len) full.ast.inputs[c.at] else null;
+            return .{ .by_pointer = c.by_pointer, .input = input, .element = true };
+        },
+        .if_simple, .@"if" => {
+            const full = t.fullIf(node).?;
+            if (child != full.ast.then_expr) return null;
+            const c = capture(t, full.payload_token orelse return null, name) orelse return null;
+            if (c.at != 0) return null;
+            return .{ .by_pointer = c.by_pointer, .input = full.ast.cond_expr, .element = false };
+        },
+        else => return null,
+    }
+}
+
+/// `name` among the captures starting at token `first`, by value or by
+/// pointer.
+fn capture(t: *const Ast, first: Ast.TokenIndex, name: []const u8) ?Capture {
+    var token = first;
+    var at: usize = 0;
+    while (true) : (at += 1) {
+        const by_pointer = t.tokenTag(token) == .asterisk;
+        if (by_pointer) token += 1;
+        if (t.tokenTag(token) != .identifier) return null;
+        if (std.mem.eql(u8, t.tokenSlice(token), name)) return .{ .at = at, .by_pointer = by_pointer };
+        token += 1;
+        if (t.tokenTag(token) != .comma) return null;
+        token += 1;
+    }
+}
+
 /// Whether `node` is or holds a `return`.
 fn returns(t: *const Ast, node: Node.Index) bool {
     if (t.nodeTag(node) == .@"return") return true;
@@ -593,6 +789,67 @@ test "not reported: reset first, made first, by value, a bare local, or nothing 
         \\fn orelseHere(gpa: Allocator, s: *S) void { gpa.free(s.bytes); s.bytes = s.pool.take() orelse &.{}; }
         \\fn orelseReset(gpa: Allocator, s: *S) !void { gpa.free(s.bytes); s.bytes = s.pool.take() orelse { s.bytes = &.{}; return error.OutOfMemory; }; }
     , "");
+}
+
+test "a local freed, then refilled, that a defer of its function frees again (#252)" {
+    try expectRefills(
+        \\fn rename(gpa: Allocator, text: []const u8) !void { var name: []u8 = try gpa.dupe(u8, "x"); defer gpa.free(name); gpa.free(name); name = try gpa.dupe(u8, text); }
+        \\fn resample(gpa: Allocator, text: []const u8) !void { var sample: List = .empty; defer { for (sample.items) |s| gpa.free(s.line); sample.deinit(gpa); } gpa.free(sample.items[0].line); sample.items[0] = .{ .id = 1, .line = try gpa.dupe(u8, text) }; }
+        \\fn errdeferred(gpa: Allocator, text: []const u8) ![]u8 { var name: []u8 = try gpa.dupe(u8, "x"); errdefer gpa.free(name); gpa.free(name); name = try gpa.dupe(u8, text); return name; }
+        \\fn optional(gpa: Allocator, text: []const u8) !void { var name: ?[]u8 = null; defer if (name) |n| gpa.free(n); if (name) |old| gpa.free(old); name = try gpa.dupe(u8, text); }
+        \\fn deinited(gpa: Allocator, n: usize) !void { var l: List = .empty; defer l.deinit(gpa); l.deinit(gpa); l = try .initCapacity(gpa, n); }
+        \\fn outer(gpa: Allocator, texts: []const []const u8) !void { var name: []u8 = try gpa.dupe(u8, "x"); defer gpa.free(name); for (texts) |text| { gpa.free(name); name = try gpa.dupe(u8, text); } }
+        \\fn pointed(gpa: Allocator, text: []const u8) !void { var rows: Rows = .{}; defer for (rows.items) |*row| gpa.free(row.cells); gpa.free(rows.items[1].cells); rows.items[1].cells = try gpa.dupe(u8, text); }
+        \\fn orelsed(gpa: Allocator, s: *S) !void { var b: []u8 = try gpa.alloc(u8, 4); errdefer gpa.free(b); gpa.free(b); b = s.pool.take() orelse return error.OutOfMemory; s.keep(b); }
+    ,
+        \\1:115 name <- gpa.dupe
+        \\2:153 sample.items[0].line <- gpa.dupe
+        \\3:123 name <- gpa.dupe
+        \\4:128 name <- gpa.dupe
+        \\5:90 l <- .initCapacity
+        \\6:144 name <- gpa.dupe
+        \\7:127 rows.items[1].cells <- gpa.dupe
+        \\8:101 b <- s.pool.take
+        \\
+    );
+}
+
+test "not reported: a local no defer frees again" {
+    try expectRefills(
+        \\fn noDefer(gpa: Allocator, text: []const u8) !void { var name: []u8 = try gpa.dupe(u8, "x"); gpa.free(name); name = try gpa.dupe(u8, text); gpa.free(name); }
+        \\fn armedAfter(gpa: Allocator, text: []const u8) !void { var name: []u8 = try gpa.dupe(u8, "x"); gpa.free(name); name = try gpa.dupe(u8, text); defer gpa.free(name); }
+        \\fn sibling(gpa: Allocator, text: []const u8) !void { { var name: []u8 = try gpa.dupe(u8, "a"); defer gpa.free(name); log(name); } { var name: []u8 = try gpa.dupe(u8, "b"); gpa.free(name); name = try gpa.dupe(u8, text); gpa.free(name); } }
+        \\fn nulled(gpa: Allocator, text: []const u8) ?[]u8 { var name: []u8 = gpa.dupe(u8, "x") catch return null; errdefer gpa.free(name); gpa.free(name); name = gpa.dupe(u8, text) catch return null; return name; }
+        \\fn another(gpa: Allocator, text: []const u8) !void { var name: []u8 = try gpa.dupe(u8, "x"); const kept = try gpa.dupe(u8, "y"); defer gpa.free(kept); gpa.free(name); name = try gpa.dupe(u8, text); gpa.free(name); }
+        \\fn otherList(gpa: Allocator, other: List, text: []const u8) !void { var sample: List = .empty; defer for (other.items) |s| gpa.free(s.line); gpa.free(sample.items[0].line); sample.items[0] = .{ .line = try gpa.dupe(u8, text) }; }
+        \\fn listOnly(gpa: Allocator, text: []const u8) !void { var sample: List = .empty; defer sample.deinit(gpa); gpa.free(sample.items[0].line); sample.items[0] = .{ .line = try gpa.dupe(u8, text) }; }
+    , "");
+}
+
+test "a release of its receiver that resets what it frees leaves nothing freed (#252)" {
+    try expectRefills(
+        \\const Render = struct {
+        \\    rgb: ?[]u8 = null,
+        \\    fn deinit(r: *Render, gpa: Allocator) void { if (r.rgb) |p| gpa.free(p); r.rgb = null; }
+        \\};
+        \\const Image = struct {
+        \\    px: []u8,
+        \\    fn deinit(i: *Image, gpa: Allocator) void { gpa.free(i.px); i.* = undefined; }
+        \\};
+        \\const S = struct { base: Render, node: *Node };
+        \\const Pool = struct {
+        \\    free_list: ?*Node = null,
+        \\    fn free(p: *Pool, n: *Node) void { p.free_list = n; }
+        \\};
+        \\fn local(gpa: Allocator) !void { var base: Render = .{}; defer base.deinit(gpa); base.deinit(gpa); base = try render(gpa); }
+        \\fn field(gpa: Allocator, s: *S) !void { s.base.deinit(gpa); s.base = try render(gpa); }
+        \\fn undef(gpa: Allocator) !void { var image: Image = try make(gpa); defer image.deinit(gpa); image.deinit(gpa); image = try make(gpa); }
+        \\fn argument(pool: *Pool, s: *S) !void { pool.free(s.node); s.node = try pool.make(); }
+    ,
+        \\16:93 image <- make
+        \\17:41 s.node <- pool.make
+        \\
+    );
 }
 
 test "a place freed through the file's own function (#64)" {

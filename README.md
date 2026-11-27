@@ -190,7 +190,7 @@ One needs no failure: twice, for a release written out under a plain
 
 | Rule | Catches | What goes wrong |
 |---|---|---|
-| [refill](docs/rules/refill.md) | A place freed, then given new memory by something that can fail first | The place still holds the freed memory, and `deinit` frees it again |
+| [refill](docs/rules/refill.md) | A place freed, then given new memory by something that can fail first | The place still holds the freed memory, and `deinit` or the function's own `defer` frees it again |
 | [owner](docs/rules/owner.md) | One allocation freed by two errdefers: the caller's, and the one in the function it hands it to | Freed twice |
 | [kept](docs/rules/kept.md) | An `errdefer` that frees what the function has already stored where its caller keeps it | The caller's `deinit` frees it again |
 | [handed](docs/rules/handed.md) | An `errdefer` that frees a local, still armed after a call hands the local to a value whose own errdefer'd release frees it | Both run when a later step fails: freed twice |
