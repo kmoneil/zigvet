@@ -95,7 +95,7 @@ fn sumOf(t: Types, node: Node.Index) ?Sum {
 /// either's address taken, after `add` and before `test_node`, or anywhere
 /// in a loop around the test and not around the sum, whose next turn runs
 /// the test again.
-fn changedBetween(tree: *const Ast, parents: []const Node.OptionalIndex, function: Node.Index, add: Node.Index, test_node: Node.Index, operand: Node.Index, local: ?Node.Index) bool {
+pub fn changedBetween(tree: *const Ast, parents: []const Node.OptionalIndex, function: Node.Index, add: Node.Index, test_node: Node.Index, operand: Node.Index, local: ?Node.Index) bool {
     const start, const end = between(tree, parents, function, add, test_node);
     for (0..tree.nodes.len) |i| {
         const node: Node.Index = @fromBackingInt(@intCast(i));
@@ -151,7 +151,7 @@ fn overlaps(tree: *const Ast, target: Node.Index, place: Node.Index) bool {
 
 /// The name a place is reached from: `self` of `self.pos` or `off` of
 /// `off.*`.
-fn rootName(tree: *const Ast, node: Node.Index) ?[]const u8 {
+pub fn rootName(tree: *const Ast, node: Node.Index) ?[]const u8 {
     var n = node;
     while (true) switch (tree.nodeTag(n)) {
         .identifier => return tree.tokenSlice(tree.nodeMainToken(n)),
@@ -175,7 +175,7 @@ fn isPlace(tree: *const Ast, node: Node.Index) bool {
 }
 
 /// Whether `a` and `b` are the same tokens.
-fn sameTokens(tree: *const Ast, a: Node.Index, b: Node.Index) bool {
+pub fn sameTokens(tree: *const Ast, a: Node.Index, b: Node.Index) bool {
     const a_first = tree.firstToken(a);
     const b_first = tree.firstToken(b);
     const len = tree.lastToken(a) - a_first;
@@ -191,7 +191,7 @@ fn sameTokens(tree: *const Ast, a: Node.Index, b: Node.Index) bool {
 
 const unparen = ints.unparen;
 
-fn enclosingFn(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) ?Node.Index {
+pub fn enclosingFn(tree: *const Ast, parents: []const Node.OptionalIndex, node: Node.Index) ?Node.Index {
     var up = parents[@backingInt(node)].unwrap();
     while (up) |parent| : (up = parents[@backingInt(parent)].unwrap()) {
         if (tree.nodeTag(parent) == .fn_decl) return parent;
