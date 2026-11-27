@@ -24,6 +24,19 @@
 //! rest, and most of these calls pass one: under any other name
 //! (`allocator`, `a`) the syntax cannot tell which it is.
 //!
+//! The same goes for an initializer (#237):
+//!
+//!     var p: Pair = .{ .a = try gpa.dupe(u8, x), .b = try gpa.dupe(u8, y) };
+//!     errdefer p.close();
+//!
+//! When the second `dupe` fails the first is never freed: the errdefer is
+//! armed only after the initializer, and never runs for a failure inside
+//! it. What is reported is the first element of a struct, tuple or array
+//! initializer that is made as above, or is an initializer holding one,
+//! when a later element has a `try` in it, or the initializer is itself an
+//! argument of a call that can fail (`try list.append(gpa, .{ .name = try
+//! gpa.dupe(u8, s) })`). One report an initializer.
+//!
 //! Not reported: an allocator with `arena` in its name, or a local made
 //! from one (`const gpa = arena_state.allocator();`); a call that cannot
 //! fail (`appendAssumeCapacity`), or whose `catch` is `unreachable`; a call
@@ -47,14 +60,21 @@ const Types = types.Types;
 /// that can fail. Everything is allocated with `arena`.
 pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
     var t: ?Types = null;
+    try inArguments(arena, tree, &t, findings);
+    try inInitializers(arena, tree, &t, findings);
+}
+
+/// Appends a finding for each thing made as an argument of a call that
+/// can fail.
+fn inArguments(arena: Allocator, tree: *const Ast, t: *?Types, findings: *std.ArrayList(Finding)) Allocator.Error!void {
     for (0..tree.nodes.len) |i| {
         const node: Node.Index = @fromBackingInt(@intCast(i));
         var buffer: [1]Node.Index = undefined;
         const call = tree.fullCall(&buffer, node) orelse continue;
         for (call.ast.params, 0..) |param, index| {
             const made = making(tree, param) orelse continue;
-            if (t == null) t = try .init(arena, tree);
-            if (!orphaned(t.?, node, call, index, made)) continue;
+            if (t.* == null) t.* = try .init(arena, tree);
+            if (!orphaned(t.*.?, node, call, index, made)) continue;
             try findings.append(arena, .{
                 .offset = tree.tokenStart(tree.firstToken(param)),
                 .hint = hint,
@@ -67,7 +87,109 @@ pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Findin
     }
 }
 
+/// Appends a finding for the first thing made in each initializer that a
+/// failure after it leaves with nothing to release it.
+fn inInitializers(arena: Allocator, tree: *const Ast, t: *?Types, findings: *std.ArrayList(Finding)) Allocator.Error!void {
+    for (0..tree.nodes.len) |i| {
+        const node: Node.Index = @fromBackingInt(@intCast(i));
+        var buffer: [2]Node.Index = undefined;
+        const elements = elementsOf(tree, &buffer, node) orelse continue;
+        for (elements, 0..) |element, index| {
+            const at, const made = holding(tree, element, 0) orelse continue;
+            if (t.* == null) t.* = try .init(arena, tree);
+            const fails = failureAfter(t.*.?, node, elements[index + 1 ..], made) orelse continue;
+            // An initializer inside this one may have reported it already.
+            if (reported(findings.items, tree.tokenStart(tree.firstToken(at)))) break;
+            try findings.append(arena, .{
+                .offset = tree.tokenStart(tree.firstToken(at)),
+                .hint = initializer_hint,
+                .detail = .{ .orphan = .{
+                    .made = tree.getNodeSource(made.callee),
+                    .fails = tree.getNodeSource(fails),
+                    .initializer = true,
+                } },
+            });
+            break;
+        }
+    }
+}
+
 const hint = "give it a name and arm its release before the call (`const copy = try gpa.dupe(u8, s); errdefer gpa.free(copy);`), or make the call unable to fail first (`ensureUnusedCapacity`, then `appendAssumeCapacity`)";
+
+const initializer_hint = "make each first, with its release armed (`const a = try gpa.dupe(u8, x); errdefer gpa.free(a);`), then build the value from the names: an errdefer after the initializer does not run for a failure inside it";
+
+/// Whether a finding of this rule is already at `offset`.
+fn reported(findings: []const Finding, offset: usize) bool {
+    for (findings) |finding| {
+        if (finding.detail == .orphan and finding.offset == offset) return true;
+    }
+    return false;
+}
+
+/// What fails after `made`, an element of the initializer `node` with
+/// `later` after it, leaving it with nothing to release it: a `try` in a
+/// later element, or the call the initializer is an argument of. Null in
+/// a test, and for memory from an allocator not named for the
+/// general-purpose one.
+fn failureAfter(t: Types, node: Node.Index, later: []const Node.Index, made: Made) ?Node.Index {
+    if (inTest(t, node)) return null;
+    if (made.allocator) |allocator| {
+        if (!generalPurpose(t, allocator)) return null;
+    }
+    return laterFailure(t.tree, later) orelse failingCall(t, node);
+}
+
+/// The elements of `node` when it is a struct, tuple or array initializer.
+fn elementsOf(tree: *const Ast, buffer: *[2]Node.Index, node: Node.Index) ?[]const Node.Index {
+    if (tree.fullStructInit(buffer, node)) |full| return full.ast.fields;
+    if (tree.fullArrayInit(buffer, node)) |full| return full.ast.elements;
+    return null;
+}
+
+/// What `element` holds that was made in place, and where: itself
+/// (`try gpa.dupe(u8, s)`), or the first such element of an initializer
+/// it is.
+fn holding(tree: *const Ast, element: Node.Index, depth: u8) ?struct { Node.Index, Made } {
+    if (making(tree, element)) |made| return .{ element, made };
+    if (depth > 3) return null;
+    var buffer: [2]Node.Index = undefined;
+    const inner = elementsOf(tree, &buffer, ints.unparen(tree, element)) orelse return null;
+    for (inner) |each| if (holding(tree, each, depth + 1)) |found| return found;
+    return null;
+}
+
+/// What can fail in `later`, the elements after one: the callee of the
+/// first `try` among them, or what it tries when that is no call.
+fn laterFailure(tree: *const Ast, later: []const Node.Index) ?Node.Index {
+    if (later.len == 0) return null;
+    const first = tree.firstToken(later[0]);
+    const last = tree.lastToken(later[later.len - 1]);
+    var found: ?Node.Index = null;
+    for (0..tree.nodes.len) |i| {
+        const node: Node.Index = @fromBackingInt(@intCast(i));
+        if (tree.nodeTag(node) != .@"try") continue;
+        const at = tree.nodeMainToken(node);
+        if (at < first or at > last) continue;
+        if (found) |earlier| if (tree.nodeMainToken(earlier) < at) continue;
+        found = node;
+    }
+    const tried = ints.unparen(tree, tree.nodeData(found orelse return null).node);
+    var buffer: [1]Node.Index = undefined;
+    return if (tree.fullCall(&buffer, tried)) |call| call.ast.fn_expr else tried;
+}
+
+/// The callee of the call the initializer `node` is an argument of, when
+/// that call can fail where it stands and does not free the argument
+/// itself.
+fn failingCall(t: Types, node: Node.Index) ?Node.Index {
+    const tree = t.tree;
+    const parent = t.parents[@backingInt(node)].unwrap() orelse return null;
+    var buffer: [1]Node.Index = undefined;
+    const call = tree.fullCall(&buffer, parent) orelse return null;
+    const index = std.mem.findScalar(Node.Index, call.ast.params, node) orelse return null;
+    if (!canFail(t, parent) or takenOnFailure(t, call, index)) return null;
+    return call.ast.fn_expr;
+}
 
 /// Whether what `made` makes, argument `index` of the call `node`, is left
 /// with nothing to release it when that call fails.
@@ -210,7 +332,7 @@ fn expectOrphans(source: [:0]const u8, expected: []const u8) !void {
     for (findings.items) |finding| {
         const loc = report.location(source, finding.offset);
         const o = finding.detail.orphan;
-        try out.writer.print("{d}:{d} {s} <- {s}\n", .{ loc.line + 1, loc.column + 1, o.made, o.fails });
+        try out.writer.print("{d}:{d} {s} <- {s}{s}\n", .{ loc.line + 1, loc.column + 1, o.made, o.fails, if (o.initializer) " in an initializer" else "" });
     }
     try expect.findings(@src(), expected, out.written());
 }
@@ -237,6 +359,43 @@ test "an allocation in the arguments of a call that can fail (#236)" {
         \\8:75 self.gpa.dupe <- self.list.append
         \\
     );
+}
+
+test "an allocation in an initializer, with a failure after it (#237)" {
+    try expectOrphans(
+        \\fn open(gpa: Allocator) !Pair { var p: Pair = .{ .gpa = gpa, .a = try gpa.dupe(u8, "a"), .b = try gpa.dupe(u8, "b") }; errdefer p.close(); return p; }
+        \\fn returned(self: *Client, o: Options) !Client { return .{ .key = try self.gpa.dupe(u8, o.key), .port = o.port, .host = try resolve(o.host) }; }
+        \\fn tuple(gpa: Allocator, a: []const u8) ![2][]u8 { return .{ try gpa.dupe(u8, a), try std.fmt.allocPrint(gpa, "{s}!", .{a}) }; }
+        \\fn typed(gpa: Allocator, n: usize) !Grid { return Grid{ .cells = try gpa.alloc(Cell, n), .marks = try gpa.alloc(bool, n) }; }
+        \\fn nested(gpa: Allocator, s: []const u8) !Entry { return .{ .name = .{ .text = try gpa.dupe(u8, s) }, .id = try nextId() }; }
+        \\fn appended(gpa: Allocator, list: *Entries, s: []const u8) !void { try list.append(gpa, .{ .name = try gpa.dupe(u8, s), .n = 1 }); }
+        \\fn threads(gpa: Allocator) !Pool { return .{ .reader = try std.Thread.spawn(.{}, read, .{}), .buf = try gpa.alloc(u8, 64) }; }
+        \\fn once(self: *App, b: Begin) !void { try self.entries.append(self.gpa, .{ .tool = .{ .name = try self.gpa.dupe(u8, b.name), .title = try self.gpa.dupe(u8, b.title) } }); }
+    ,
+        \\1:67 gpa.dupe <- gpa.dupe in an initializer
+        \\2:67 self.gpa.dupe <- resolve in an initializer
+        \\3:62 gpa.dupe <- std.fmt.allocPrint in an initializer
+        \\4:66 gpa.alloc <- gpa.alloc in an initializer
+        \\5:80 gpa.dupe <- nextId in an initializer
+        \\6:100 gpa.dupe <- list.append in an initializer
+        \\7:56 std.Thread.spawn <- gpa.alloc in an initializer
+        \\8:95 self.gpa.dupe <- self.gpa.dupe in an initializer
+        \\
+    );
+}
+
+test "not reported: one allocation and nothing after it, an arena, a name that says neither, a call that takes it, a test (#237)" {
+    try expectOrphans(
+        \\fn last(gpa: Allocator, o: Options) !Client { return .{ .port = try parsePort(o.port), .key = try gpa.dupe(u8, o.key) }; }
+        \\fn only(gpa: Allocator, o: Options) !Client { return .{ .key = try gpa.dupe(u8, o.key), .port = o.port }; }
+        \\fn inArena(arena: Allocator) !Pair { return .{ .a = try arena.dupe(u8, "a"), .b = try arena.dupe(u8, "b") }; }
+        \\fn generic(allocator: Allocator) !Pair { return .{ .a = try allocator.dupe(u8, "a"), .b = try allocator.dupe(u8, "b") }; }
+        \\fn assumed(gpa: Allocator, list: *Entries, s: []const u8) !void { list.appendAssumeCapacity(.{ .name = try gpa.dupe(u8, s), .n = 1 }); }
+        \\fn taken(self: *Book, gpa: Allocator, s: []const u8) !void { try self.add(gpa, .{ .name = try gpa.dupe(u8, s) }); }
+        \\const Book = struct { fn add(self: *Book, gpa: Allocator, entry: Entry) !void { errdefer gpa.free(entry.name); try self.entries.append(gpa, entry); } };
+        \\fn named(gpa: Allocator) !Pair { const a = try gpa.dupe(u8, "a"); errdefer gpa.free(a); const b = try gpa.dupe(u8, "b"); return .{ .gpa = gpa, .a = a, .b = b }; }
+        \\test "a failure ends the test" { const p: Pair = .{ .a = try gpa.dupe(u8, "a"), .b = try gpa.dupe(u8, "b") }; _ = p; }
+    , "");
 }
 
 test "not reported: an arena, a name that says neither, a call that cannot fail, one that frees it, a test (#236)" {
