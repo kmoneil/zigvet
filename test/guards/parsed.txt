@@ -1,0 +1,52 @@
+# parsed's guards: each what keeps a report out, and the edit that takes it
+# away. Run with scripts/guardcheck.sh; with any one of them gone, a test
+# must fail.
+file src/parsed.zig
+
+== an other operand the file shows wider
+-    if (widerThan(t, other, value.bits)) return null;
++    if (false and widerThan(t, other, value.bits)) return null;
+
+== a local assigned again before the arithmetic
+-    if (wrap.changedBetween(tree, t.parents, function, value.call, node, local, null)) return null;
++    if (false and wrap.changedBetween(tree, t.parents, function, value.call, node, local, null)) return null;
+
+== a value bounded before the arithmetic
+-    if (boundedBefore(tree, tree.tokenSlice(tree.nodeMainToken(local)), tree.lastToken(value.call), tree.firstToken(node))) return null;
++    if (false and boundedBefore(tree, tree.tokenSlice(tree.nodeMainToken(local)), tree.lastToken(value.call), tree.firstToken(node))) return null;
+
+== bounded before the arithmetic, not after it
+-        if (at <= after or at >= before) continue;
++        if (at <= after or (false and at >= before)) continue;
+
+== an ordering comparison with the value as an operand
+-            return isName(tree, lhs, name) or isName(tree, rhs, name);
++            return false and (isName(tree, lhs, name) or isName(tree, rhs, name));
+
+== a switch on the value
+-        .@"switch", .switch_comma => return isName(tree, tree.fullSwitch(node).?.ast.condition, name),
++        .@"switch", .switch_comma => return false,
+
+== @min or @max of the value
+-        return if (std.mem.eql(u8, builtin, "@min") or std.mem.eql(u8, builtin, "@max")) params else null;
++        return if (false and (std.mem.eql(u8, builtin, "@min") or std.mem.eql(u8, builtin, "@max"))) params else null;
+
+== a clamp of the value
+-    return call.ast.params;
++    return null;
+
+== a call named parseInt, not another parser
+-    if (!std.mem.eql(u8, name, "parseInt") or full.ast.params.len < 2) return null;
++    if ((false and !std.mem.eql(u8, name, "parseInt")) or full.ast.params.len < 2) return null;
+
+== a signed type of 64 bits or more
+-    return if (bits >= 64) bits else null;
++    return bits;
+
+== text of a fixed width too short to spell either end
+-    if (shortText(tree, full.ast.params[1])) return null;
++    if (false and shortText(tree, full.ast.params[1])) return null;
+
+== under nineteen characters
+-    return end >= start and end - start < 19;
++    return end >= start;
