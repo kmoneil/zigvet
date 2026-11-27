@@ -35,6 +35,23 @@
 //! loop may read (`while (tick())`), or hands the error on
 //! (`error.Canceled => |e| return e`); and the same handler in the task's
 //! own function, where returning ends the task.
+//!
+//! And in any function, a wait whose every error is returned as another
+//! (#238):
+//!
+//!     io.sleep(.fromSeconds(5), .awake) catch return error.Timeout;
+//!
+//! error.Canceled is the one error `sleep` has, so a canceled task says it
+//! timed out, and a caller that would stop on error.Canceled retries. A
+//! wait is an Io call named `sleep`, `wait`, `waitTimeout`, `lock`,
+//! `lockShared`, `checkCancel`, `futexWait` or `futexWaitTimeout`: std.Io's
+//! are declared to return error.Canceled alone, or it and a timeout. The
+//! handler is `return error.X`, by itself, as the last statement of a
+//! block, or as the `else` of a `switch` on the error caught. Not reported:
+//! `X` of `Canceled`; a handler that names error.Canceled or calls
+//! `recancel`; and any other Io call (a read, an open, a connect), whose
+//! errors are many and whose `catch return error.X` is everywhere, std's
+//! own code included, in code nothing cancels.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -50,6 +67,7 @@ const Finding = report.Finding;
 /// loop. Everything is allocated with `arena`.
 pub fn check(arena: Allocator, tree: *const Ast, findings: *std.ArrayList(Finding)) Allocator.Error!void {
     var rule: Rule = .{ .arena = arena, .tree = tree, .findings = findings };
+    try rule.mapped();
 
     // Where tasks start: every function handed to `async` or `concurrent`.
     var tasks: std.StringHashMapUnmanaged(void) = .empty;
@@ -141,10 +159,42 @@ fn calleeName(tree: *const Ast, node: Node.Index) ?[]const u8 {
 
 const hint = "if its error set holds error.Canceled, return that (`catch |err| switch (err) { error.Canceled => |e| return e, else => {} }`), or call `io.recancel()` after handling it";
 
+/// The waits of std.Io, by name: each is declared to return error.Canceled
+/// alone, or it and a timeout.
+const waits = [_][]const u8{ "sleep", "wait", "waitTimeout", "lock", "lockShared", "checkCancel", "futexWait", "futexWaitTimeout" };
+
 const Rule = struct {
     arena: Allocator,
     tree: *const Ast,
     findings: *std.ArrayList(Finding),
+
+    /// Reports every wait, in any function, whose handler returns another
+    /// error in place of whatever the wait returned. A `defer` cannot
+    /// return, so none of these is in one.
+    fn mapped(r: *Rule) Allocator.Error!void {
+        const tree = r.tree;
+        for (0..tree.nodes.len) |i| {
+            const node: Node.Index = @fromBackingInt(@intCast(i));
+            if (tree.nodeTag(node) != .@"catch") continue;
+            const lhs, const handler = tree.nodeData(node).node_and_node;
+            const callee = ioCallee(tree, lhs) orelse continue;
+            if (!isWait(calleeName(tree, callee).?)) continue;
+            const catch_token = tree.nodeMainToken(node);
+            const capture = if (tree.tokenTag(catch_token + 1) == .pipe) tree.tokenSlice(catch_token + 2) else null;
+            const instead = returnedInstead(tree, handler, capture) orelse continue;
+            if (namesCanceled(tree, handler)) continue;
+            const text = tree.getNodeSource(instead);
+            try r.findings.append(r.arena, .{
+                .offset = tree.tokenStart(catch_token),
+                .hint = try r.arena.print("let error.Canceled through as it is: `try` the call when that is its only error, or `catch |err| switch (err) {{ error.Canceled => |e| return e, else => return {s} }}`; the function's error set gains error.Canceled", .{text}),
+                .detail = .{ .cancel = .{
+                    .callee = tree.getNodeSource(callee),
+                    .handler = try r.arena.print("return {s}", .{text}),
+                    .mapped = text,
+                } },
+            });
+        }
+    }
 
     /// Reports what `node` drops in a loop and outside a `defer`. Nested
     /// functions and types are not the task's code.
@@ -264,6 +314,42 @@ fn ioCallee(tree: *const Ast, node: Node.Index) ?Node.Index {
     return null;
 }
 
+fn isWait(name: []const u8) bool {
+    for (waits) |wait| if (std.mem.eql(u8, name, wait)) return true;
+    return false;
+}
+
+/// The error `handler` returns for whatever was caught: the `error.X` of
+/// `return error.X`, by itself, as the last statement of a block, or as
+/// the `else` of a `switch` on `capture`, the error caught.
+fn returnedInstead(tree: *const Ast, handler: Node.Index, capture: ?[]const u8) ?Node.Index {
+    if (tree.nodeTag(handler) == .@"return") {
+        const value = tree.nodeData(handler).opt_node.unwrap() orelse return null;
+        return if (tree.nodeTag(value) == .error_value) value else null;
+    }
+    var buffer: [2]Node.Index = undefined;
+    if (tree.blockStatements(&buffer, handler)) |statements| {
+        return if (statements.len > 0) returnedInstead(tree, statements[statements.len - 1], capture) else null;
+    }
+    const full = tree.fullSwitch(handler) orelse return null;
+    if (!isName(tree, full.ast.condition, capture orelse return null)) return null;
+    for (full.ast.cases) |case| {
+        const prong = tree.fullSwitchCase(case).?;
+        if (prong.ast.values.len == 0) return returnedInstead(tree, prong.ast.target_expr, capture);
+    }
+    return null;
+}
+
+/// Whether `handler` names error.Canceled or calls `recancel`: it has
+/// thought of the cancel, whatever it then does.
+fn namesCanceled(tree: *const Ast, handler: Node.Index) bool {
+    for (tree.firstToken(handler)..tree.lastToken(handler) + 1) |token| {
+        const text = tree.tokenSlice(@intCast(token));
+        if (std.mem.eql(u8, text, "Canceled") or std.mem.eql(u8, text, "recancel")) return true;
+    }
+    return false;
+}
+
 /// In `lhs catch |err| handler`, the part of the handler that names
 /// error.Canceled and leaves without it: `if (err == error.Canceled)
 /// return`, or a `switch (err)` prong `error.Canceled => return` or
@@ -380,7 +466,7 @@ fn expectDropped(source: [:0]const u8, expected: []const u8) !void {
     for (findings.items) |finding| {
         const loc = report.location(source, finding.offset);
         const c = finding.detail.cancel;
-        try out.writer.print("{d}:{d} {s} {s}\n", .{ loc.line + 1, loc.column + 1, c.callee, c.handler });
+        try out.writer.print("{d}:{d} {s} {s}{s}\n", .{ loc.line + 1, loc.column + 1, c.callee, if (c.mapped.len > 0) "mapped: " else "", c.handler });
     }
     try expect.findings(@src(), expected, out.written());
 }
@@ -438,6 +524,44 @@ test "not reported: the task's own handler, a call outside its loops, recancel, 
         \\fn rearmed(s: *Sub) void { s.io.sleep(.fromMilliseconds(1), .awake) catch |err| { if (err == error.Canceled) { s.io.recancel(); return; } }; }
         \\fn handed(s: *Sub) !void { s.io.sleep(.fromMilliseconds(1), .awake) catch |err| switch (err) { error.Canceled => |e| return e }; }
         \\fn deferred(s: *Sub) void { defer s.io.sleep(.fromMilliseconds(1), .awake) catch |err| { if (err == error.Canceled) return; }; }
+    , "");
+}
+
+test "a wait whose every error is returned as another, in any function (#238)" {
+    try expectDropped(
+        \\fn pause(io: Io) error{Timeout}!void { io.sleep(.fromSeconds(5), .awake) catch return error.Timeout; }
+        \\fn lookup(io: Io, l: *Lookup) !void { l.done.waitTimeout(io, .{ .duration = l.left }) catch return error.Timeout; }
+        \\fn backoff(io: Io, ms: u64) !void { (wrapped.sleep(io, ms)) catch |_| return error.Unreachable; }
+        \\fn held(s: *S) !void { s.cond.wait(s.io, &s.mutex) catch { s.waiters -= 1; return error.Closed; }; }
+        \\fn each(io: Io, e: *Io.Event, t: Io.Timeout) !void { e.waitTimeout(io, t) catch |err| switch (err) { error.Timeout => return error.Timeout, else => return error.Failed }; }
+        \\test "in a test too" { std.testing.io.sleep(.fromSeconds(1), .awake) catch return error.Slow; }
+    ,
+        \\1:74 io.sleep mapped: return error.Timeout
+        \\2:87 l.done.waitTimeout mapped: return error.Timeout
+        \\3:61 wrapped.sleep mapped: return error.Unreachable
+        \\4:52 s.cond.wait mapped: return error.Closed
+        \\5:75 e.waitTimeout mapped: return error.Failed
+        \\6:70 std.testing.io.sleep mapped: return error.Slow
+        \\
+    );
+}
+
+test "not reported: error.Canceled kept, named or re-armed, a value, no wait, no Io (#238)" {
+    try expectDropped(
+        \\fn kept(io: Io) !void { io.sleep(.fromSeconds(5), .awake) catch return error.Canceled; }
+        \\fn handed(io: Io) !void { io.sleep(.fromSeconds(5), .awake) catch |err| return err; }
+        \\fn named(io: Io, e: *Io.Event, t: Io.Timeout) !void { e.waitTimeout(io, t) catch |err| switch (err) { error.Canceled => |c| return c, else => return error.Timeout }; }
+        \\fn tested(io: Io) !void { io.sleep(.fromSeconds(5), .awake) catch |err| { if (err == error.Canceled) return err; return error.Timeout; }; }
+        \\fn rearmed(io: Io) !void { io.sleep(.fromSeconds(5), .awake) catch { io.recancel(); return error.Timeout; }; }
+        \\fn value(io: Io) bool { io.sleep(.fromSeconds(5), .awake) catch return false; return true; }
+        \\fn bare(io: Io) void { io.sleep(.fromSeconds(5), .awake) catch return; }
+        \\fn onOther(io: Io, mode: Mode) !void { io.sleep(.fromSeconds(5), .awake) catch |err| switch (mode) { .a => log(err), else => return error.Timeout }; }
+        \\fn noElse(io: Io, e: *Io.Event, t: Io.Timeout) !void { e.waitTimeout(io, t) catch |err| switch (err) { error.Timeout => return error.Late }; }
+        \\fn read(io: Io, file: Io.File) !u64 { return file.length(io) catch return error.ReadFailed; }
+        \\fn opened(io: Io, dir: Io.Dir) !Io.File { return dir.openFile(io, "a", .{}) catch return error.Missing; }
+        \\fn thread(c: *std.Thread.Condition, m: *std.Thread.Mutex) !void { c.timedWait(m, 5) catch return error.Timeout; }
+        \\fn noIo(e: *Event) !void { e.wait() catch return error.Timeout; }
+        \\fn awaited(io: Io, g: *Io.Group) !void { g.await(io) catch return error.Failed; }
     , "");
 }
 

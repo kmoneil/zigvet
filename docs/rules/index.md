@@ -42,7 +42,7 @@ One needs no failure: twice, for a release written out under a plain
 
 | Rule | Catches | What goes wrong |
 |---|---|---|
-| [cancel](cancel.md) | In a task's loop, an `Io` call whose error is dropped with `catch {}` or `catch continue` | `error.Canceled` comes once, so the loop runs on and the cancel waits for good |
+| [cancel](cancel.md) | In a task's loop, an `Io` call whose error is dropped with `catch {}` or `catch continue`; anywhere, a wait whose error is returned as another (`io.sleep(...) catch return error.Timeout`) | `error.Canceled` comes once, so the loop runs on and the cancel waits for good; renamed, a canceled task says it timed out and its caller retries |
 | [fit](fit.md) | A number printed into a buffer too small for it, under `catch unreachable` | A panic in Debug and ReleaseSafe, undefined behavior in ReleaseFast |
 
 ## Silently wrong results

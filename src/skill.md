@@ -73,7 +73,7 @@ first trips its rule, and the fix reports nothing.
 - leak: a local released by hand later, with something that can fail in
   between and no `defer`.
 - cancel: an `Io` call's error dropped in a task's loop, so whoever
-  cancels the task waits for good.
+  cancels the task waits for good, or a wait's returned as another error.
 - fit: a number printed into a buffer too small for it, under
   `catch unreachable`.
 - alias: an anonymous initializer assigned to a place its own later
@@ -591,7 +591,9 @@ fn insert(conn: *Conn, rows: []const Row) !void {
 In a task's loop, an `Io` call whose error is dropped with `catch {}` or
 `catch continue`. A task is a function handed to `async` or `concurrent`,
 or one it calls. `error.Canceled` comes once, so the task runs on, and
-whoever cancels it waits for good.
+whoever cancels it waits for good. And in any function, a wait (`sleep`,
+`wait`, `waitTimeout`, `lock`) under `catch return error.X`, which hands
+the cancel on under another name.
 
 ```zig
 fn start(io: std.Io) !std.Io.Future(void) {
