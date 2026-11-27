@@ -1,0 +1,24 @@
+# cancel's guards for a wait whose error is returned as another (#238):
+# each what keeps a report out, and the edit that takes it away. Run with
+# scripts/guardcheck.sh; with any one of them gone, a test must fail.
+file src/cancel.zig
+
+== a wait, not any Io call
+-            if (!isWait(calleeName(tree, callee).?)) continue;
++            if (false and !isWait(calleeName(tree, callee).?)) continue;
+
+== a handler that names error.Canceled or calls recancel
+-            if (namesCanceled(tree, handler)) continue;
++            if (false and namesCanceled(tree, handler)) continue;
+
+== a return of an error written out, not of a value or the error caught
+-        return if (tree.nodeTag(value) == .error_value) value else null;
++        return value;
+
+== a switch on the error caught, not on something else
+-    if (!isName(tree, full.ast.condition, capture orelse return null)) return null;
++    if (capture == null) return null;
+
+== the else prong, where an error no prong names goes
+-        if (prong.ast.values.len == 0) return returnedInstead(tree, prong.ast.target_expr, capture);
++        if (true) return returnedInstead(tree, prong.ast.target_expr, capture);

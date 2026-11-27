@@ -97,6 +97,10 @@ pub const Finding = struct {
         callee: []const u8,
         /// What drops its error, as written: `catch {}`.
         handler: []const u8,
+        /// The error a handler returns in place of whatever the call
+        /// returned, as written: `error.Timeout`. Empty for an error
+        /// dropped (#238).
+        mapped: []const u8 = "",
     };
 
     pub const Fit = struct {
@@ -481,9 +485,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .alias => |a| try w.print("{s} read here, but the initializer is written straight into {s} and has already stored {s}", .{
             a.read, a.target, a.stored,
         }),
-        .cancel => |c| try w.print("`{s}` drops what {s} returns, error.Canceled included, which is delivered once", .{
-            c.handler, c.callee,
-        }),
+        .cancel => |c| try writeCancel(w, c),
         .fit => |f| try writeFit(w, f),
         .refill => |f| try w.print("`{s}` freed here still holds the freed memory if {s} fails before it is refilled", .{
             f.place, f.fails,
@@ -584,6 +586,16 @@ fn writeFreed(w: *Writer, f: Finding.Freed) Writer.Error!void {
     } else {
         try w.print(", which `defer {s}` above frees before the caller gets it", .{f.release});
     }
+}
+
+/// cancel's message: the error dropped, or what it is returned as.
+fn writeCancel(w: *Writer, c: Finding.Cancel) Writer.Error!void {
+    if (c.mapped.len == 0) return w.print("`{s}` drops what {s} returns, error.Canceled included, which is delivered once", .{
+        c.handler, c.callee,
+    });
+    try w.print("whatever {s} returns comes back as {s}, error.Canceled included, so whoever canceled the task is told something else happened, and a caller that stops on error.Canceled carries on", .{
+        c.callee, c.mapped,
+    });
 }
 
 /// twice's message: which deferred call runs as well, and when.
