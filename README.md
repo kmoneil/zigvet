@@ -16,7 +16,7 @@ a buffered writer never flushed, tests that never run. `go vet` is the
 closest analog: not style, which `zig fmt` and the existing linters cover,
 but silent wrongness.
 
-- **Thirty-one rules.** Twenty-four have found real bugs: in Zig's own standard
+- **Thirty-two rules.** Twenty-four have found real bugs: in Zig's own standard
   library and compiler, in well-known open-source Zig projects, and in
   application code.
 - **Syntax only.** No build, no configuration. It reads Zig's standard
@@ -232,6 +232,7 @@ One needs no failure: twice, for a release written out under a plain
 | [narrow](docs/rules/narrow.md) | A `u8` or `u16` offset plus a constant as an index (`sub[offset + 4 ..]`), where the function widens or bounds-checks the offset elsewhere | Computed in the narrow type, it overflows at 0xFFFC though the widened check passed: a panic, or the wrong bytes in ReleaseFast |
 | [counter](docs/rules/counter.md) | A `u8` or `u16` counter stepped while it is less than the `.len` of the slice it walks (`while (level < line.len and line[level] == '#') level += 1`) | The test still holds at 255, so the step overflows on a longer slice: a panic, or in ReleaseFast a loop that may never end |
 | [remainder](docs/rules/remainder.md) | A remainder taken by hand from a floor division of a signed parameter (`t - @divFloor(t, 86400) * 86400`) | The product overflows for a `t` near the type's minimum, where `@mod` gives the answer: a panic, or undefined behavior in ReleaseFast, one odd timestamp away |
+| [parsed](docs/rules/parsed.md) | An `i64`, `isize` or `i128` from `parseInt` in a plain `-` or `+` with nothing bounding it first (`now_s - at`, `at` parsed from a header) | One of the type's two ends overflows whatever the other operand is, and the text's writer picks it: a remote panic, or a wrapped result in ReleaseFast |
 
 ### Portability
 

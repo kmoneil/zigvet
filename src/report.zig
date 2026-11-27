@@ -11,7 +11,7 @@ const Writer = std.Io.Writer;
 
 /// Every rule, by the one lowercase word that names it in reports and in
 /// allow comments.
-pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter, opath, tail, buckets, handed, hollow, remainder };
+pub const Rule = enum { escape, alias, cancel, fit, refill, owner, kept, torn, twice, sweep, unlock, wipe, freed, grow, copy, flush, cached, unrun, leak, hoard, positional, race, wrap, narrow, counter, opath, tail, buckets, handed, hollow, remainder, parsed };
 
 /// Where a value made on the stack leaves the function that made it, or,
 /// for `outer_local`, the turn of the loop that made it.
@@ -71,6 +71,7 @@ pub const Finding = struct {
         handed: Handed,
         hollow: Hollow,
         remainder: Remainder,
+        parsed: Parsed,
         allow: Allow,
     };
 
@@ -406,6 +407,15 @@ pub const Finding = struct {
         divisor: []const u8,
     };
 
+    pub const Parsed = struct {
+        /// The sum or difference, as written: `now_s - at`.
+        expression: []const u8,
+        /// Its parsed operand, as written: `at`.
+        operand: []const u8,
+        /// The type `parseInt` was asked for, as written: `i64`.
+        type: []const u8,
+    };
+
     /// An allow comment that suppresses nothing, and why.
     pub const Allow = union(enum) {
         /// Well formed, but nothing on the line below breaks the rule.
@@ -452,6 +462,7 @@ pub const Finding = struct {
             .handed => .handed,
             .hollow => .hollow,
             .remainder => .remainder,
+            .parsed => .parsed,
             .allow => null,
         };
     }
@@ -578,6 +589,7 @@ pub fn writeMessage(w: *Writer, finding: Finding) Writer.Error!void {
         .buckets => |b| try w.print("`{s}.capacity()` counts buckets, and a hash map fills only its max load of them, 80% by default, before an insert must grow: tested as room for items, it says there is room when there is none, and {s} takes the map's `available` below zero, a panic in Debug and undefined behavior in ReleaseFast", .{ b.map, b.insert }),
         .handed => |h| try w.print("`{s}` freed here if {s}, and again by the errdefer's {s}, since {s} stored it in what {s} frees", .{ h.name, h.fails, h.release, h.callee, h.release }),
         .hollow => |h| try writeHollow(w, h),
+        .parsed => |p| try w.print("`{s}` overflows for `{s}` at either end of {s}, and `{s}` is `parseInt`'s, any value the text holds, with nothing bounding it first: a panic in Debug and ReleaseSafe, a wrapped result in ReleaseFast, for whoever writes the text", .{ p.expression, p.operand, p.type, p.operand }),
         .remainder => |r| try w.print("`{s}` is `@mod({s}, {s})` by hand, and its product overflows for `{s}` near its type's minimum, where `@mod` gives the answer: a panic in Debug and ReleaseSafe, undefined behavior in ReleaseFast", .{ r.expression, r.dividend, r.divisor, r.dividend }),
         .allow => |a| switch (a) {
             .stale => |r| try w.print("suppresses nothing: no {t} finding on the line below it", .{r}),

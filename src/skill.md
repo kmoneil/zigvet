@@ -97,6 +97,8 @@ first trips its rule, and the fix reports nothing.
   `.len` of the slice it walks, which overflows on a longer slice.
 - remainder: a remainder by hand, `x - @divFloor(x, d) * d`, whose
   product overflows near the type's minimum, where `@mod` does not.
+- parsed: an `i64` from `parseInt` in a plain `-` or `+` with nothing
+  bounding it first, which overflows for a value the text's writer picks.
 - opath: a directory opened without `.iterate = true`, then listed,
   synced or given new permissions, which Linux refuses.
 - tail: `@call(.always_tail, ...)` with nothing that tests the backend,
@@ -974,6 +976,32 @@ cannot either, and is not reported.
 ```zig
 fn secondsOfDay(t: i64) i64 {
     return @mod(t, 86400);
+}
+```
+
+### parsed
+
+A `parseInt` result of `i64`, `isize` or `i128` as an operand of a plain
+`-` or `+`, with nothing bounding it first. The text's writer picks the
+value: one at either end of the type overflows, a panic in Debug and
+ReleaseSafe and a wrapped result in ReleaseFast. On a header, a query
+parameter or a file, that is a remote panic.
+
+```zig
+pub fn fresh(timestamp: []const u8, now_s: i64) bool {
+    const at = std.fmt.parseInt(i64, timestamp, 10) catch return false;
+    return @abs(now_s - at) <= 300;
+}
+```
+
+Compare it against bounds first, as here; or parse a narrower type and
+widen it; or say what happens with `-|`, `-%` or `std.math.sub`.
+
+```zig
+pub fn fresh(timestamp: []const u8, now_s: i64) bool {
+    const at = std.fmt.parseInt(i64, timestamp, 10) catch return false;
+    if (at < now_s -| 300 or at > now_s +| 300) return false;
+    return true;
 }
 ```
 
