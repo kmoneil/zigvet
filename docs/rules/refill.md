@@ -73,11 +73,12 @@ call between that is handed what holds it (`self.clear()`), when nothing
 that can fail comes before that call; a place released by a method of
 its own, one of the file's, that stores to what it frees
 (`if (r.rgb) |p| gpa.free(p); r.rgb = null;`), so a second `deinit` finds
-nothing; a local declared empty (`&.{}`, `""` or a `dupe` of one, which
-allocates nothing) and freed before anything fills it, when no loop comes
-round to the release after the refill (a `break` or `return` follows it);
-and a local no defer frees again, since nothing reads it after the
-failure, or whose defer frees only what holds it
+nothing; a local declared empty (`&.{}`, `""`, an array of length 0 such
+as `&[_]u8{}`, or a `dupe` of one, which allocates nothing) and freed
+before anything fills it, when no loop comes round to the release after
+the refill (a `break` or `return` follows it); and a local no defer frees
+again, since nothing reads it after the failure, or whose defer frees
+only what holds it
 (`defer sample.deinit(gpa)` frees the list's buffer, not the lines its
 elements hold).
 

@@ -41,8 +41,10 @@
 //! from one (`const gpa = arena_state.allocator();`); a call that cannot
 //! fail (`appendAssumeCapacity`), or whose `catch` is `unreachable`; a call
 //! to a function of the file that frees that parameter itself when it
-//! fails, with an `errdefer` naming it; and code in a `test` block, where a
-//! failure ends the test.
+//! fails, with an `errdefer` naming it; a `dupe` of a slice known to be
+//! empty (`""`, `&.{}`, `&[_]u8{}`), which allocates nothing and cannot
+//! fail, so it is neither reported nor taken as what fails after one; and
+//! code in a `test` block, where a failure ends the test.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -51,6 +53,7 @@ const Allocator = std.mem.Allocator;
 
 const expect = @import("expect.zig");
 const ints = @import("ints.zig");
+const refill = @import("refill.zig");
 const report = @import("report.zig");
 const Finding = report.Finding;
 const types = @import("types.zig");
@@ -159,7 +162,8 @@ fn holding(tree: *const Ast, element: Node.Index, depth: u8) ?struct { Node.Inde
 }
 
 /// What can fail in `later`, the elements after one: the callee of the
-/// first `try` among them, or what it tries when that is no call.
+/// first `try` among them, or what it tries when that is no call. Not a
+/// dupe of nothing, which cannot fail.
 fn laterFailure(tree: *const Ast, later: []const Node.Index) ?Node.Index {
     if (later.len == 0) return null;
     const first = tree.firstToken(later[0]);
@@ -170,6 +174,7 @@ fn laterFailure(tree: *const Ast, later: []const Node.Index) ?Node.Index {
         if (tree.nodeTag(node) != .@"try") continue;
         const at = tree.nodeMainToken(node);
         if (at < first or at > last) continue;
+        if (refill.knownEmpty(tree, node)) continue;
         if (found) |earlier| if (tree.nodeMainToken(earlier) < at) continue;
         found = node;
     }
@@ -241,6 +246,8 @@ fn making(tree: *const Ast, argument: Node.Index) ?Made {
     };
     // `spawn` is many things' name; a thread's is `Thread.spawn`.
     if (std.mem.eql(u8, name, "spawn") and !std.mem.endsWith(u8, tree.getNodeSource(receiver), "Thread")) return null;
+    // A dupe of nothing makes nothing to release (#251).
+    if (refill.knownEmpty(tree, made)) return null;
     return .{ .callee = call.ast.fn_expr, .allocator = allocator };
 }
 
@@ -415,4 +422,25 @@ test "not reported: an arena, a name that says neither, a call that cannot fail,
         \\const Nav = struct { fn addPane(self: *Nav, gpa: Allocator, view: []u8) !void { errdefer gpa.free(view); try self.panes.append(gpa, view); } };
         \\test "a failure ends the test" { try list.append(gpa, try gpa.dupe(u8, "a")); }
     , "");
+}
+
+test "a dupe of an empty slice makes nothing, and cannot fail (#251)" {
+    try expectOrphans(
+        \\fn seed(gpa: Allocator, queue: *List) !void { try queue.append(gpa, try gpa.dupe(u8, "")); }
+        \\fn none(gpa: Allocator, list: *List) !void { try list.append(gpa, try gpa.dupe(u8, &.{})); }
+        \\fn array(self: *Store) !void { try self.list.append(self.gpa, (try self.gpa.dupe(u8, &[_]u8{}))); }
+        \\fn sized(gpa: Allocator, list: *List) !void { try list.append(gpa, try gpa.dupe(u8, &[0]u8{})); }
+        \\fn first(gpa: Allocator, s: []const u8) !Pair { return .{ .a = try gpa.dupe(u8, ""), .b = try gpa.dupe(u8, s) }; }
+        \\fn after(gpa: Allocator, s: []const u8) !Pair { return .{ .a = try gpa.dupe(u8, s), .b = try gpa.dupe(u8, "") }; }
+        \\fn inside(gpa: Allocator, list: *Entries) !void { try list.append(gpa, .{ .name = try gpa.dupe(u8, ""), .n = 1 }); }
+        \\fn sentinel(gpa: Allocator, list: *List) !void { try list.append(gpa, try gpa.dupeZ(u8, "")); }
+        \\fn one(gpa: Allocator, list: *List) !void { try list.append(gpa, try gpa.dupe(u8, " ")); }
+        \\fn then(gpa: Allocator, s: []const u8) !Pair { return .{ .a = try gpa.dupe(u8, ""), .b = try gpa.dupe(u8, s), .c = try gpa.dupe(u8, s) }; }
+        \\fn zeroed(gpa: Allocator, list: *List) !void { try list.append(gpa, try gpa.dupe(u8, &[_:0]u8{})); }
+    ,
+        \\8:71 gpa.dupeZ <- list.append
+        \\9:66 gpa.dupe <- list.append
+        \\10:90 gpa.dupe <- gpa.dupe in an initializer
+        \\
+    );
 }

@@ -97,6 +97,11 @@ Not reported:
   ownership does;
 - an argument that is no maker by name (`try parse(s)`), and a `spawn`
   that is not `Thread`'s;
+- a `dupe` of a slice known to be empty (`""`, `&.{}`, `&[_]u8{}`): an
+  allocation of 0 bytes returns without calling the allocator, so it makes
+  nothing to release and cannot fail, and in an initializer it is not
+  taken as what fails after an allocation either (a `dupeZ` of one
+  allocates its sentinel, and is reported);
 - an initializer whose one allocation is its last element that can fail,
   and is not handed to a call that can;
 - code in a `test` block, where a failure ends the test.

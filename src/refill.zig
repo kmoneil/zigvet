@@ -39,13 +39,13 @@
 //! (`self.clear()`), when nothing has failed before that call; a place
 //! released by a method of its own, one of the file's, that stores to what
 //! it frees (`r.rgb = null` after the free), so a second `deinit` finds
-//! nothing; a local declared empty (`&.{}`, `""` or a dupe of one) and
-//! freed before anything fills it, when no loop comes round to the release
-//! after the refill; and a local no defer frees again, since nothing reads
-//! it after the failure (Zig rejects a `var` that is never changed, and a
-//! store to a field changes no pointer), nor one whose defer frees only
-//! what holds it (`defer sample.deinit(gpa)` frees the list's buffer, not
-//! what its elements hold).
+//! nothing; a local declared empty (`&.{}`, `""`, `&[_]u8{}` or a dupe of
+//! one) and freed before anything fills it, when no loop comes round to
+//! the release after the refill; and a local no defer frees again, since
+//! nothing reads it after the failure (Zig rejects a `var` that is never
+//! changed, and a store to a field changes no pointer), nor one whose
+//! defer frees only what holds it (`defer sample.deinit(gpa)` frees the
+//! list's buffer, not what its elements hold).
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -301,10 +301,11 @@ const Rule = struct {
 
     /// Whether the place, a bare local, can hold only the empty slice it is
     /// declared with when it is freed, so the release frees nothing: it is
-    /// declared `&.{}`, `""` or a dupe of one, nothing stores to it before
-    /// the release, and no loop between them comes round to the release
-    /// after the refill (the refill is followed by a `break` or `return`).
-    /// `later` is what follows the refill in its block.
+    /// declared `&.{}`, `""`, an array of length 0 or a dupe of one,
+    /// nothing stores to it before the release, and no loop between them
+    /// comes round to the release after the refill (the refill is followed
+    /// by a `break` or `return`). `later` is what follows the refill in its
+    /// block.
     fn emptyWhenFreed(r: *Rule, freed: Release, later: []const Node.Index) Allocator.Error!bool {
         const t = r.tree;
         if (freed.path.parts.len != 0 or freed.path.deref) return false;
@@ -702,10 +703,10 @@ fn localIn(t: *const Ast, statements: []const Node.Index, name: []const u8) ?Ast
 }
 
 /// Whether `node` is a slice known to be empty, which a free of frees
-/// nothing: `&.{}`, `""`, or `x.dupe(T, ...)` of one, with or without a
-/// `try`. A dupe of nothing allocates nothing (`Allocator.alloc` of 0
-/// bytes returns without calling the allocator); a `dupeZ` allocates its
-/// sentinel.
+/// nothing: `&.{}`, `""`, an array of length 0 (`&[_]u8{}`), or
+/// `x.dupe(T, ...)` of one, with or without a `try`. A dupe of nothing
+/// allocates nothing and cannot fail (`Allocator.alloc` of 0 bytes returns
+/// without calling the allocator); a `dupeZ` allocates its sentinel.
 pub fn knownEmpty(t: *const Ast, node: Node.Index) bool {
     var n = node;
     if (t.nodeTag(n) == .@"try") n = t.nodeData(n).node;
@@ -717,9 +718,19 @@ pub fn knownEmpty(t: *const Ast, node: Node.Index) bool {
     return emptyLiteral(t, call.ast.params[1]);
 }
 
+/// Whether `node` is `""`, or the address of an initializer with nothing
+/// in it, of no type (`&.{}`) or an array's (`&[_]u8{}`, `&[0]u8{}`).
 fn emptyLiteral(t: *const Ast, node: Node.Index) bool {
-    const text = t.getNodeSource(node);
-    return std.mem.eql(u8, text, "&.{}") or std.mem.eql(u8, text, "\"\"");
+    switch (t.nodeTag(node)) {
+        .string_literal => return std.mem.eql(u8, t.tokenSlice(t.nodeMainToken(node)), "\"\""),
+        .address_of => {},
+        else => return false,
+    }
+    var buffer: [2]Node.Index = undefined;
+    const init = t.fullStructInit(&buffer, t.nodeData(node).node) orelse return false;
+    if (init.ast.fields.len != 0) return false;
+    const type_expr = init.ast.type_expr.unwrap() orelse return true;
+    return t.nodeTag(type_expr) == .array_type or t.nodeTag(type_expr) == .array_type_sentinel;
 }
 
 /// Whether `node` is a `break` or a `return`, after which the block's
@@ -936,11 +947,15 @@ test "a local declared empty, freed before anything fills it, frees nothing (#25
         \\fn storedFirst(gpa: Allocator, text: []const u8) !void { var s: []u8 = &.{}; defer gpa.free(s); s = try gpa.dupe(u8, "x"); gpa.free(s); s = try gpa.dupe(u8, text); }
         \\fn handed(gpa: Allocator, text: []const u8) !void { var s: []u8 = &.{}; defer gpa.free(s); try fill(gpa, &s); gpa.free(s); s = try gpa.dupe(u8, text); }
         \\fn sentinel(gpa: Allocator, text: []const u8) !void { var s: [:0]u8 = try gpa.dupeZ(u8, ""); defer gpa.free(s); gpa.free(s); s = try gpa.dupeZ(u8, text); }
+        \\fn array(gpa: Allocator, text: []const u8) !void { var s: []const u8 = &[_]u8{}; defer gpa.free(s); gpa.free(s); s = try gpa.dupe(u8, text); }
+        \\fn arrayDupe(gpa: Allocator, text: []const u8) !void { var s: []u8 = try gpa.dupe(u8, &[0]u8{}); defer gpa.free(s); gpa.free(s); s = try gpa.dupe(u8, text); }
+        \\fn notEmpty(gpa: Allocator, text: []const u8) !void { var s: []u8 = try gpa.dupe(u8, &[_]u8{0}); defer gpa.free(s); gpa.free(s); s = try gpa.dupe(u8, text); }
     ,
         \\3:151 buf <- gpa.alloc
         \\4:124 s <- gpa.dupe
         \\5:111 s <- gpa.dupe
         \\6:113 s <- gpa.dupeZ
+        \\9:117 s <- gpa.dupe
         \\
     );
 }

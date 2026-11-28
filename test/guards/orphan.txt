@@ -54,3 +54,11 @@ file src/orphan.zig
 == a thread's spawn, not another's
 -    if (std.mem.eql(u8, name, "spawn") and !std.mem.endsWith(u8, tree.getNodeSource(receiver), "Thread")) return null;
 +    if (false and std.mem.eql(u8, name, "spawn") and !std.mem.endsWith(u8, tree.getNodeSource(receiver), "Thread")) return null;
+
+== a dupe of nothing, which makes nothing to release
+-    if (refill.knownEmpty(tree, made)) return null;
++    if (false and refill.knownEmpty(tree, made)) return null;
+
+== in an initializer, a dupe of nothing, which cannot fail after one
+-        if (refill.knownEmpty(tree, node)) continue;
++        if (false and refill.knownEmpty(tree, node)) continue;
