@@ -73,8 +73,11 @@ call between that is handed what holds it (`self.clear()`), when nothing
 that can fail comes before that call; a place released by a method of
 its own, one of the file's, that stores to what it frees
 (`if (r.rgb) |p| gpa.free(p); r.rgb = null;`), so a second `deinit` finds
-nothing; and a local no defer frees again, since nothing reads it after
-the failure, or whose defer frees only what holds it
+nothing; a local declared empty (`&.{}`, `""` or a `dupe` of one, which
+allocates nothing) and freed before anything fills it, when no loop comes
+round to the release after the refill (a `break` or `return` follows it);
+and a local no defer frees again, since nothing reads it after the
+failure, or whose defer frees only what holds it
 (`defer sample.deinit(gpa)` frees the list's buffer, not the lines its
 elements hold).
 
@@ -85,10 +88,10 @@ application repos, refill reports eleven, all real: two in the standard
 library, four in three application repos, and five in third-party UI code
 one of them keeps for reference.
 
-The local form adds thirteen over the application repos and well-known
+The local form adds twelve over the application repos and well-known
 public Zig projects, all real: a page token freed and copied again in a
 paging loop, a pool or a scene rebuilt in a fuzz harness or a test, a
-polled result freed and fetched again, and a name rebuilt under an
+polled result freed and fetched again, and a slug rebuilt under an
 `errdefer` that frees it.
 
 [All rules](index.md)

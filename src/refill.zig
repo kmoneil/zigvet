@@ -39,8 +39,10 @@
 //! (`self.clear()`), when nothing has failed before that call; a place
 //! released by a method of its own, one of the file's, that stores to what
 //! it frees (`r.rgb = null` after the free), so a second `deinit` finds
-//! nothing; and a local no defer frees again, since nothing reads it
-//! after the failure (Zig rejects a `var` that is never changed, and a
+//! nothing; a local declared empty (`&.{}`, `""` or a dupe of one) and
+//! freed before anything fills it, when no loop comes round to the release
+//! after the refill; and a local no defer frees again, since nothing reads
+//! it after the failure (Zig rejects a `var` that is never changed, and a
 //! store to a field changes no pointer), nor one whose defer frees only
 //! what holds it (`defer sample.deinit(gpa)` frees the list's buffer, not
 //! what its elements hold).
@@ -219,7 +221,7 @@ const Rule = struct {
         const t = r.tree;
         // The first thing that can fail in a statement between.
         var fails: ?Node.Index = null;
-        for (rest) |statement| {
+        for (rest, 0..) |statement, i| {
             var nodes: std.ArrayList(Node.Index) = .empty;
             try r.within(statement, &nodes);
             var refill: ?Node.Index = null;
@@ -236,7 +238,7 @@ const Rule = struct {
             if (refill) |store| {
                 const end = t.lastToken(store);
                 const point = fails orelse try r.failing(nodes.items, end, freed.path) orelse return;
-                if (try r.excused(freed, point)) return;
+                if (try r.excused(freed, point, rest[i + 1 ..])) return;
                 return r.findings.append(r.arena, .{
                     .offset = t.tokenStart(t.firstToken(freed.call)),
                     .hint = hint,
@@ -288,11 +290,74 @@ const Rule = struct {
     }
 
     /// Whether, when the function fails at `point`, the place holds nothing
-    /// freed or nothing reads it: the release stores to what it frees, an
-    /// `errdefer` resets it, or it is a local thrown away.
-    fn excused(r: *Rule, freed: Release, point: Node.Index) Allocator.Error!bool {
+    /// freed or nothing reads it: the release stores to what it frees or
+    /// frees nothing, an `errdefer` resets it, or it is a local thrown
+    /// away. `later` is what follows the refill in its block.
+    fn excused(r: *Rule, freed: Release, point: Node.Index, later: []const Node.Index) Allocator.Error!bool {
         _ = try r.typesOf();
-        return try r.resets(freed) or try r.resetOnError(freed, point) or try r.thrownAway(freed, point);
+        if (try r.resets(freed) or try r.emptyWhenFreed(freed, later)) return true;
+        return try r.resetOnError(freed, point) or try r.thrownAway(freed, point);
+    }
+
+    /// Whether the place, a bare local, can hold only the empty slice it is
+    /// declared with when it is freed, so the release frees nothing: it is
+    /// declared `&.{}`, `""` or a dupe of one, nothing stores to it before
+    /// the release, and no loop between them comes round to the release
+    /// after the refill (the refill is followed by a `break` or `return`).
+    /// `later` is what follows the refill in its block.
+    fn emptyWhenFreed(r: *Rule, freed: Release, later: []const Node.Index) Allocator.Error!bool {
+        const t = r.tree;
+        if (freed.path.parts.len != 0 or freed.path.deref) return false;
+        const local = r.declaration(freed.call, freed.path.root) orelse return false;
+        const init = local.decl.ast.init_node.unwrap() orelse return false;
+        if (!knownEmpty(t, init)) return false;
+        if (local.looped and (later.len == 0 or !leaves(t, later[0]))) return false;
+        return !try r.touched(local.block, freed.path.root, t.lastToken(init), t.firstToken(freed.call));
+    }
+
+    /// The declaration of the local `name` that `node` sees, the block that
+    /// holds it, and whether a loop lies between the two.
+    fn declaration(r: *Rule, node: Node.Index, name: []const u8) ?struct { decl: Ast.full.VarDecl, block: Node.Index, looped: bool } {
+        const t = r.tree;
+        var looped = false;
+        var child = node;
+        var up = r.parents[@backingInt(node)].unwrap();
+        while (up) |parent| : ({
+            child = parent;
+            up = r.parents[@backingInt(parent)].unwrap();
+        }) {
+            switch (t.nodeTag(parent)) {
+                .fn_decl, .test_decl => return null,
+                .for_simple, .@"for", .while_simple, .while_cont, .@"while" => looped = true,
+                else => {},
+            }
+            var buffer: [2]Node.Index = undefined;
+            const statements = t.blockStatements(&buffer, parent) orelse continue;
+            const at = std.mem.indexOfScalar(Node.Index, statements, child) orelse continue;
+            const decl = localIn(t, statements[0..at], name) orelse continue;
+            return .{ .decl = decl, .block = parent, .looped = looped };
+        }
+        return null;
+    }
+
+    /// Whether something in `block` between tokens `from` and `to` stores
+    /// to the local `name` or hands its address on.
+    fn touched(r: *Rule, block: Node.Index, name: []const u8, from: Ast.TokenIndex, to: Ast.TokenIndex) Allocator.Error!bool {
+        const t = r.tree;
+        var nodes: std.ArrayList(Node.Index) = .empty;
+        try r.within(block, &nodes);
+        for (nodes.items) |node| {
+            const target = switch (t.nodeTag(node)) {
+                .assign => t.nodeData(node).node_and_node[0],
+                .address_of => t.nodeData(node).node,
+                else => continue,
+            };
+            const main = t.nodeMainToken(node);
+            if (main <= from or main >= to) continue;
+            const store = try r.path(target) orelse continue;
+            if (std.mem.eql(u8, store.root, name)) return true;
+        }
+        return false;
     }
 
     /// Whether the release is the place's own method, one of the file's,
@@ -626,6 +691,43 @@ fn rootName(t: *const Ast, node: Node.Index) ?[]const u8 {
     };
 }
 
+/// The last of `statements` that declares `name`.
+fn localIn(t: *const Ast, statements: []const Node.Index, name: []const u8) ?Ast.full.VarDecl {
+    var found: ?Ast.full.VarDecl = null;
+    for (statements) |statement| {
+        const decl = t.fullVarDecl(statement) orelse continue;
+        if (std.mem.eql(u8, t.tokenSlice(decl.ast.mut_token + 1), name)) found = decl;
+    }
+    return found;
+}
+
+/// Whether `node` is a slice known to be empty, which a free of frees
+/// nothing: `&.{}`, `""`, or `x.dupe(T, ...)` of one, with or without a
+/// `try`. A dupe of nothing allocates nothing (`Allocator.alloc` of 0
+/// bytes returns without calling the allocator); a `dupeZ` allocates its
+/// sentinel.
+pub fn knownEmpty(t: *const Ast, node: Node.Index) bool {
+    var n = node;
+    if (t.nodeTag(n) == .@"try") n = t.nodeData(n).node;
+    if (emptyLiteral(t, n)) return true;
+    var buffer: [1]Node.Index = undefined;
+    const call = t.fullCall(&buffer, n) orelse return false;
+    if (t.nodeTag(call.ast.fn_expr) != .field_access or call.ast.params.len != 2) return false;
+    if (!std.mem.eql(u8, t.tokenSlice(t.nodeData(call.ast.fn_expr).node_and_token[1]), "dupe")) return false;
+    return emptyLiteral(t, call.ast.params[1]);
+}
+
+fn emptyLiteral(t: *const Ast, node: Node.Index) bool {
+    const text = t.getNodeSource(node);
+    return std.mem.eql(u8, text, "&.{}") or std.mem.eql(u8, text, "\"\"");
+}
+
+/// Whether `node` is a `break` or a `return`, after which the block's
+/// loop does not come round again.
+fn leaves(t: *const Ast, node: Node.Index) bool {
+    return t.nodeTag(node) == .@"break" or t.nodeTag(node) == .@"return";
+}
+
 /// One of the names a `for` or an `if` captures.
 const Capture = struct {
     /// Its place in the list, from 0.
@@ -824,6 +926,23 @@ test "not reported: a local no defer frees again" {
         \\fn otherList(gpa: Allocator, other: List, text: []const u8) !void { var sample: List = .empty; defer for (other.items) |s| gpa.free(s.line); gpa.free(sample.items[0].line); sample.items[0] = .{ .line = try gpa.dupe(u8, text) }; }
         \\fn listOnly(gpa: Allocator, text: []const u8) !void { var sample: List = .empty; defer sample.deinit(gpa); gpa.free(sample.items[0].line); sample.items[0] = .{ .line = try gpa.dupe(u8, text) }; }
     , "");
+}
+
+test "a local declared empty, freed before anything fills it, frees nothing (#252)" {
+    try expectRefills(
+        \\fn once(gpa: Allocator, decls: []const Decl) !void { var s: []const u8 = try gpa.dupe(u8, ""); errdefer gpa.free(s); for (decls) |d| { if (d.main) { gpa.free(s); s = try typeString(gpa, d); break; } } use(s); }
+        \\fn literal(gpa: Allocator, text: []const u8) !void { var s: []u8 = &.{}; defer gpa.free(s); gpa.free(s); s = try gpa.dupe(u8, text); }
+        \\fn grown(gpa: Allocator, items: []const []const u8) !void { var buf: []u8 = &.{}; defer gpa.free(buf); for (items) |item| { if (item.len > buf.len) { gpa.free(buf); buf = try gpa.alloc(u8, item.len); } } }
+        \\fn storedFirst(gpa: Allocator, text: []const u8) !void { var s: []u8 = &.{}; defer gpa.free(s); s = try gpa.dupe(u8, "x"); gpa.free(s); s = try gpa.dupe(u8, text); }
+        \\fn handed(gpa: Allocator, text: []const u8) !void { var s: []u8 = &.{}; defer gpa.free(s); try fill(gpa, &s); gpa.free(s); s = try gpa.dupe(u8, text); }
+        \\fn sentinel(gpa: Allocator, text: []const u8) !void { var s: [:0]u8 = try gpa.dupeZ(u8, ""); defer gpa.free(s); gpa.free(s); s = try gpa.dupeZ(u8, text); }
+    ,
+        \\3:151 buf <- gpa.alloc
+        \\4:124 s <- gpa.dupe
+        \\5:111 s <- gpa.dupe
+        \\6:113 s <- gpa.dupeZ
+        \\
+    );
 }
 
 test "a release of its receiver that resets what it frees leaves nothing freed (#252)" {

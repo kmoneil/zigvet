@@ -30,3 +30,23 @@ file src/refill.zig
 == only the receiver's own method: what x.free(place) stores to is x's
 -        if (t.nodeData(call.ast.fn_expr).node_and_token[0] != freed.place) return false;
 +        if (false and t.nodeData(call.ast.fn_expr).node_and_token[0] != freed.place) return false;
+
+== a local declared empty, which a release frees nothing of
+-        if (!knownEmpty(t, init)) return false;
++        if (false and !knownEmpty(t, init)) return false;
+
+== a dupe of an empty literal, not a dupeZ, which allocates its sentinel
+-    if (!std.mem.eql(u8, t.tokenSlice(t.nodeData(call.ast.fn_expr).node_and_token[1]), "dupe")) return false;
++    if (false and !std.mem.eql(u8, t.tokenSlice(t.nodeData(call.ast.fn_expr).node_and_token[1]), "dupe")) return false;
+
+== declared empty, in a loop that comes round to the release after the refill
+-        if (local.looped and (later.len == 0 or !leaves(t, later[0]))) return false;
++        if (false and local.looped and (later.len == 0 or !leaves(t, later[0]))) return false;
+
+== declared empty, filled before the release
+-        return !try r.touched(local.block, freed.path.root, t.lastToken(init), t.firstToken(freed.call));
++        return !(false and try r.touched(local.block, freed.path.root, t.lastToken(init), t.firstToken(freed.call)));
+
+== declared empty, its address handed on before the release
+-                .address_of => t.nodeData(node).node,
++                .address_of => continue,
