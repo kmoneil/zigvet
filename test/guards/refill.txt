@@ -50,3 +50,11 @@ file src/refill.zig
 == declared empty, its address handed on before the release
 -                .address_of => t.nodeData(node).node,
 +                .address_of => continue,
+
+== an array of length 0, empty as `&.{}` is
+-    return t.nodeTag(type_expr) == .array_type or t.nodeTag(type_expr) == .array_type_sentinel;
++    return false and (t.nodeTag(type_expr) == .array_type or t.nodeTag(type_expr) == .array_type_sentinel);
+
+== an array of length 0 with a sentinel
+-    return t.nodeTag(type_expr) == .array_type or t.nodeTag(type_expr) == .array_type_sentinel;
++    return t.nodeTag(type_expr) == .array_type;
